@@ -96,6 +96,7 @@ class Master:
         self._event_log = DiskEventLog(EXO_EVENT_LOG_DIR / "master")
         self._pending_traces: dict[TaskId, dict[int, list[TraceEventData]]] = {}
         self._expected_ranks: dict[TaskId, set[int]] = {}
+        self._node_disconnected_since: dict[NodeId, datetime] = {}
 
     async def run(self):
         logger.info("Starting Master")
@@ -374,20 +375,31 @@ class Master:
     # These plan loops are the cracks showing in our event sourcing architecture - more things could be commands
     async def _plan(self) -> None:
         while True:
+            now = datetime.now(tz=timezone.utc)
             # kill broken instances
             connected_node_ids = set(self.state.topology.list_nodes())
+
+            for node_id in list(self._node_disconnected_since.keys()):
+                if node_id in connected_node_ids:
+                    del self._node_disconnected_since[node_id]
+
             for instance_id, instance in self.state.instances.items():
                 for node_id in instance.shard_assignments.node_to_runner:
                     if node_id not in connected_node_ids:
-                        await self.event_sender.send(
-                            InstanceDeleted(instance_id=instance_id)
+                        disconnected_at = self._node_disconnected_since.setdefault(
+                            node_id, now
                         )
+                        if now - disconnected_at > timedelta(seconds=300):
+                            await self.event_sender.send(
+                                InstanceDeleted(instance_id=instance_id)
+                            )
                         break
 
             # time out dead nodes
             for node_id, time in self.state.last_seen.items():
-                now = datetime.now(tz=timezone.utc)
-                if now - time > timedelta(seconds=30):
+                if node_id not in connected_node_ids and now - time > timedelta(
+                    seconds=300
+                ):
                     logger.info(f"Manually removing node {node_id} due to inactivity")
                     await self.event_sender.send(NodeTimedOut(node_id=node_id))
 

@@ -162,10 +162,25 @@ class Election:
                 # Delay after connection message for time to symmetrically setup
                 await anyio.sleep(0.2)
                 rest = connection_messages.collect()
+                updates = [first, *rest]
 
                 logger.debug(
                     f"Connection messages received: {first} followed by {rest}"
                 )
+
+                should_trigger_campaign = any(
+                    update.connected for update in updates
+                ) or any(
+                    (not update.connected)
+                    and update.node_id == self.current_session.master_node_id
+                    for update in updates
+                )
+                if not should_trigger_campaign:
+                    logger.debug(
+                        "Ignoring connection updates that do not disconnect current master"
+                    )
+                    continue
+
                 logger.debug(f"Current clock: {self.clock}")
                 # These messages are strictly peer to peer
                 self.clock += 1

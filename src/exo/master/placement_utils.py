@@ -1,4 +1,6 @@
+import contextlib
 from collections.abc import Generator, Mapping
+import ipaddress
 
 from loguru import logger
 
@@ -348,12 +350,41 @@ def _find_ip_prioritised(
     Priority: ethernet > wifi > unknown > thunderbolt
     """
     ips = list(_find_connection_ip(node_id, other_node_id, cycle_digraph))
-    if not ips:
-        return None
+
+    def _is_usable_ip(ip: str) -> bool:
+        try:
+            parsed = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        return not (
+            parsed.is_unspecified
+            or parsed.is_loopback
+            or parsed.is_link_local
+            or parsed.is_multicast
+        )
+
     other_network = node_network.get(other_node_id, NodeNetworkInfo())
+    known_ips = {iface.ip_address for iface in other_network.interfaces}
+
+    if not ips:
+        ips = list(known_ips)
+
+    usable_ips = [ip for ip in ips if _is_usable_ip(ip)]
+    if not usable_ips:
+        return None
+
+    ips = usable_ips
+
     ip_to_type = {
         iface.ip_address: iface.interface_type for iface in other_network.interfaces
     }
+
+    tailscale_net = ipaddress.ip_network("100.64.0.0/10")
+
+    def _is_tailscale_ip(ip: str) -> bool:
+        with contextlib.suppress(ValueError):
+            return ipaddress.ip_address(ip) in tailscale_net
+        return False
 
     # Ring should prioritise fastest connection. As a best-effort, we prioritise TB.
     # TODO: Profile and get actual connection speeds.
@@ -375,7 +406,13 @@ def _find_ip_prioritised(
             "maybe_ethernet": 3,
             "thunderbolt": 4,
         }
-    return min(ips, key=lambda ip: priority.get(ip_to_type.get(ip, "unknown"), 2))
+    return min(
+        ips,
+        key=lambda ip: (
+            0 if _is_tailscale_ip(ip) else 1,
+            priority.get(ip_to_type.get(ip, "unknown"), 2),
+        ),
+    )
 
 
 def get_mlx_ring_hosts_by_node(
