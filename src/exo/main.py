@@ -40,6 +40,7 @@ class Node:
 
     node_id: NodeId
     offline: bool
+    api_port: int
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     @classmethod
@@ -94,6 +95,7 @@ class Node:
         if not args.no_worker:
             worker = Worker(
                 node_id,
+                api_port=args.api_port,
                 event_receiver=event_router.receiver(),
                 event_sender=event_router.sender(),
                 command_sender=router.sender(topics.COMMANDS),
@@ -138,6 +140,7 @@ class Node:
             api,
             node_id,
             args.offline,
+            args.api_port,
         )
 
     async def run(self):
@@ -244,6 +247,7 @@ class Node:
                         # TODO: add profiling etc to resource monitor
                         self.worker = Worker(
                             self.node_id,
+                            api_port=self.api_port,
                             event_receiver=self.event_router.receiver(),
                             event_sender=self.event_router.sender(),
                             command_sender=self.router.sender(topics.COMMANDS),

@@ -1,5 +1,6 @@
 from collections import defaultdict
 from collections.abc import AsyncGenerator, Mapping
+import ipaddress
 
 import anyio
 import httpx
@@ -19,13 +20,14 @@ async def check_reachability(
     expected_node_id: NodeId,
     out: dict[NodeId, set[str]],
     client: httpx.AsyncClient,
+    port: int,
 ) -> None:
     """Check if a node is reachable at the given IP and verify its identity."""
     if ":" in target_ip:
         # TODO: use real IpAddress types
-        url = f"http://[{target_ip}]:52415/node_id"
+        url = f"http://[{target_ip}]:{port}/node_id"
     else:
-        url = f"http://{target_ip}:52415/node_id"
+        url = f"http://{target_ip}:{port}/node_id"
 
     remote_node_id = None
     last_error = None
@@ -82,6 +84,7 @@ async def check_reachable(
     topology: Topology,
     self_node_id: NodeId,
     node_network: Mapping[NodeId, NodeNetworkInfo],
+    port: int,
 ) -> AsyncGenerator[tuple[str, NodeId], None]:
     """Yield (ip, node_id) pairs as reachability probes complete."""
 
@@ -103,9 +106,16 @@ async def check_reachable(
     ) -> None:
         async with send:
             out: defaultdict[NodeId, set[str]] = defaultdict(set)
-            await check_reachability(target_ip, expected_node_id, out, client)
+            await check_reachability(target_ip, expected_node_id, out, client, port)
             if expected_node_id in out:
                 await send.send((target_ip, expected_node_id))
+
+    def _is_probeable_ip(ip: str) -> bool:
+        try:
+            parsed = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        return not parsed.is_loopback and not parsed.is_unspecified
 
     async with (
         httpx.AsyncClient(timeout=timeout, limits=limits, verify=False) as client,
@@ -116,7 +126,13 @@ async def check_reachable(
                 continue
             if node_id == self_node_id:
                 continue
+            seen_ips: set[str] = set()
             for iface in node_network[node_id].interfaces:
+                if iface.ip_address in seen_ips:
+                    continue
+                if not _is_probeable_ip(iface.ip_address):
+                    continue
+                seen_ips.add(iface.ip_address)
                 tg.start_soon(_probe, iface.ip_address, node_id, client, send.clone())
         send.close()
 

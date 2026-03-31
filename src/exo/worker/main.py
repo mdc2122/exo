@@ -59,6 +59,7 @@ class Worker:
         self,
         node_id: NodeId,
         *,
+        api_port: int,
         event_receiver: Receiver[IndexedEvent],
         event_sender: Sender[Event],
         # This is for requesting updates. It doesn't need to be a general command sender right now,
@@ -67,6 +68,7 @@ class Worker:
         download_command_sender: Sender[ForwarderDownloadCommand],
     ):
         self.node_id: NodeId = node_id
+        self.api_port = api_port
         self.event_receiver = event_receiver
         self.event_sender = event_sender
         self.command_sender = command_sender
@@ -85,6 +87,7 @@ class Worker:
 
         self._download_backoff: KeyedBackoff[ModelId] = KeyedBackoff(base=0.5, cap=10.0)
         self._stopped: anyio.Event = anyio.Event()
+        self._connectivity_miss_streak: dict[tuple[NodeId, str], int] = {}
 
     async def run(self):
         logger.info("Starting Worker")
@@ -361,16 +364,17 @@ class Worker:
                 self.state.topology,
                 self.node_id,
                 self.state.node_network,
+                self.api_port,
             ):
                 if ip in conns[nid]:
                     continue
                 conns[nid].add(ip)
                 edge = SocketConnection(
                     # nonsense multiaddr
-                    sink_multiaddr=Multiaddr(address=f"/ip4/{ip}/tcp/52415")
+                    sink_multiaddr=Multiaddr(address=f"/ip4/{ip}/tcp/{self.api_port}")
                     if "." in ip
                     # nonsense multiaddr
-                    else Multiaddr(address=f"/ip6/{ip}/tcp/52415"),
+                    else Multiaddr(address=f"/ip6/{ip}/tcp/{self.api_port}"),
                 )
                 if edge not in edges:
                     logger.debug(f"ping discovered {edge=}")
@@ -384,13 +388,23 @@ class Worker:
                 if not isinstance(conn.edge, SocketConnection):
                     continue
                 # ignore mDNS discovered connections
-                if conn.edge.sink_multiaddr.port != 52415:
+                if conn.edge.sink_multiaddr.port != self.api_port:
                     continue
                 if (
                     conn.sink not in conns
                     or conn.edge.sink_multiaddr.ip_address not in conns[conn.sink]
                 ):
-                    logger.debug(f"ping failed to discover {conn=}")
-                    await self.event_sender.send(TopologyEdgeDeleted(conn=conn))
+                    miss_key = (conn.sink, conn.edge.sink_multiaddr.ip_address)
+                    miss_streak = self._connectivity_miss_streak.get(miss_key, 0) + 1
+                    self._connectivity_miss_streak[miss_key] = miss_streak
+                    logger.debug(
+                        f"ping failed to discover {conn=} miss_streak={miss_streak}"
+                    )
+                    if miss_streak >= 60:
+                        await self.event_sender.send(TopologyEdgeDeleted(conn=conn))
+                        self._connectivity_miss_streak.pop(miss_key, None)
+                else:
+                    miss_key = (conn.sink, conn.edge.sink_multiaddr.ip_address)
+                    self._connectivity_miss_streak.pop(miss_key, None)
 
             await anyio.sleep(10)
