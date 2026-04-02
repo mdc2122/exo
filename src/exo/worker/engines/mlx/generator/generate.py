@@ -512,6 +512,7 @@ def mlx_generate(
                 model=model,
                 model_id=task.model,
                 task_params=task,
+                videos=task.videos,
             )
         except Exception:
             logger.opt(exception=True).warning(

@@ -64,6 +64,121 @@ def decode_base64_image(b64_data: str) -> Image.Image:
     return img.convert("RGB")
 
 
+def extract_video_frames(
+    video_data: str,
+    sample_fps: float = 2.0,
+    temporal_chunk_size: int = 4,
+) -> list[list[Image.Image]]:
+    import av
+
+    raw = base64.b64decode(video_data)
+    container = av.open(io.BytesIO(raw))
+    stream = container.streams.video[0]
+    total_frames = stream.frames or 0
+    video_fps = float(stream.average_rate or 30)
+
+    effective_fps = min(sample_fps, video_fps)
+    sampled_count = max(round(total_frames * effective_fps / video_fps), 1)
+    indices = (
+        np.linspace(0, total_frames - 1, sampled_count).round().astype(int).tolist()
+    )
+    index_set = set(indices)
+
+    all_frames: list[Image.Image] = []
+    for i, frame in enumerate(container.decode(video=0)):
+        if i in index_set:
+            all_frames.append(frame.to_image().convert("RGB"))
+        if len(all_frames) >= len(indices):
+            break
+    container.close()
+
+    chunks: list[list[Image.Image]] = []
+    for start in range(0, len(all_frames), temporal_chunk_size):
+        chunk = all_frames[start : start + temporal_chunk_size]
+        while len(chunk) < temporal_chunk_size:
+            chunk.append(chunk[-1])
+        chunks.append(chunk)
+
+    return chunks
+
+
+def preprocess_video_chunk(
+    frames: list[Image.Image],
+    patch_size: int = 14,
+    merge_kernel_size: int = 2,
+    in_patch_limit_each_frame: int = 4096,
+) -> dict[str, np.ndarray]:
+    import math
+
+    T = len(frames)
+    w, h = frames[0].size
+
+    factor = merge_kernel_size * patch_size
+    s1 = math.sqrt(
+        in_patch_limit_each_frame
+        / (max(1.0, w // patch_size) * max(1.0, h // patch_size))
+    )
+    scale = min(1.0, s1)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    pad_w = (factor - new_w % factor) % factor
+    pad_h = (factor - new_h % factor) % factor
+
+    pixel_arrays = []
+    for frame in frames:
+        arr = np.array(
+            frame.resize((new_w, new_h), Image.Resampling.BICUBIC), dtype=np.float32
+        )
+        if pad_h > 0 or pad_w > 0:
+            arr = np.pad(
+                arr,
+                ((0, pad_h), (0, pad_w), (0, 0)),
+                mode="constant",
+                constant_values=0,
+            )
+        arr = (arr / 255.0 - 0.5) / 0.5
+        pixel_arrays.append(arr)
+
+    pixel_values = np.stack(pixel_arrays, axis=0)
+
+    _, H, W, C = pixel_values.shape
+    patches = pixel_values.reshape(
+        T, H // patch_size, patch_size, W // patch_size, patch_size, C
+    )
+    patches = patches.transpose(0, 1, 3, 5, 2, 4)
+    patches = patches.reshape(-1, C, patch_size, patch_size)
+    grid_thw = np.array([T, H // patch_size, W // patch_size])
+
+    return {"pixel_values": patches, "grid_thw": grid_thw}
+
+
+def make_video_chunk_prompts(
+    num_chunks: int,
+    fps: float,
+    chunk_size: int,
+) -> list[str]:
+    prompts = []
+    for i in range(num_chunks):
+        timestamp_sec = i * chunk_size / fps
+        hours = int(timestamp_sec // 3600)
+        minutes = int((timestamp_sec % 3600) // 60)
+        seconds = int(timestamp_sec % 60)
+        millis = int((timestamp_sec % 1) * 1000)
+        ts = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+        prompts.append(
+            f"{ts}<|media_begin|>video<|media_content|><|media_pad|><|media_end|>"
+        )
+    return prompts
+
+
+def expand_video_placeholder(text: str, chunk_prompts: list[str]) -> str:
+    placeholder = "<|kimi_k25_video_placeholder|>"
+    if placeholder not in text:
+        return text
+    replacement = "".join(chunk_prompts)
+    return text.replace(placeholder, replacement, 1)
+
+
 def _format_vlm_messages(
     messages: list[dict[str, Any]],
     model_type: str,
@@ -78,8 +193,14 @@ def _format_vlm_messages(
         parts: list[dict[str, Any]] = content  # type: ignore
         text_parts = [str(p["text"]) for p in parts if p.get("type") == "text"]  # type: ignore
         n_images = sum(1 for p in parts if p.get("type") in ("image", "image_url"))
+        n_videos = sum(1 for p in parts if p.get("type") in ("video", "video_url"))
+        text_with_placeholders = " ".join(text_parts)
+        if n_videos > 0:
+            text_with_placeholders += " " + " ".join(
+                "<|kimi_k25_video_placeholder|>" for _ in range(n_videos)
+            )
         result: dict[str, Any] = get_message_json(
-            model_type, " ".join(text_parts), role, num_images=n_images
+            model_type, text_with_placeholders, role, num_images=n_images
         )
         formatted.append(result)
     return formatted
@@ -382,6 +503,45 @@ class VisionEncoder:
 
         return image_features, n_tokens_per_image
 
+    def encode_video_chunk(
+        self, pixel_values: mx.array, grid_thw: mx.array
+    ) -> tuple[mx.array, list[int]]:
+        self.ensure_loaded()
+        assert self._vision_tower is not None
+
+        from exo.worker.engines.mlx.kimi_vl_temporal import (
+            VisionModel as TemporalVisionModel,
+        )
+
+        if not hasattr(self, "_temporal_tower"):
+            self._temporal_tower = TemporalVisionModel(self._vision_tower.config)  # type: ignore
+            self._temporal_tower.load_weights(  # type: ignore
+                [(k, v) for k, v in self._vision_tower.parameters().items()]  # type: ignore
+            )
+            mx.eval(self._temporal_tower.parameters())
+
+        if self._needs_nhwc:
+            pixel_values = pixel_values.transpose(0, 2, 3, 1)
+
+        hidden_states_list: list[mx.array] = self._temporal_tower(
+            pixel_values, grid_thw
+        )  # type: ignore
+
+        if self._projector is not None:
+            features_list = [self._projector(hs) for hs in hidden_states_list]  # type: ignore
+        else:
+            features_list = hidden_states_list
+
+        all_features = mx.concatenate(
+            [f.reshape(-1, f.shape[-1]) for f in features_list], axis=0
+        )
+        n_tokens_per_chunk = [
+            f.shape[0] * f.shape[1] if f.ndim == 3 else f.shape[0]
+            for f in features_list
+        ]
+
+        return all_features, n_tokens_per_chunk
+
 
 def get_inner_model(model: nn.Module) -> Any:  # type: ignore
     for candidate in (
@@ -497,23 +657,62 @@ class VisionProcessor:
         tokenizer: TokenizerWrapper,
         model: Model,
         task_params: TextGenerationTaskParams,
+        videos: list[str] | None = None,
     ) -> VisionResult:
-        logger.info(f"Vision pipeline: {len(images)} image(s)")
+        videos = videos or []
+        logger.info(f"Vision pipeline: {len(images)} image(s), {len(videos)} video(s)")
 
-        cache_key = self._image_cache_key(images)
-        cached = self._feature_cache.pop(cache_key, None)
-        if cached is not None:
-            self._feature_cache[cache_key] = cached
-            image_features, n_tokens_per_image = cached
+        all_features_parts: list[mx.array] = []
+        all_n_tokens: list[int] = []
+
+        if images:
+            cache_key = self._image_cache_key(images)
+            cached = self._feature_cache.pop(cache_key, None)
+            if cached is not None:
+                self._feature_cache[cache_key] = cached
+                image_features, n_tokens_per_image = cached
+            else:
+                image_features, n_tokens_per_image = self._encoder.encode_images(images)
+                self._feature_cache[cache_key] = (image_features, n_tokens_per_image)
+                while len(self._feature_cache) > self._feature_cache_max:
+                    del self._feature_cache[next(iter(self._feature_cache))]
+            all_features_parts.append(image_features)
+            all_n_tokens.extend(n_tokens_per_image)
+            logger.info(
+                f"Image features: {image_features.shape} "
+                f"({image_features.shape[0]} tokens, per-image: {n_tokens_per_image})"
+            )
+
+        video_chunk_prompts: list[str] = []
+        if videos:
+            sample_fps = self.vision_config.sample_fps
+            chunk_size = self.vision_config.temporal_merge_kernel_size
+            for video_b64 in videos:
+                chunks = extract_video_frames(
+                    video_b64, sample_fps=sample_fps, temporal_chunk_size=chunk_size
+                )
+                logger.info(
+                    f"Video extracted: {len(chunks)} chunks of {chunk_size} frames"
+                )
+                prompts = make_video_chunk_prompts(len(chunks), sample_fps, chunk_size)
+                video_chunk_prompts.extend(prompts)
+                for chunk in chunks:
+                    preprocessed = preprocess_video_chunk(
+                        chunk,
+                        in_patch_limit_each_frame=self.vision_config.in_patch_limit_each_frame,
+                    )
+                    pixel_values = mx.array(preprocessed["pixel_values"])
+                    grid_thw = mx.array(preprocessed["grid_thw"]).reshape(1, 3)
+                    chunk_features, chunk_n_tokens = self._encoder.encode_video_chunk(
+                        pixel_values, grid_thw
+                    )
+                    all_features_parts.append(chunk_features)
+                    all_n_tokens.extend(chunk_n_tokens)
+
+        if all_features_parts:
+            combined_features = mx.concatenate(all_features_parts, axis=0)
         else:
-            image_features, n_tokens_per_image = self._encoder.encode_images(images)
-            self._feature_cache[cache_key] = (image_features, n_tokens_per_image)
-            while len(self._feature_cache) > self._feature_cache_max:
-                del self._feature_cache[next(iter(self._feature_cache))]
-        logger.info(
-            f"Vision features: {image_features.shape} "
-            f"({image_features.shape[0]} tokens, per-image: {n_tokens_per_image})"
-        )
+            combined_features = mx.zeros((0, 1))
 
         image_token = self.vision_config.image_token
         if image_token is None:
@@ -526,35 +725,39 @@ class VisionProcessor:
         prompt = build_vision_prompt(
             tokenizer,
             formatted_messages,
-            n_tokens_per_image,
+            all_n_tokens,
             image_token,
             task_params,
         )
 
+        if video_chunk_prompts:
+            prompt = expand_video_placeholder(prompt, video_chunk_prompts)
+
         logger.info(
-            f"Expanded prompt has {prompt.count(image_token)} image_token occurrences, total len={len(prompt)}"
+            f"Expanded prompt has {prompt.count(image_token)} media_token occurrences, total len={len(prompt)}"
         )
 
         prompt_tokens: mx.array = encode_prompt(tokenizer, prompt)
         prompt_tokens = fix_unmatched_think_end_tokens(prompt_tokens, tokenizer)
-        n_image_tokens = int(
+        n_media_tokens = int(
             mx.sum(mx.equal(prompt_tokens, self.vision_config.image_token_id)).item()
         )
         logger.info(
-            f"Encoded prompt: {len(prompt_tokens)} tokens, {n_image_tokens} image pad tokens"
+            f"Encoded prompt: {len(prompt_tokens)} tokens, {n_media_tokens} media pad tokens"
         )
 
         embeddings = create_vision_embeddings(
             model,
             prompt_tokens,
-            image_features,
+            combined_features,
             self.vision_config.image_token_id,
         )
         mx.eval(embeddings)
 
+        all_media = images + videos
         media_regions = _find_media_regions(
             prompt_tokens,
-            images,
+            all_media,
             self.vision_config.image_token_id,
         )
 
@@ -574,19 +777,19 @@ def prepare_vision(
     model: Model,
     model_id: ModelId,
     task_params: TextGenerationTaskParams,
+    videos: list[str] | None = None,
 ) -> VisionResult | None:
-    if not images:
+    if not images and not videos:
         return None
     if chat_template_messages is None:
-        logger.warning(
-            "Vision request missing chat_template_messages — ignoring images"
-        )
+        logger.warning("Vision request missing chat_template_messages — ignoring media")
         return None
 
     return vision_processor.process(
-        images=images,
+        images=images or [],
         chat_template_messages=chat_template_messages,
         tokenizer=tokenizer,
         model=model,
         task_params=task_params,
+        videos=videos or [],
     )

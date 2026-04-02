@@ -137,6 +137,7 @@ class ExoBatchGenerator:
                     model=self.model,
                     model_id=task_params.model,
                     task_params=task_params,
+                    videos=task_params.videos,
                 )
             except Exception:
                 logger.opt(exception=True).warning(

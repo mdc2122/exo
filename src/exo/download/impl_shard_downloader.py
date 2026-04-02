@@ -7,21 +7,14 @@ from typing import AsyncIterator, Callable
 from loguru import logger
 
 from exo.download.download_utils import (
+    build_companion_vision_shard,
     RepoDownloadProgress,
     download_shard,
+    resolve_existing_model,
 )
 from exo.download.shard_downloader import ShardDownloader
-from exo.shared.models.model_cards import (
-    ModelCard,
-    ModelId,
-    ModelTask,
-    get_model_cards,
-)
-from exo.shared.types.memory import Memory
-from exo.shared.types.worker.shards import (
-    PipelineShardMetadata,
-    ShardMetadata,
-)
+from exo.shared.models.model_cards import ModelCard, ModelId, get_model_cards
+from exo.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 
 
 def exo_shard_downloader(
@@ -116,38 +109,20 @@ class ResumableShardDownloader(ShardDownloader):
         self, shard: ShardMetadata, config_only: bool = False
     ) -> Path:
         allow_patterns = ["config.json"] if config_only else None
-
-        target_dir, _ = await download_shard(
-            shard,
-            self.on_progress_wrapper,
-            max_parallel_downloads=self.max_parallel_downloads,
-            allow_patterns=allow_patterns,
-            skip_internet=self.offline,
-        )
-
-        if (
-            not config_only
-            and not self.offline
-            and shard.model_card.vision
-            and shard.model_card.vision.weights_repo != str(shard.model_card.model_id)
-        ):
-            vision_repo = shard.model_card.vision.weights_repo
-            vision_card = ModelCard(
-                model_id=ModelId(vision_repo),
-                storage_size=Memory.from_bytes(0),
-                n_layers=1,
-                hidden_size=1,
-                supports_tensor=False,
-                tasks=[ModelTask.TextGeneration],
+        existing_main = resolve_existing_model(shard.model_card.model_id)
+        if existing_main is not None and not config_only:
+            target_dir = existing_main
+        else:
+            target_dir, _ = await download_shard(
+                shard,
+                self.on_progress_wrapper,
+                max_parallel_downloads=self.max_parallel_downloads,
+                allow_patterns=allow_patterns,
+                skip_internet=self.offline,
             )
-            vision_shard = PipelineShardMetadata(
-                model_card=vision_card,
-                device_rank=0,
-                world_size=1,
-                start_layer=0,
-                end_layer=1,
-                n_layers=1,
-            )
+
+        vision_shard = build_companion_vision_shard(shard)
+        if not config_only and not self.offline and vision_shard is not None:
             await download_shard(
                 vision_shard,
                 self.on_progress_wrapper,
@@ -201,4 +176,20 @@ class ResumableShardDownloader(ShardDownloader):
             skip_download=True,
             skip_internet=self.offline,
         )
-        return progress
+
+        vision_shard = build_companion_vision_shard(shard)
+        if vision_shard is None:
+            return progress
+
+        _, vision_progress = await download_shard(
+            vision_shard,
+            self.on_progress_wrapper,
+            allow_patterns=["*.safetensors", "config.json"],
+            skip_download=True,
+            skip_internet=self.offline,
+        )
+
+        if progress.status == "complete" and vision_progress.status == "complete":
+            return progress
+
+        return vision_progress if vision_progress.status != "complete" else progress

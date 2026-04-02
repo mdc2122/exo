@@ -13,6 +13,7 @@ from exo.download.download_utils import (
     is_read_only_model_dir,
     map_repo_download_progress_to_download_progress_data,
     resolve_existing_model,
+    shard_has_all_required_local_repos,
 )
 from exo.download.shard_downloader import ShardDownloader
 from exo.shared.constants import EXO_DEFAULT_MODELS_DIR, EXO_MODELS_READ_ONLY_DIRS
@@ -182,7 +183,9 @@ class DownloadCoordinator:
 
         # Check all model directories for pre-existing complete models
         found_path = await to_thread.run_sync(resolve_existing_model, model_id)
-        if found_path is not None:
+        if found_path is not None and await to_thread.run_sync(
+            shard_has_all_required_local_repos, shard
+        ):
             logger.info(f"DownloadCoordinator: Model {model_id} found at {found_path}")
             completed = self._completed_from_path(
                 shard, found_path, shard.model_card.storage_size
@@ -207,7 +210,9 @@ class DownloadCoordinator:
             await self.shard_downloader.get_shard_download_status_for_shard(shard)
         )
 
-        if initial_progress.status == "complete":
+        if initial_progress.status == "complete" and await to_thread.run_sync(
+            shard_has_all_required_local_repos, shard
+        ):
             found = await to_thread.run_sync(resolve_existing_model, model_id)
             if found is not None:
                 completed = self._completed_from_path(

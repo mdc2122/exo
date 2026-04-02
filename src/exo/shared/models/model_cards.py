@@ -119,6 +119,9 @@ class VisionCardConfig(CamelCaseModel):
     weights_repo: str = ""
     image_token: str | None = None
     processor_repo: str | None = None
+    temporal_merge_kernel_size: int = 1
+    sample_fps: float = 2.0
+    in_patch_limit_each_frame: int = 4096
 
 
 class ModelCard(CamelCaseModel):

@@ -10,6 +10,7 @@ from .api import ChatCompletionContentPart as ChatCompletionContentPart
 from .api import ChatCompletionMessage as ChatCompletionMessage
 from .api import ChatCompletionMessageImageUrl as ChatCompletionMessageImageUrl
 from .api import ChatCompletionMessageText as ChatCompletionMessageText
+from .api import ChatCompletionMessageVideoUrl as ChatCompletionMessageVideoUrl
 from .api import ChatCompletionRequest as ChatCompletionRequest
 from .api import ChatCompletionResponse as ChatCompletionResponse
 from .api import CompletionTokensDetails as CompletionTokensDetails

@@ -19,3 +19,6 @@ image_token_id = 163605
 model_type = "kimi_vl"
 weights_repo = "davehind/Kimi-K2.5-vision"
 processor_repo = "moonshotai/Kimi-K2.5"
+temporal_merge_kernel_size = 4
+sample_fps = 2.0
+in_patch_limit_each_frame = 4096

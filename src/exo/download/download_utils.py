@@ -35,7 +35,7 @@ from exo.shared.constants import (
     EXO_MODELS_DIRS,
     EXO_MODELS_READ_ONLY_DIRS,
 )
-from exo.shared.models.model_cards import ModelTask
+from exo.shared.models.model_cards import ModelCard, ModelTask
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.worker.downloads import (
@@ -45,7 +45,7 @@ from exo.shared.types.worker.downloads import (
     RepoDownloadProgress,
     RepoFileDownloadProgress,
 )
-from exo.shared.types.worker.shards import ShardMetadata
+from exo.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 
 
 class HuggingFaceAuthenticationError(Exception):
@@ -143,6 +143,58 @@ def build_model_path(model_id: ModelId) -> Path:
     if found is not None:
         return found
     return EXO_DEFAULT_MODELS_DIR / model_id.normalize()
+
+
+def build_companion_vision_shard(
+    shard: ShardMetadata,
+) -> PipelineShardMetadata | None:
+    vision = shard.model_card.vision
+    if vision is None or vision.weights_repo == str(shard.model_card.model_id):
+        return None
+
+    vision_card = ModelCard(
+        model_id=ModelId(vision.weights_repo),
+        storage_size=Memory.from_bytes(0),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+    return PipelineShardMetadata(
+        model_card=vision_card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
+
+
+def resolve_existing_companion_vision_repo(model_id: ModelId) -> Path | None:
+    normalized = model_id.normalize()
+    for search_dir in (*EXO_MODELS_READ_ONLY_DIRS, *EXO_MODELS_DIRS):
+        candidate = search_dir / normalized
+        if not candidate.is_dir():
+            continue
+        has_config = (candidate / "config.json").exists()
+        has_weights = any(candidate.glob("*.safetensors"))
+        if has_config and has_weights:
+            return candidate
+    return None
+
+
+def shard_has_all_required_local_repos(shard: ShardMetadata) -> bool:
+    if resolve_existing_model(shard.model_card.model_id) is None:
+        return False
+
+    vision_shard = build_companion_vision_shard(shard)
+    if vision_shard is None:
+        return True
+
+    return (
+        resolve_existing_companion_vision_repo(vision_shard.model_card.model_id)
+        is not None
+    )
 
 
 def select_download_dir(required_bytes: int) -> Path:

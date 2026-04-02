@@ -7,7 +7,11 @@ from anyio import fail_after, to_thread
 from loguru import logger
 
 from exo.api.types import ImageEditsTaskParams
-from exo.download.download_utils import is_read_only_model_dir, resolve_existing_model
+from exo.download.download_utils import (
+    is_read_only_model_dir,
+    resolve_existing_model,
+    shard_has_all_required_local_repos,
+)
 from exo.shared.apply import apply
 from exo.shared.models.model_cards import ModelId, add_to_card_cache, delete_custom_card
 from exo.shared.types.chunks import InputImageChunk
@@ -190,7 +194,9 @@ class Worker:
                     found_path = await to_thread.run_sync(
                         resolve_existing_model, model_id
                     )
-                    if found_path is not None:
+                    if found_path is not None and await to_thread.run_sync(
+                        shard_has_all_required_local_repos, shard
+                    ):
                         logger.info(f"Model {model_id} found at {found_path}")
                         await self.event_sender.send(
                             NodeDownloadProgress(

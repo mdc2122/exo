@@ -11,6 +11,7 @@ from exo.api.types import (
     ChatCompletionMessage,
     ChatCompletionMessageImageUrl,
     ChatCompletionMessageText,
+    ChatCompletionMessageVideoUrl,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ErrorInfo,
@@ -55,6 +56,17 @@ async def fetch_image_url(url: str) -> str:
         return base64.b64encode(data).decode("ascii")
 
 
+async def fetch_video_url(url: str) -> str:
+    headers = {"User-Agent": "exo/1.0"}
+    async with (
+        create_http_session(timeout_profile="long") as session,
+        session.get(url, headers=headers) as resp,
+    ):
+        resp.raise_for_status()
+        data = await resp.read()
+        return base64.b64encode(data).decode("ascii")
+
+
 async def chat_request_to_text_generation(
     request: ChatCompletionRequest,
 ) -> TextGenerationTaskParams:
@@ -62,11 +74,13 @@ async def chat_request_to_text_generation(
     input_messages: list[InputMessage] = []
     chat_template_messages: list[dict[str, Any]] = []
     images: list[str] = []
+    videos: list[str] = []
 
     for msg in request.messages:
         # Normalize content to string
         content: str
         has_images = False
+        has_videos = False
         if msg.content is None:
             content = ""
         elif isinstance(msg.content, str):
@@ -82,11 +96,28 @@ async def chat_request_to_text_generation(
                     images.append(extract_base64_from_data_url(url))
                 has_images = True
             content = ""
+        elif isinstance(msg.content, ChatCompletionMessageVideoUrl):
+            url = msg.content.video_url.get("url", "")
+            if url:
+                if url.startswith(("http://", "https://")):
+                    videos.append(await fetch_video_url(url))
+                else:
+                    videos.append(extract_base64_from_data_url(url))
+                has_videos = True
+            content = ""
         else:
             text_parts: list[str] = []
             for part in msg.content:
                 if isinstance(part, ChatCompletionMessageText):
                     text_parts.append(part.text)
+                elif isinstance(part, ChatCompletionMessageVideoUrl):
+                    url = part.video_url.get("url", "")
+                    if url:
+                        if url.startswith(("http://", "https://")):
+                            videos.append(await fetch_video_url(url))
+                        else:
+                            videos.append(extract_base64_from_data_url(url))
+                        has_videos = True
                 else:
                     url = part.image_url.get("url", "")
                     if url:
@@ -119,12 +150,14 @@ async def chat_request_to_text_generation(
 
             # Build full message dict for chat template (preserves tool_calls etc.)
             # Normalize content for model_dump
-            if has_images:
+            if has_images or has_videos:
                 multimodal_content: list[dict[str, Any]] = []
                 assert isinstance(msg.content, list)
                 for part in msg.content:
                     if isinstance(part, ChatCompletionMessageText):
                         multimodal_content.append({"type": "text", "text": part.text})
+                    elif isinstance(part, ChatCompletionMessageVideoUrl):
+                        multimodal_content.append({"type": "video_url"})
                     else:
                         multimodal_content.append({"type": "image"})
                 chat_template_messages.append(
@@ -165,6 +198,7 @@ async def chat_request_to_text_generation(
         repetition_penalty=request.repetition_penalty,
         repetition_context_size=request.repetition_context_size,
         images=images,
+        videos=videos,
     )
 
 

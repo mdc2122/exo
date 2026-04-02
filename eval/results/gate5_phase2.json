@@ -1,0 +1,273 @@
+{
+  "model": "mlx-community/Kimi-K2.5",
+  "api_url": "http://127.0.0.1:52415/v1/chat/completions",
+  "overall": {
+    "passed": 0,
+    "total": 20,
+    "criterion_pass": false
+  },
+  "summary": {
+    "OCR": {
+      "passed": 0,
+      "total": 5,
+      "skipped": 0
+    },
+    "Spatial reasoning": {
+      "passed": 0,
+      "total": 5,
+      "skipped": 0
+    },
+    "Counting": {
+      "passed": 0,
+      "total": 5,
+      "skipped": 0
+    },
+    "Visual description": {
+      "passed": 0,
+      "total": 5,
+      "skipped": 0
+    }
+  },
+  "results": [
+    {
+      "case_id": "ocr_1",
+      "category": "OCR",
+      "question": "Extract the exact visible text from this image.",
+      "expected": "HELLO 123",
+      "answer": "-",
+      "status": "FAIL",
+      "score": 0,
+      "details": {}
+    },
+    {
+      "case_id": "ocr_2",
+      "category": "OCR",
+      "question": "Extract the exact visible text from this image.",
+      "expected": "EXO VISION TEST",
+      "answer": ":\"",
+      "status": "FAIL",
+      "score": 0,
+      "details": {}
+    },
+    {
+      "case_id": "ocr_3",
+      "category": "OCR",
+      "question": "Extract the exact visible text from this image.",
+      "expected": "GATE FIVE",
+      "answer": ":\"",
+      "status": "FAIL",
+      "score": 0,
+      "details": {}
+    },
+    {
+      "case_id": "ocr_4",
+      "category": "OCR",
+      "question": "Extract the exact visible text from this image.",
+      "expected": "KIMI K2.5",
+      "answer": ":\"",
+      "status": "FAIL",
+      "score": 0,
+      "details": {}
+    },
+    {
+      "case_id": "ocr_5",
+      "category": "OCR",
+      "question": "Extract the exact visible text from this image.",
+      "expected": "PASS RATE 60",
+      "answer": ":\"",
+      "status": "FAIL",
+      "score": 0,
+      "details": {}
+    },
+    {
+      "case_id": "spatial_1",
+      "category": "Spatial reasoning",
+      "question": "Is A above or below B?",
+      "expected": "above",
+      "answer": "The",
+      "status": "FAIL",
+      "score": 0,
+      "details": {}
+    },
+    {
+      "case_id": "spatial_2",
+      "category": "Spatial reasoning",
+      "question": "Is LEFT to the left or right of RIGHT?",
+      "expected": "left",
+      "answer": "don't",
+      "status": "FAIL",
+      "score": 0,
+      "details": {}
+    },
+    {
+      "case_id": "spatial_3",
+      "category": "Spatial reasoning",
+      "question": "Is TOP above or below BOTTOM?",
+      "expected": "above",
+      "answer": "the",
+      "status": "FAIL",
+      "score": 0,
+      "details": {}
+    },
+    {
+      "case_id": "spatial_4",
+      "category": "Spatial reasoning",
+      "question": "Is SUN above or below GRASS?",
+      "expected": "above",
+      "answer": "as",
+      "status": "FAIL",
+      "score": 0,
+      "details": {}
+    },
+    {
+      "case_id": "spatial_5",
+      "category": "Spatial reasoning",
+      "question": "Is CAT left or right of DOG?",
+      "expected": "left",
+      "answer": "them",
+      "status": "FAIL",
+      "score": 0,
+      "details": {}
+    },
+    {
+      "case_id": "count_1",
+      "category": "Counting",
+      "question": "How many red circles are in this image? Reply with a number.",
+      "expected": 2,
+      "answer": ".",
+      "status": "FAIL",
+      "score": 0,
+      "details": {
+        "extracted_number": null
+      }
+    },
+    {
+      "case_id": "count_2",
+      "category": "Counting",
+      "question": "How many red circles are in this image? Reply with a number.",
+      "expected": 4,
+      "answer": "format",
+      "status": "FAIL",
+      "score": 0,
+      "details": {
+        "extracted_number": null
+      }
+    },
+    {
+      "case_id": "count_3",
+      "category": "Counting",
+      "question": "How many red circles are in this image? Reply with a number.",
+      "expected": 6,
+      "answer": "format",
+      "status": "FAIL",
+      "score": 0,
+      "details": {
+        "extracted_number": null
+      }
+    },
+    {
+      "case_id": "count_4",
+      "category": "Counting",
+      "question": "How many red circles are in this image? Reply with a number.",
+      "expected": 8,
+      "answer": "format",
+      "status": "FAIL",
+      "score": 0,
+      "details": {
+        "extracted_number": null
+      }
+    },
+    {
+      "case_id": "count_5",
+      "category": "Counting",
+      "question": "How many red circles are in this image? Reply with a number.",
+      "expected": 10,
+      "answer": "format",
+      "status": "FAIL",
+      "score": 0,
+      "details": {
+        "extracted_number": null
+      }
+    },
+    {
+      "case_id": "desc_1",
+      "category": "Visual description",
+      "question": "Describe what is visible in this image in one short sentence.",
+      "expected": [
+        "house",
+        "sun",
+        "tree"
+      ],
+      "answer": "it",
+      "status": "FAIL",
+      "score": 0,
+      "details": {
+        "matched_keywords": []
+      }
+    },
+    {
+      "case_id": "desc_2",
+      "category": "Visual description",
+      "question": "Describe what is visible in this image in one short sentence.",
+      "expected": [
+        "balloon",
+        "three",
+        "color"
+      ],
+      "answer": "possibly",
+      "status": "FAIL",
+      "score": 0,
+      "details": {
+        "matched_keywords": []
+      }
+    },
+    {
+      "case_id": "desc_3",
+      "category": "Visual description",
+      "question": "Describe what is visible in this image in one short sentence.",
+      "expected": [
+        "bridge",
+        "river",
+        "cloud"
+      ],
+      "answer": "possibly",
+      "status": "FAIL",
+      "score": 0,
+      "details": {
+        "matched_keywords": []
+      }
+    },
+    {
+      "case_id": "desc_4",
+      "category": "Visual description",
+      "question": "Describe what is visible in this image in one short sentence.",
+      "expected": [
+        "coffee",
+        "sign",
+        "text"
+      ],
+      "answer": "possibly",
+      "status": "FAIL",
+      "score": 0,
+      "details": {
+        "matched_keywords": []
+      }
+    },
+    {
+      "case_id": "desc_5",
+      "category": "Visual description",
+      "question": "Describe what is visible in this image in one short sentence.",
+      "expected": [
+        "python",
+        "logo",
+        "blue"
+      ],
+      "answer": "possibly",
+      "status": "FAIL",
+      "score": 0,
+      "details": {
+        "matched_keywords": []
+      }
+    }
+  ]
+}

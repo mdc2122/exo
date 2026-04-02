@@ -65,7 +65,16 @@ class ChatCompletionMessageImageUrl(BaseModel):
     image_url: dict[str, str]  # {"url": "data:image/png;base64,..."}
 
 
-ChatCompletionContentPart = ChatCompletionMessageText | ChatCompletionMessageImageUrl
+class ChatCompletionMessageVideoUrl(BaseModel):
+    type: Literal["video_url"] = "video_url"
+    video_url: dict[str, str]  # {"url": "data:video/mp4;base64,..."}
+
+
+ChatCompletionContentPart = (
+    ChatCompletionMessageText
+    | ChatCompletionMessageImageUrl
+    | ChatCompletionMessageVideoUrl
+)
 
 
 class ToolCallItem(BaseModel):
