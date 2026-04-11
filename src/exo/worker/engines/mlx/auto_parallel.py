@@ -25,6 +25,7 @@ from mlx_lm.models.glm4_moe import Model as Glm4MoeModel
 from mlx_lm.models.glm4_moe import MoE
 from mlx_lm.models.glm4_moe_lite import Glm4MoeLiteDecoderLayer, Glm4MoeLiteMLP
 from mlx_lm.models.glm4_moe_lite import Model as GLM4MoeLiteModel
+from mlx_lm.models.glm_moe_dsa import Model as GlmMoeDsaModel
 from mlx_lm.models.gpt_oss import GptOssMoeModel
 from mlx_lm.models.gpt_oss import Model as GptOssModel
 from mlx_lm.models.kimi_k25 import Model as KimiK25Model
@@ -543,7 +544,9 @@ def tensor_auto_parallel(
             all_to_sharded_linear_in_place,
             sharded_to_all_linear_in_place,
         )
-    elif isinstance(model, (DeepseekV3Model, DeepseekV32Model, KimiK25Model)):
+    elif isinstance(
+        model, (DeepseekV3Model, DeepseekV32Model, KimiK25Model)
+    ) and not isinstance(model, GlmMoeDsaModel):
         tensor_parallel_sharding_strategy = DeepSeekShardingStrategy(
             group,
             all_to_sharded_linear,
@@ -569,6 +572,14 @@ def tensor_auto_parallel(
         )
     elif isinstance(model, Glm4MoeModel):
         tensor_parallel_sharding_strategy = Glm4MoeShardingStrategy(
+            group,
+            all_to_sharded_linear,
+            sharded_to_all_linear,
+            all_to_sharded_linear_in_place,
+            sharded_to_all_linear_in_place,
+        )
+    elif isinstance(model, GlmMoeDsaModel):
+        tensor_parallel_sharding_strategy = GlmMoeDsaShardingStrategy(
             group,
             all_to_sharded_linear,
             sharded_to_all_linear,
@@ -1178,6 +1189,79 @@ class Glm4MoeShardingStrategy(TensorParallelShardingStrategy):
             mx.eval(layer)
             if on_layer_loaded is not None:
                 on_layer_loaded(i, total)
+        return model
+
+
+class GlmMoeDsaShardingStrategy(TensorParallelShardingStrategy):
+    """Sharding strategy for GLM-5.1 (glm_moe_dsa / DeepSeek-V32 architecture).
+
+    Mirrors the upstream deepseek_v32 shard layout for attention and MoE linears,
+    while keeping the DSA indexer and shared latent builders replicated.
+    """
+
+    def shard_model(
+        self,
+        model: nn.Module,
+        timeout_seconds: float,
+        on_timeout: TimeoutCallback | None,
+        on_layer_loaded: LayerLoadedCallback | None,
+    ) -> nn.Module:
+        if self.N != 2:
+            raise ValueError(
+                f"GlmMoeDsaShardingStrategy only supports TP2, got TP{self.N}"
+            )
+
+        model = cast(DeepseekV32Model, model)
+        layers = model.layers
+        total = len(layers)
+
+        for i, layer in enumerate(layers):
+            eval_with_timeout(layer.parameters(), timeout_seconds / total, on_timeout)
+
+            layer.self_attn.q_b_proj = self.all_to_sharded_linear(
+                layer.self_attn.q_b_proj
+            )
+            layer.self_attn.o_proj = self.sharded_to_all_linear(layer.self_attn.o_proj)
+            layer.self_attn.num_heads //= self.N
+
+            heads_per_rank = layer.self_attn.num_heads
+            start = self.group.rank() * heads_per_rank
+            end = start + heads_per_rank
+
+            def shard_heads(
+                w: mx.array, start: int = start, end: int = end
+            ) -> mx.array:
+                return w[start:end]
+
+            # MultiLinear weights are head-major; slice heads manually.
+            layer.self_attn.embed_q.apply(shard_heads)
+            layer.self_attn.unembed_out.apply(shard_heads)
+
+            if isinstance(layer.mlp, DeepseekV32MLP):
+                layer.mlp.gate_proj = self.all_to_sharded_linear(layer.mlp.gate_proj)
+                layer.mlp.down_proj = self.sharded_to_all_linear(layer.mlp.down_proj)
+                layer.mlp.up_proj = self.all_to_sharded_linear(layer.mlp.up_proj)
+            else:
+                if getattr(layer.mlp, "shared_experts", None) is not None:
+                    self.all_to_sharded_linear_in_place(
+                        layer.mlp.shared_experts.gate_proj
+                    )
+                    self.sharded_to_all_linear_in_place(
+                        layer.mlp.shared_experts.down_proj
+                    )
+                    self.all_to_sharded_linear_in_place(
+                        layer.mlp.shared_experts.up_proj
+                    )
+
+                self.all_to_sharded_linear_in_place(layer.mlp.switch_mlp.gate_proj)
+                self.sharded_to_all_linear_in_place(layer.mlp.switch_mlp.down_proj)
+                self.all_to_sharded_linear_in_place(layer.mlp.switch_mlp.up_proj)
+                cast(Any, layer.mlp).sharding_group = self.group
+
+            mx.eval(layer)
+            if on_layer_loaded is not None:
+                on_layer_loaded(i, total)
+
         return model
 
 
