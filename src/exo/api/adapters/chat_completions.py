@@ -321,9 +321,7 @@ async def collect_chat_response(
     chunk_stream: AsyncGenerator[
         ErrorChunk | ToolCallChunk | TokenChunk | PrefillProgressChunk, None
     ],
-) -> AsyncGenerator[str]:
-    # This is an AsyncGenerator[str] rather than returning a ChatCompletionReponse because
-    # FastAPI handles the cancellation better but wouldn't auto-serialize for some reason
+) -> ChatCompletionResponse | ErrorResponse:
     """Collect all token chunks and return a single ChatCompletionResponse."""
     text_parts: list[str] = []
     thinking_parts: list[str] = []
@@ -377,13 +375,26 @@ async def collect_chat_response(
                 finish_reason = chunk.finish_reason
 
     if error_message is not None:
-        raise ValueError(error_message)
+        return ErrorResponse(
+            error=ErrorInfo(
+                message=error_message,
+                type="InternalServerError",
+                code=500,
+            )
+        )
 
     combined_text = "".join(text_parts)
     combined_thinking = "".join(thinking_parts) if thinking_parts else None
-    assert model is not None
+    if model is None:
+        return ErrorResponse(
+            error=ErrorInfo(
+                message="No response chunks were received from the model",
+                type="InternalServerError",
+                code=500,
+            )
+        )
 
-    yield ChatCompletionResponse(
+    return ChatCompletionResponse(
         id=command_id,
         created=int(time.time()),
         model=model,
@@ -403,5 +414,4 @@ async def collect_chat_response(
             )
         ],
         usage=last_usage,
-    ).model_dump_json()
-    return
+    )

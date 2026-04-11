@@ -15,6 +15,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from mlx_lm.tokenizer_utils import TokenizerWrapper
+from mlx.utils import tree_flatten
 from mlx_vlm.prompt_utils import get_message_json
 from mlx_vlm.utils import load_image_processor
 from PIL import Image
@@ -150,6 +151,31 @@ def preprocess_video_chunk(
     grid_thw = np.array([T, H // patch_size, W // patch_size])
 
     return {"pixel_values": patches, "grid_thw": grid_thw}
+
+
+def preprocess_kimi_images(
+    images: list[Image.Image],
+    patch_size: int = 14,
+    merge_kernel_size: int = 2,
+    in_patch_limit_each_frame: int = 4096,
+) -> dict[str, np.ndarray]:
+    pixel_values_parts: list[np.ndarray] = []
+    grid_thw_parts: list[np.ndarray] = []
+
+    for image in images:
+        processed = preprocess_video_chunk(
+            [image.convert("RGB")],
+            patch_size=patch_size,
+            merge_kernel_size=merge_kernel_size,
+            in_patch_limit_each_frame=in_patch_limit_each_frame,
+        )
+        pixel_values_parts.append(processed["pixel_values"])
+        grid_thw_parts.append(processed["grid_thw"])
+
+    return {
+        "pixel_values": np.concatenate(pixel_values_parts, axis=0),
+        "grid_thw": np.stack(grid_thw_parts, axis=0),
+    }
 
 
 def make_video_chunk_prompts(
@@ -344,17 +370,21 @@ class VisionEncoder:
             self._load_weights_from_model_repo()
 
         repo = processor_repo or str(self._model_path)
-        image_proc = load_image_processor(repo)
-        if image_proc is not None:
-            self._processor = image_proc
-        else:
-            self._processor = AutoImageProcessor.from_pretrained(  # type: ignore
-                repo, trust_remote_code=True
-            )
         if processor_repo:
             self._merge_kernel_size = vision_cfg.get("merge_kernel_size", [2, 2])  # type: ignore
             self._needs_nhwc = True
-        logger.info(f"HF image processor loaded from {repo}")
+            logger.info(
+                "Skipping HF image processor load for kimi_vl; using local preprocess"
+            )
+        else:
+            image_proc = load_image_processor(repo)
+            if image_proc is not None:
+                self._processor = image_proc
+            else:
+                self._processor = AutoImageProcessor.from_pretrained(  # type: ignore
+                    repo, trust_remote_code=True
+                )
+            logger.info(f"HF image processor loaded from {repo}")
 
     def _load_weights_from_separate_repo(self) -> None:
         safetensors_files = list(self._model_path.glob("*.safetensors"))
@@ -445,22 +475,94 @@ class VisionEncoder:
         n_vision = sum(v.size for _, v in vision_weights.items())  # type: ignore
         logger.info(f"Vision encoder loaded: {n_vision / 1e6:.1f}M params")
 
+    def _flatten_feature_batch(self, feature_batch: mx.array) -> mx.array:
+        if feature_batch.ndim <= 2:
+            return feature_batch
+        return feature_batch.reshape(-1, feature_batch.shape[-1])
+
+    def _flatten_feature_batches(self, feature_batches: list[mx.array]) -> mx.array:
+        flattened = [self._flatten_feature_batch(batch) for batch in feature_batches]
+        if not flattened:
+            raise ValueError("Vision tower returned no image features")
+        if len(flattened) == 1:
+            return flattened[0]
+        return mx.concatenate(flattened, axis=0)
+
+    def _validate_projected_batch_sizes(
+        self,
+        feature_batches: list[mx.array],
+        n_tokens_per_image: list[int],
+    ) -> None:
+        if len(feature_batches) != len(n_tokens_per_image):
+            raise ValueError(
+                "Projected image batch count does not match expected token groups: "
+                f"{len(feature_batches)} != {len(n_tokens_per_image)}"
+            )
+
+        for index, (feature_batch, expected_tokens) in enumerate(
+            zip(feature_batches, n_tokens_per_image, strict=True)
+        ):
+            actual_tokens = int(feature_batch.shape[0])
+            if actual_tokens != expected_tokens:
+                raise ValueError(
+                    "Projected image feature count does not match grid_thw-derived token count "
+                    f"for image {index}: {actual_tokens} != {expected_tokens}"
+                )
+
+    def _project_image_hidden_states(
+        self,
+        hidden_states: mx.array | list[mx.array],
+        n_tokens_per_image: list[int] | None = None,
+    ) -> mx.array:
+        if isinstance(hidden_states, list):
+            logger.info(
+                "encode_images: projector start hidden_state_batches={} first_shape={}",
+                len(hidden_states),
+                hidden_states[0].shape if hidden_states else None,
+            )
+            if self._projector is not None:
+                projected_batches = [self._projector(batch) for batch in hidden_states]
+                if n_tokens_per_image is not None:
+                    self._validate_projected_batch_sizes(
+                        projected_batches, n_tokens_per_image
+                    )
+                return self._flatten_feature_batches(projected_batches)
+            if n_tokens_per_image is not None:
+                raise ValueError(
+                    "Kimi vision image path requires a projector to align merged vision features"
+                )
+            return self._flatten_feature_batches(hidden_states)
+
+        if self._projector is not None:
+            logger.info(
+                "encode_images: projector start hidden_states_shape={}",
+                hidden_states.shape,
+            )
+            return self._flatten_feature_batch(self._projector(hidden_states))
+
+        return self._flatten_feature_batch(hidden_states)
+
     def encode_images(self, images: list[str]) -> tuple[mx.array, list[int]]:
         self.ensure_loaded()
         assert self._vision_tower is not None
-        assert self._processor is not None
 
+        logger.info("encode_images: decoding {} image(s)", len(images))
         pil_images = [decode_base64_image(b64) for b64 in images]
         for idx, img in enumerate(pil_images):
             logger.info(f"Image {idx}: {img.width}x{img.height} mode={img.mode}")
 
         if self._config.processor_repo:
-            processed = self._processor.preprocess(
-                [{"type": "image", "image": img} for img in pil_images],
-                return_tensors="np",
+            logger.info("encode_images: local kimi preprocess start")
+            processed = preprocess_kimi_images(
+                pil_images,
+                merge_kernel_size=self._merge_kernel_size[0]
+                if self._merge_kernel_size is not None
+                else 2,
+                in_patch_limit_each_frame=self._config.in_patch_limit_each_frame,
             )
-            pixel_values = mx.array(processed["pixel_values"])  # type: ignore
-            grid_thw = mx.array(processed["grid_thws"])  # type: ignore
+            logger.info("encode_images: local kimi preprocess done")
+            pixel_values = mx.array(processed["pixel_values"])
+            grid_thw = mx.array(processed["grid_thw"])
             assert self._merge_kernel_size is not None
             merge_length = int(np.prod(self._merge_kernel_size))
             n_tokens_per_image = [
@@ -468,10 +570,13 @@ class VisionEncoder:
                 for i in range(grid_thw.shape[0])
             ]
         else:
+            assert self._processor is not None
+            logger.info("encode_images: processor call start")
             processed = self._processor(
                 images=pil_images,
                 return_tensors="np",
             )
+            logger.info("encode_images: processor call done")
             pixel_values = mx.array(processed["pixel_values"])  # type: ignore
             grid_thw = mx.array(processed["image_grid_thw"])  # type: ignore
             merge_unit = self._spatial_merge_size**2
@@ -486,20 +591,43 @@ class VisionEncoder:
             ]
 
         if self._needs_nhwc:
+            logger.info(
+                "encode_images: vision tower forward start needs_nhwc=True pixel_values_shape={} grid_thw_shape={}",
+                pixel_values.shape,
+                grid_thw.shape,
+            )
             grid_hw = grid_thw[:, 1:] if grid_thw.shape[-1] == 3 else grid_thw
-            hidden_states = self._vision_tower(
+            result = self._vision_tower(
                 pixel_values.transpose(0, 2, 3, 1),
                 output_hidden_states=True,
                 grid_thw=grid_hw,
             )
+            logger.info("encode_images: vision tower forward done")
+            if isinstance(result, tuple):
+                hidden_states = result[0]
+            else:
+                hidden_states = result
         else:
+            logger.info(
+                "encode_images: vision tower forward start needs_nhwc=False pixel_values_shape={} grid_thw_shape={}",
+                pixel_values.shape,
+                grid_thw.shape,
+            )
             result = self._vision_tower(pixel_values, grid_thw)
+            logger.info("encode_images: vision tower forward done")
             hidden_states = result[0] if isinstance(result, tuple) else result
 
-        if self._projector is not None:
-            image_features: mx.array = self._projector(hidden_states)
-        else:
-            image_features = hidden_states
+        image_features = self._project_image_hidden_states(
+            hidden_states, n_tokens_per_image
+        )
+        if image_features.ndim != 2:
+            raise ValueError(
+                f"Expected 2D image features after projection, got {image_features.shape}"
+            )
+        logger.info(
+            "encode_images: projector done image_features_shape={}",
+            image_features.shape,
+        )
 
         return image_features, n_tokens_per_image
 
@@ -515,9 +643,8 @@ class VisionEncoder:
 
         if not hasattr(self, "_temporal_tower"):
             self._temporal_tower = TemporalVisionModel(self._vision_tower.config)  # type: ignore
-            self._temporal_tower.load_weights(  # type: ignore
-                [(k, v) for k, v in self._vision_tower.parameters().items()]  # type: ignore
-            )
+            base_weights = list(tree_flatten(self._vision_tower.parameters()))
+            self._temporal_tower.load_weights(base_weights, strict=False)
             mx.eval(self._temporal_tower.parameters())
 
         if self._needs_nhwc:
@@ -525,10 +652,10 @@ class VisionEncoder:
 
         hidden_states_list: list[mx.array] = self._temporal_tower(
             pixel_values, grid_thw
-        )  # type: ignore
+        )
 
         if self._projector is not None:
-            features_list = [self._projector(hs) for hs in hidden_states_list]  # type: ignore
+            features_list = [self._projector(hs) for hs in hidden_states_list]
         else:
             features_list = hidden_states_list
 
@@ -587,6 +714,14 @@ def create_vision_embeddings(
         result = mx.where(is_image[:, None], gathered, input_embeddings[0])
         input_embeddings = result[None]
 
+    logger.info(
+        "create_vision_embeddings: prompt_tokens_shape={} image_features_shape={} output_shape={} placeholders={}",
+        prompt_tokens.shape,
+        image_features.shape,
+        input_embeddings.shape,
+        n_placeholders,
+    )
+
     return input_embeddings
 
 
@@ -617,8 +752,12 @@ def _find_media_regions(
 
     for i, region in enumerate(regions):
         if i < len(images):
-            img = decode_base64_image(images[i])
-            region.content_hash = hashlib.sha256(img.tobytes()).hexdigest()
+            payload = images[i]
+            with contextlib.suppress(Exception):
+                img = decode_base64_image(payload)
+                region.content_hash = hashlib.sha256(img.tobytes()).hexdigest()
+                continue
+            region.content_hash = hashlib.sha256(base64.b64decode(payload)).hexdigest()
         else:
             logger.warning(f"Media region {i} has no corresponding image")
 
@@ -646,8 +785,7 @@ class VisionProcessor:
     def _image_cache_key(self, images: list[str]) -> str:
         h = hashlib.sha256()
         for img in images:
-            pil = decode_base64_image(img)
-            h.update(pil.tobytes())
+            h.update(img.encode("ascii"))
         return h.hexdigest()
 
     def process(

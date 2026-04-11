@@ -1,6 +1,7 @@
 import os
 from copy import deepcopy
-from typing import TYPE_CHECKING
+from importlib import import_module
+from typing import TYPE_CHECKING, Protocol, cast
 
 import mlx.core as mx
 import psutil
@@ -15,11 +16,21 @@ from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
-from exo.worker.engines.mlx.constants import CACHE_GROUP_SIZE, KV_CACHE_BITS
+from exo.worker.engines.mlx.constants import (
+    CACHE_GROUP_SIZE,
+    KV_CACHE_BITS,
+    TURBOQUANT_FUSED,
+    TURBOQUANT_KV_BITS,
+    TURBOQUANT_KV_SEED,
+)
 from exo.worker.runner.bootstrap import logger
 
 if TYPE_CHECKING:
     from exo.worker.engines.mlx.vision import MediaRegion
+
+
+class TurboQuantCacheConstructor(Protocol):
+    def __call__(self, *, bits: int, seed: int, fused: bool = False) -> KVCache: ...
 
 
 # Fraction of device memory above which LRU eviction kicks in.
@@ -363,10 +374,62 @@ def get_memory_used_percentage() -> float:
     return float(mem.percent / 100)
 
 
+def _supports_turboquant_mla_cache(model: Model) -> bool:
+    model_type = str(getattr(model, "model_type", "")).lower()
+    return model_type in {"deepseek_v32", "glm_moe_dsa"}
+
+
+def _load_turboquant_kv_cache_class() -> TurboQuantCacheConstructor:
+    try:
+        module = import_module("turboquant_mlx.cache")
+    except ImportError as exc:
+        raise ImportError(
+            "EXO_TURBOQUANT_KV_BITS is set, but turboquant-mlx is not installed in "
+            "the active exo environment"
+        ) from exc
+
+    turboquant_class = getattr(module, "TurboQuantKVCache", None)
+    if turboquant_class is None:
+        raise ImportError("turboquant_mlx.cache does not expose TurboQuantKVCache")
+    return cast(TurboQuantCacheConstructor, turboquant_class)
+
+
+def _make_turboquant_mla_cache(model: Model) -> KVCacheType:
+    turboquant_class = _load_turboquant_kv_cache_class()
+    bits = TURBOQUANT_KV_BITS
+    assert bits is not None
+    if TURBOQUANT_FUSED:
+        patch_module = import_module("turboquant_mlx.patch")
+        apply_patch = getattr(patch_module, "apply_patch", None)
+        if apply_patch is None:
+            raise ImportError("turboquant_mlx.patch does not expose apply_patch")
+        apply_patch()
+    logger.info(
+        "Using TurboQuant KV cache for {} with {}-bit compression (fused={})",
+        getattr(model, "model_type", type(model).__name__),
+        bits,
+        TURBOQUANT_FUSED,
+    )
+    return [
+        CacheList(
+            turboquant_class(
+                bits=bits,
+                seed=TURBOQUANT_KV_SEED,
+                fused=TURBOQUANT_FUSED,
+            ),
+            KVCache(),
+        )
+        for _ in model.layers
+    ]
+
+
 def make_kv_cache(
     model: Model, max_kv_size: int | None = None, keep: int = 0
 ) -> KVCacheType:
     assert hasattr(model, "layers")
+
+    if TURBOQUANT_KV_BITS is not None and _supports_turboquant_mla_cache(model):
+        return _make_turboquant_mla_cache(model)
 
     if hasattr(model, "make_cache"):
         logger.info("Using MLX LM's make cache")

@@ -1,16 +1,19 @@
 # type: ignore
+import sys
 import time
+import types
 from typing import cast
 from unittest.mock import patch
 
 import mlx.core as mx
 import pytest
-from mlx_lm.models.cache import KVCache
+from mlx_lm.models.cache import CacheList, KVCache
 from mlx_lm.sample_utils import make_sampler
 
 from exo.shared.types.common import ModelId
 from exo.shared.types.mlx import Model
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from exo.worker.engines.mlx import cache as mlx_cache_module
 from exo.worker.engines.mlx.cache import (
     KVPrefixCache,
     cache_length,
@@ -104,6 +107,284 @@ class TestKVPrefix:
         cache = KVPrefixCache(None)
         cache.clear()
         assert len(cache.prompts) == 0
+
+
+class FakeTurboQuantKVCache:
+    def __init__(self, bits: int, seed: int, fused: bool = False):
+        self.bits = bits
+        self.seed = seed
+        self.fused = fused
+        self.offset = 0
+
+    def trim(self, n: int) -> int:
+        trimmed = min(self.offset, n)
+        self.offset -= trimmed
+        return trimmed
+
+    def size(self) -> int:
+        return self.offset
+
+
+class DummyGlmMoeDsaModel:
+    def __init__(self, n_layers: int = 2):
+        self.model_type = "glm_moe_dsa"
+        self.layers = [object() for _ in range(n_layers)]
+
+    def make_cache(self):
+        return [CacheList(KVCache(), KVCache()) for _ in self.layers]
+
+
+def _make_tiny_glm_moe_dsa_model(index_topk: int = 32) -> Model:
+    from mlx_lm.models.glm_moe_dsa import Model as GlmMoeDsaModel
+    from mlx_lm.models.glm_moe_dsa import ModelArgs as GlmMoeDsaModelArgs
+
+    args = GlmMoeDsaModelArgs.from_dict(
+        {
+            "model_type": "glm_moe_dsa",
+            "vocab_size": 128,
+            "hidden_size": 64,
+            "index_head_dim": 8,
+            "index_n_heads": 4,
+            "index_topk": index_topk,
+            "intermediate_size": 128,
+            "moe_intermediate_size": 32,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 1,
+            "n_shared_experts": 1,
+            "n_routed_experts": 4,
+            "routed_scaling_factor": 1.0,
+            "kv_lora_rank": 16,
+            "q_lora_rank": 16,
+            "qk_rope_head_dim": 4,
+            "v_head_dim": 8,
+            "qk_nope_head_dim": 8,
+            "topk_method": "noaux_tc",
+            "scoring_func": "sigmoid",
+            "norm_topk_prob": True,
+            "n_group": 1,
+            "topk_group": 1,
+            "num_experts_per_tok": 1,
+            "moe_layer_freq": 1,
+            "first_k_dense_replace": 0,
+            "max_position_embeddings": 128,
+            "rms_norm_eps": 1e-6,
+            "rope_parameters": {"rope_theta": 10000.0},
+            "attention_bias": False,
+        }
+    )
+    return cast(Model, GlmMoeDsaModel(args))
+
+
+class TestTurboQuantCacheSelection:
+    def test_make_kv_cache_uses_turboquant_for_glm_moe_dsa(self, monkeypatch):
+        turboquant_module = types.ModuleType("turboquant_mlx.cache")
+        turboquant_module.TurboQuantKVCache = FakeTurboQuantKVCache
+        monkeypatch.setitem(sys.modules, "turboquant_mlx.cache", turboquant_module)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_BITS", 4)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_SEED", 99)
+
+        cache = make_kv_cache(DummyGlmMoeDsaModel())
+
+        assert len(cache) == 2
+        first_layer = cache[0]
+        assert isinstance(first_layer, CacheList)
+        assert isinstance(first_layer[0], FakeTurboQuantKVCache)
+        assert first_layer[0].bits == 4
+        assert first_layer[0].seed == 99
+        assert isinstance(first_layer[1], KVCache)
+
+    def test_make_kv_cache_sets_fused_flag_and_applies_patch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        turboquant_module = types.ModuleType("turboquant_mlx.cache")
+        turboquant_module.TurboQuantKVCache = FakeTurboQuantKVCache
+        patch_module = types.ModuleType("turboquant_mlx.patch")
+
+        called = {"apply_patch": 0}
+
+        def fake_apply_patch() -> None:
+            called["apply_patch"] += 1
+
+        patch_module.apply_patch = fake_apply_patch
+
+        monkeypatch.setitem(sys.modules, "turboquant_mlx.cache", turboquant_module)
+        monkeypatch.setitem(sys.modules, "turboquant_mlx.patch", patch_module)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_BITS", 4)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_SEED", 7)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_FUSED", True)
+
+        cache = make_kv_cache(DummyGlmMoeDsaModel())
+
+        assert called["apply_patch"] == 1
+        assert isinstance(cache[0][0], FakeTurboQuantKVCache)
+        assert cache[0][0].fused is True
+
+    def test_real_turboquant_cache_runs_glm_moe_dsa_prefill_and_decode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("turboquant_mlx.cache")
+
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_BITS", 4)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_SEED", 42)
+
+        model = _make_tiny_glm_moe_dsa_model()
+        cache = make_kv_cache(model)
+
+        assert isinstance(cache[0], CacheList)
+        assert type(cache[0][0]).__name__ == "TurboQuantKVCache"
+        assert isinstance(cache[0][1], KVCache)
+
+        prompt = mx.array([[1, 2, 3, 4]], dtype=mx.int32)
+        logits = model(prompt, cache=cache)
+        mx.eval(logits)
+
+        assert logits.shape == (1, 4, 128)
+        assert cache[0][0].offset == 4
+        assert cache[0][1].offset == 4
+
+        token = mx.array([[5]], dtype=mx.int32)
+        logits2 = model(token, cache=cache)
+        mx.eval(logits2)
+
+        assert logits2.shape == (1, 1, 128)
+        assert cache[0][0].offset == 5
+        assert cache[0][1].offset == 5
+        assert cache[0][0].nbytes > 0
+
+    def test_real_turboquant_cache_supports_single_cache_merge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("turboquant_mlx.cache")
+
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_BITS", 4)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_SEED", 42)
+
+        model = _make_tiny_glm_moe_dsa_model()
+        cache = make_kv_cache(model)
+
+        prompt = mx.array([[1, 2, 3, 4]], dtype=mx.int32)
+        logits = model(prompt, cache=cache)
+        mx.eval(logits)
+
+        merged = type(cache[0][0]).merge([cache[0][0]])
+
+        assert type(merged).__name__ == "TurboQuantKVCache"
+        assert merged.offset == cache[0][0].offset
+        assert merged.state
+
+        merged.prepare(lengths=[merged.offset], right_padding=[0])
+        extracted = merged.extract(0)
+        merged.finalize()
+
+        assert type(extracted).__name__ == "TurboQuantKVCache"
+        assert extracted.offset == merged.offset
+
+    def test_real_fused_turboquant_decode_runs_without_mx_fast_attention(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("turboquant_mlx.cache")
+        patch_module = pytest.importorskip("turboquant_mlx.patch")
+
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_BITS", 4)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_SEED", 42)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_FUSED", True)
+
+        patch_module.apply_patch()
+
+        model = _make_tiny_glm_moe_dsa_model()
+        cache = make_kv_cache(model)
+
+        prompt = mx.array([[1, 2, 3, 4]], dtype=mx.int32)
+        logits = model(prompt, cache=cache)
+        mx.eval(logits)
+
+        def fail_fast_attention(*args: object, **kwargs: object) -> mx.array:
+            raise AssertionError("decode used mx.fast.scaled_dot_product_attention")
+
+        monkeypatch.setattr(
+            mx.fast, "scaled_dot_product_attention", fail_fast_attention
+        )
+
+        token = mx.array([[5]], dtype=mx.int32)
+        logits2 = model(token, cache=cache)
+        mx.eval(logits2)
+
+        assert logits2.shape == (1, 1, 128)
+        assert cache[0][0].offset == 5
+
+    def test_real_fused_turboquant_decode_runs_above_sparse_threshold(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("turboquant_mlx.cache")
+        patch_module = pytest.importorskip("turboquant_mlx.patch")
+
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_BITS", 4)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_SEED", 42)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_FUSED", True)
+
+        patch_module.apply_patch()
+
+        model = _make_tiny_glm_moe_dsa_model(index_topk=2)
+        cache = make_kv_cache(model)
+
+        prompt = mx.array([[1, 2, 3, 4]], dtype=mx.int32)
+        logits = model(prompt, cache=cache)
+        mx.eval(logits)
+
+        def fail_fast_attention(*args: object, **kwargs: object) -> mx.array:
+            raise AssertionError(
+                "sparse decode used mx.fast.scaled_dot_product_attention"
+            )
+
+        monkeypatch.setattr(
+            mx.fast, "scaled_dot_product_attention", fail_fast_attention
+        )
+
+        token = mx.array([[5]], dtype=mx.int32)
+        logits2 = model(token, cache=cache)
+        mx.eval(logits2)
+
+        assert logits2.shape == (1, 1, 128)
+        assert cache[0][0].offset == 5
+
+    def test_real_turboquant_matches_native_greedy_sequence_for_tiny_glm_moe_dsa(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("turboquant_mlx.cache")
+
+        model = _make_tiny_glm_moe_dsa_model(index_topk=2)
+        prompt = mx.array([[1, 2, 3, 4]], dtype=mx.int32)
+
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_BITS", None)
+        native_cache = make_kv_cache(model)
+        native_logits = model(prompt, cache=native_cache)
+        mx.eval(native_logits)
+        native_next = mx.argmax(native_logits[:, -1, :], axis=-1).reshape(1, 1)
+        native_tokens: list[int] = []
+        for _ in range(8):
+            native_tokens.append(int(native_next.item()))
+            native_logits = model(native_next, cache=native_cache)
+            mx.eval(native_logits)
+            native_next = mx.argmax(native_logits[:, -1, :], axis=-1).reshape(1, 1)
+
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_BITS", 4)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_KV_SEED", 42)
+        monkeypatch.setattr(mlx_cache_module, "TURBOQUANT_FUSED", False)
+        turboquant_cache = make_kv_cache(model)
+        turboquant_logits = model(prompt, cache=turboquant_cache)
+        mx.eval(turboquant_logits)
+        turboquant_next = mx.argmax(turboquant_logits[:, -1, :], axis=-1).reshape(1, 1)
+        turboquant_tokens: list[int] = []
+        for _ in range(8):
+            turboquant_tokens.append(int(turboquant_next.item()))
+            turboquant_logits = model(turboquant_next, cache=turboquant_cache)
+            mx.eval(turboquant_logits)
+            turboquant_next = mx.argmax(turboquant_logits[:, -1, :], axis=-1).reshape(
+                1, 1
+            )
+
+        assert turboquant_tokens == native_tokens
 
 
 def _load_gpt_oss() -> tuple[Model, object]:

@@ -300,7 +300,19 @@ class Worker:
                     by_index: dict[int, str] = {}
 
                     for idx, h in task.task_params.image_hashes.items():
-                        assert h in self.image_cache
+                        if h not in self.image_cache:
+                            logger.error(
+                                "Missing cached image for hash {} on command {}",
+                                h,
+                                cmd_id,
+                            )
+                            await self.event_sender.send(
+                                TaskStatusUpdated(
+                                    task_id=task.task_id,
+                                    task_status=TaskStatus.Failed,
+                                )
+                            )
+                            continue
                         by_index[idx] = self.image_cache[h]
 
                     if task.task_params.total_input_chunks > 0:
@@ -323,6 +335,25 @@ class Worker:
                             f"Assembled {len(per_image)} VLM image(s) "
                             f"from {len(chunk_buffer)} chunks"
                         )
+
+                    expected_images = (
+                        len(task.task_params.image_hashes)
+                        + task.task_params.image_count
+                    )
+                    if len(by_index) != expected_images:
+                        logger.error(
+                            "Resolved {}/{} images for command {}; failing task",
+                            len(by_index),
+                            expected_images,
+                            cmd_id,
+                        )
+                        await self.event_sender.send(
+                            TaskStatusUpdated(
+                                task_id=task.task_id,
+                                task_status=TaskStatus.Failed,
+                            )
+                        )
+                        continue
 
                     resolved_images = [by_index[i] for i in sorted(by_index)]
                     modified_task = task.model_copy(

@@ -1,4 +1,5 @@
 import itertools
+import os
 import time
 from abc import ABC, abstractmethod
 from collections import deque
@@ -276,13 +277,6 @@ class SequentialGenerator(InferenceGenerator):
                     )
                 )
 
-        def distributed_prompt_progress_callback() -> None:
-            self.agree_on_cancellations()
-            if self.should_cancel(task.task_id):
-                raise PrefillCancelled()
-
-            self.agree_on_tasks()
-
         tokens_since_cancel_check = self.check_for_cancel_every
 
         def on_generation_token() -> None:
@@ -303,7 +297,7 @@ class SequentialGenerator(InferenceGenerator):
             prompt=prompt,
             kv_prefix_cache=self.kv_prefix_cache,
             on_prefill_progress=on_prefill_progress,
-            distributed_prompt_progress_callback=distributed_prompt_progress_callback,
+            distributed_prompt_progress_callback=None,
             on_generation_token=on_generation_token,
             group=self.group,
             vision_processor=self.vision_processor,
@@ -429,6 +423,9 @@ class BatchGenerator(InferenceGenerator):
 
         results = self._mlx_gen.step()
 
+        if self.device_rank == 0 and os.environ.get("EXO_TURBOQUANT_TRACE", "0") == "1":
+            logger.info("rank0 batch step returned {} raw responses", len(results))
+
         output: list[
             tuple[TaskId, GenerationResponse | ToolCallResponse | Cancelled | Finished]
         ] = []
@@ -442,6 +439,17 @@ class BatchGenerator(InferenceGenerator):
             queue.push(response)
             # If a generator fails to parse for some reason and returns early, we should not crash
             while (parsed := next(output_generator, None)) is not None:
+                if (
+                    self.device_rank == 0
+                    and os.environ.get("EXO_TURBOQUANT_TRACE", "0") == "1"
+                ):
+                    logger.info(
+                        "rank0 parsed response: uid={} task_id={} parsed_type={} finish_reason={}",
+                        uid,
+                        task.task_id,
+                        type(parsed).__name__,
+                        getattr(parsed, "finish_reason", None),
+                    )
                 output.append((task.task_id, parsed))
 
             # check if original response was terminal and append a Finished()
@@ -494,7 +502,18 @@ class BatchGenerator(InferenceGenerator):
 
     def _start_task(self, task: TextGeneration) -> int:
         _check_for_debug_prompts(task.task_params)
+        logger.info(
+            "runner batch _start_task begin: task_id={} image_count={} total_input_chunks={}",
+            task.task_id,
+            task.task_params.image_count,
+            task.task_params.total_input_chunks,
+        )
         prompt = apply_chat_template(self.tokenizer, task.task_params)
+        logger.info(
+            "runner batch _start_task prompt ready: task_id={} prompt_len={}",
+            task.task_id,
+            len(prompt),
+        )
 
         def on_prefill_progress(processed: int, total: int) -> None:
             if self.device_rank == 0:
@@ -509,13 +528,6 @@ class BatchGenerator(InferenceGenerator):
                     )
                 )
 
-        def distributed_prompt_progress_callback() -> None:
-            self.agree_on_cancellations()
-            if self.should_cancel(task.task_id):
-                raise PrefillCancelled()
-
-            self.agree_on_tasks()
-
         tokens_since_cancel_check = self.check_for_cancel_every
 
         def on_generation_token() -> None:
@@ -529,13 +541,22 @@ class BatchGenerator(InferenceGenerator):
 
                 self.agree_on_tasks()
 
-        return self._mlx_gen.submit(
+        logger.info(
+            "runner batch _start_task calling mlx submit: task_id={}", task.task_id
+        )
+        uid = self._mlx_gen.submit(
             task_params=task.task_params,
             prompt=prompt,
             on_prefill_progress=on_prefill_progress,
-            distributed_prompt_progress_callback=distributed_prompt_progress_callback,
+            distributed_prompt_progress_callback=None,
             on_generation_token=on_generation_token,
         )
+        logger.info(
+            "runner batch _start_task mlx submit returned: task_id={} uid={}",
+            task.task_id,
+            uid,
+        )
+        return uid
 
     def close(self) -> None:
         self._mlx_gen.close()

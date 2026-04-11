@@ -1,6 +1,5 @@
 import base64
 import contextlib
-import hashlib
 import json
 import random
 import time
@@ -724,8 +723,6 @@ class API:
             "TODO: we should send a notification to the user to download the model"
         )
 
-    _sent_image_hashes: set[str] = set()
-
     async def _send_text_generation_with_images(
         self, task_params: TextGenerationTaskParams
     ) -> TextGeneration:
@@ -735,36 +732,17 @@ class API:
             await self._send(command)
             return command
 
-        hashes = [hashlib.sha256(img.encode("ascii")).hexdigest() for img in images]
-
-        cached_hashes: dict[int, str] = {}
-        new_images: list[tuple[int, str]] = []
-        for idx, (img, h) in enumerate(zip(images, hashes, strict=True)):
-            if h in self._sent_image_hashes:
-                cached_hashes[idx] = h
-            else:
-                self._sent_image_hashes.add(h)
-                new_images.append((idx, img))
-
-        if not new_images:
-            task_params = task_params.model_copy(
-                update={"images": [], "image_hashes": cached_hashes}
-            )
-            command = TextGeneration(task_params=task_params)
-            await self._send(command)
-            return command
-
         all_chunks: list[tuple[int, str]] = []
-        for img_idx, img_data in new_images:
+        for img_idx, img_data in enumerate(images):
             for i in range(0, len(img_data), EXO_MAX_CHUNK_SIZE):
                 all_chunks.append((img_idx, img_data[i : i + EXO_MAX_CHUNK_SIZE]))
 
         task_params = task_params.model_copy(
             update={
                 "images": [],
-                "image_hashes": cached_hashes,
+                "image_hashes": {},
                 "total_input_chunks": len(all_chunks),
-                "image_count": len(new_images),
+                "image_count": len(images),
             }
         )
         command = TextGeneration(task_params=task_params)
@@ -788,7 +766,7 @@ class API:
 
     async def chat_completions(
         self, payload: ChatCompletionRequest
-    ) -> ChatCompletionResponse | StreamingResponse:
+    ) -> ChatCompletionResponse | JSONResponse | StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
         task_params = await chat_request_to_text_generation(payload)
         resolved_model = await self._resolve_and_validate_text_model(
@@ -814,13 +792,12 @@ class API:
                 },
             )
         else:
-            return StreamingResponse(
-                collect_chat_response(
-                    command.command_id,
-                    self._token_chunk_stream(command.command_id),
-                ),
-                media_type="application/json",
+            response = await collect_chat_response(
+                command.command_id,
+                self._token_chunk_stream(command.command_id),
             )
+            status_code = 500 if isinstance(response, ErrorResponse) else 200
+            return JSONResponse(response.model_dump(), status_code=status_code)
 
     async def bench_chat_completions(
         self, payload: BenchChatCompletionRequest
@@ -1850,6 +1827,11 @@ class API:
     async def _send(self, command: Command):
         while self.paused:
             await self.paused_ev.wait()
+        logger.info(
+            "API sending command: type={} command_id={}",
+            type(command).__name__,
+            getattr(command, "command_id", None),
+        )
         await self.command_sender.send(
             ForwarderCommand(origin=self._system_id, command=command)
         )

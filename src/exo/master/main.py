@@ -293,6 +293,14 @@ class Master:
                                 )
                             generated_events.extend(transition_events)
                         case PlaceInstance():
+                            logger.info(
+                                "Master processing PlaceInstance: command_id={} model={} sharding={} instance_meta={} min_nodes={}",
+                                command.command_id,
+                                command.model_card.model_id,
+                                command.sharding,
+                                command.instance_meta,
+                                command.min_nodes,
+                            )
                             placement = place_instance(
                                 command,
                                 self.state.topology,

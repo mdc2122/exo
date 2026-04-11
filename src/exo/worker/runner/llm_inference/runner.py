@@ -53,6 +53,7 @@ from exo.shared.types.worker.runners import (
 )
 from exo.utils.channels import MpReceiver, MpSender
 from exo.worker.engines.mlx.cache import KVPrefixCache
+from exo.worker.engines.mlx.constants import TURBOQUANT_KV_BITS
 from exo.worker.engines.mlx.utils_mlx import (
     initialize_mlx,
     load_mlx_items,
@@ -342,6 +343,15 @@ class Runner:
                     )
 
                 elif self.device_rank == 0:
+                    if os.environ.get("EXO_TURBOQUANT_TRACE", "0") == "1":
+                        logger.info(
+                            "rank0 token emit: command_id={} token={} text={!r} finish_reason={} thinking={}",
+                            command_id,
+                            response.token,
+                            response.text,
+                            response.finish_reason,
+                            response.is_thinking,
+                        )
                     assert response.finish_reason not in (
                         "error",
                         "tool_calls",
@@ -412,7 +422,13 @@ class Builder:
                 self.tokenizer.tool_parser,  # type: ignore
             )
 
-        kv_prefix_cache = KVPrefixCache(self.group)
+        kv_prefix_cache = None
+        if TURBOQUANT_KV_BITS is None:
+            kv_prefix_cache = KVPrefixCache(self.group)
+        else:
+            logger.info(
+                "disabling KV prefix cache while TurboQuant KV compression is active"
+            )
 
         device_rank = 0 if self.group is None else self.group.rank()
         if os.environ.get("EXO_NO_BATCH"):

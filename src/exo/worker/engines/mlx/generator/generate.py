@@ -514,6 +514,13 @@ def mlx_generate(
                 task_params=task,
                 videos=task.videos,
             )
+            if vision is not None:
+                logger.info(
+                    "mlx_generate vision prepared: prompt_tokens={} embeddings_shape={} media_regions={}",
+                    len(vision.prompt_tokens),
+                    vision.embeddings.shape,
+                    len(vision.media_regions),
+                )
         except Exception:
             logger.opt(exception=True).warning(
                 "Vision processing failed, falling back to text-only"
@@ -577,6 +584,12 @@ def mlx_generate(
         else contextlib.nullcontext()
     )
     with maybe_vision_ctx:
+        logger.info(
+            "mlx_generate entering prefill: prompt_tokens={} prefix_hit_length={} vision_enabled={}",
+            len(prompt_tokens),
+            prefix_hit_length,
+            vision is not None,
+        )
         prefill_tps, prefill_tokens, ssm_snapshots_list = prefill(
             model,
             tokenizer,
@@ -586,6 +599,11 @@ def mlx_generate(
             group,
             on_prefill_progress,
             distributed_prompt_progress_callback,
+        )
+        logger.info(
+            "mlx_generate prefill finished: prefill_tokens={} prefill_tps={:.2f}",
+            prefill_tokens,
+            prefill_tps,
         )
     cache_snapshots: list[CacheSnapshot] | None = ssm_snapshots_list or None
 

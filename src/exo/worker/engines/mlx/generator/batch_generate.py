@@ -1,7 +1,8 @@
 import contextlib
+import os
 import time
 from dataclasses import dataclass, field
-from typing import Callable, cast
+from typing import Callable, Protocol, cast
 
 import mlx.core as mx
 from mlx_lm.generate import (
@@ -10,7 +11,7 @@ from mlx_lm.generate import (
 from mlx_lm.generate import (
     generation_stream,
 )
-from mlx_lm.models.cache import RotatingKVCache
+from mlx_lm.models.cache import CacheList, RotatingKVCache
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 from mlx_lm.tokenizer_utils import StreamingDetokenizer, TokenizerWrapper
 
@@ -53,6 +54,34 @@ from exo.worker.engines.mlx.vision import (
 from exo.worker.runner.bootstrap import logger
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
+
+
+class _NativeCacheCarrier(Protocol):
+    _native_cache: object | None
+
+
+def _batch_compatible_cache(layer_cache: object) -> object:
+    if os.environ.get("EXO_TURBOQUANT_NATIVE_BATCH_FALLBACK", "0") != "1":
+        return layer_cache
+    native_cache = cast(
+        object | None,
+        getattr(cast(_NativeCacheCarrier, layer_cache), "_native_cache", None),
+    )
+    if native_cache is not None:
+        return native_cache
+    if isinstance(layer_cache, CacheList):
+        sub_caches = cast(
+            tuple[object, ...],
+            layer_cache.caches,  # pyright: ignore[reportAttributeAccessIssue]
+        )
+        return CacheList(
+            *(_batch_compatible_cache(sub_cache) for sub_cache in sub_caches)
+        )
+    return layer_cache
+
+
+def _cache_for_batch_engine(cache: KVCacheType) -> list[object]:
+    return [_batch_compatible_cache(layer_cache) for layer_cache in cache]
 
 
 def _stop_sequences(task_params: TextGenerationTaskParams) -> list[str]:
@@ -119,9 +148,20 @@ class ExoBatchGenerator:
         distributed_prompt_progress_callback: Callable[[], None] | None = None,
         on_generation_token: Callable[[], None] | None = None,
     ) -> int:
+        logger.info(
+            "mlx batch submit begin: model={} image_count={} total_input_chunks={} prompt_chars={}",
+            task_params.model,
+            task_params.image_count,
+            task_params.total_input_chunks,
+            len(prompt),
+        )
         all_prompt_tokens = encode_prompt(self.tokenizer, prompt)
         all_prompt_tokens = fix_unmatched_think_end_tokens(
             all_prompt_tokens, self.tokenizer
+        )
+        logger.info(
+            "mlx batch submit encoded prompt: token_count={}",
+            len(all_prompt_tokens),
         )
 
         vision: VisionResult | None = None
@@ -139,6 +179,13 @@ class ExoBatchGenerator:
                     task_params=task_params,
                     videos=task_params.videos,
                 )
+                if vision is not None:
+                    logger.info(
+                        "batch submit vision prepared: prompt_tokens={} embeddings_shape={} media_regions={}",
+                        len(vision.prompt_tokens),
+                        vision.embeddings.shape,
+                        len(vision.media_regions),
+                    )
             except Exception:
                 logger.opt(exception=True).warning(
                     "Vision processing failed, falling back to text-only"
@@ -190,6 +237,12 @@ class ExoBatchGenerator:
             else contextlib.nullcontext()
         )
         with vision_ctx:
+            logger.info(
+                "batch submit entering prefill: prompt_tokens={} prefix_hit_length={} vision_enabled={}",
+                len(prompt_tokens),
+                prefix_hit_length,
+                vision is not None,
+            )
             _prefill_tps, _prefill_tokens, cache_snapshots = prefill(
                 self.model,
                 self.tokenizer,
@@ -199,6 +252,11 @@ class ExoBatchGenerator:
                 self.group,
                 on_prefill_progress,
                 distributed_prompt_progress_callback,
+            )
+            logger.info(
+                "batch submit prefill finished: prefill_tokens={} prefill_tps={:.2f}",
+                _prefill_tokens,
+                _prefill_tps,
             )
 
         # We need to clamp rotating kv caches to max size so that mlx lm's _merge_caches behaves
@@ -228,7 +286,7 @@ class ExoBatchGenerator:
                 media_regions,
             )
 
-        last_tokens = prompt_tokens[-2:]
+        last_tokens = prompt_tokens[-1:]
 
         logits_processors: list[Callable[[mx.array, mx.array], mx.array]] = (
             make_logits_processors(
@@ -246,7 +304,7 @@ class ExoBatchGenerator:
         uids = self._mlx_gen.insert(
             prompts=[last_tokens.tolist()],
             max_tokens=[max_tokens],
-            caches=[list(cache)],
+            caches=[_cache_for_batch_engine(list(cache))],
             samplers=[sampler],
             logits_processors=[logits_processors],
         )
