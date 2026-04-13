@@ -184,6 +184,12 @@ from exo.utils.task_group import TaskGroup
 
 _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
 ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
+PLACE_INSTANCE_RETRYABLE_ERRORS = (
+    "No cycles found with sufficient memory",
+    "Requested RDMA (MlxJaccl) but no RDMA-connected cycles available",
+)
+PLACE_INSTANCE_READY_TIMEOUT_SECONDS = 30.0
+PLACE_INSTANCE_RETRY_INTERVAL_SECONDS = 1.0
 
 
 def _format_to_content_type(image_format: Literal["png", "jpeg", "webp"] | None) -> str:
@@ -383,6 +389,7 @@ class API:
             instance_meta=payload.instance_meta,
             min_nodes=payload.min_nodes,
         )
+        await self._wait_for_place_instance_ready(command)
         await self._send(command)
 
         return CreateInstanceResponse(
@@ -390,6 +397,50 @@ class API:
             command_id=command.command_id,
             model_card=command.model_card,
         )
+
+    async def _wait_for_place_instance_ready(self, command: PlaceInstance) -> None:
+        deadline = time.monotonic() + PLACE_INSTANCE_READY_TIMEOUT_SECONDS
+
+        while True:
+            try:
+                get_instance_placements(
+                    command,
+                    topology=self.state.topology,
+                    current_instances=self.state.instances,
+                    node_memory=self.state.node_memory,
+                    node_network=self.state.node_network,
+                    download_status=self.state.downloads,
+                )
+                return
+            except ValueError as exc:
+                detail = str(exc)
+                if detail not in PLACE_INSTANCE_RETRYABLE_ERRORS:
+                    raise HTTPException(status_code=409, detail=detail) from exc
+
+                topology_nodes = len(list(self.state.topology.list_nodes()))
+                node_memory_nodes = len(self.state.node_memory)
+                node_network_nodes = len(self.state.node_network)
+                if time.monotonic() >= deadline:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Placement not ready after "
+                            f"{PLACE_INSTANCE_READY_TIMEOUT_SECONDS:.0f}s: {detail} "
+                            f"(topology_nodes={topology_nodes}, "
+                            f"node_memory_nodes={node_memory_nodes}, "
+                            f"node_network_nodes={node_network_nodes})"
+                        ),
+                    ) from exc
+
+                logger.info(
+                    "place_instance preflight waiting for placement readiness: "
+                    "error={} topology_nodes={} node_memory_nodes={} node_network_nodes={}",
+                    detail,
+                    topology_nodes,
+                    node_memory_nodes,
+                    node_network_nodes,
+                )
+                await anyio.sleep(PLACE_INSTANCE_RETRY_INTERVAL_SECONDS)
 
     async def create_instance(
         self, payload: CreateInstanceParams
