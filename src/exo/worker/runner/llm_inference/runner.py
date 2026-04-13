@@ -431,8 +431,18 @@ class Builder:
             )
 
         device_rank = 0 if self.group is None else self.group.rank()
+
+        sequential_reason: str | None = None
         if os.environ.get("EXO_NO_BATCH"):
-            logger.info("using SequentialGenerator (batching disabled)")
+            sequential_reason = "batching disabled"
+        elif TURBOQUANT_KV_BITS is not None and self.group is not None:
+            sequential_reason = (
+                "TurboQuant clustered safety fallback enabled while the batched path"
+                " remains under recovery"
+            )
+
+        if sequential_reason is not None:
+            logger.info("using SequentialGenerator ({})", sequential_reason)
             return SequentialGenerator(
                 model=self.inference_model,
                 tokenizer=self.tokenizer,
