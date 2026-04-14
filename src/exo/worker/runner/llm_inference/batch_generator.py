@@ -89,6 +89,16 @@ class InferenceGenerator(ABC):
     def close(self) -> None: ...
 
 
+def advance_coordination_counter(
+    tokens_since_last_check: int, check_for_cancel_every: int
+) -> tuple[int, bool]:
+    threshold = max(check_for_cancel_every, 1)
+    updated_tokens = tokens_since_last_check + 1
+    if updated_tokens >= threshold:
+        return 0, True
+    return updated_tokens, False
+
+
 EXO_RUNNER_MUST_FAIL = "EXO RUNNER MUST FAIL"
 EXO_RUNNER_MUST_OOM = "EXO RUNNER MUST OOM"
 EXO_RUNNER_MUST_TIMEOUT = "EXO RUNNER MUST TIMEOUT"
@@ -277,13 +287,15 @@ class SequentialGenerator(InferenceGenerator):
                     )
                 )
 
-        tokens_since_cancel_check = self.check_for_cancel_every
+        tokens_since_cancel_check = 0
 
         def on_generation_token() -> None:
             nonlocal tokens_since_cancel_check
-            tokens_since_cancel_check += 1
-            if tokens_since_cancel_check >= self.check_for_cancel_every:
-                tokens_since_cancel_check = 0
+            tokens_since_cancel_check, should_check = advance_coordination_counter(
+                tokens_since_cancel_check,
+                self.check_for_cancel_every,
+            )
+            if should_check:
                 self.agree_on_cancellations()
                 if self.should_cancel(task.task_id):
                     raise PrefillCancelled()
@@ -528,13 +540,15 @@ class BatchGenerator(InferenceGenerator):
                     )
                 )
 
-        tokens_since_cancel_check = self.check_for_cancel_every
+        tokens_since_cancel_check = 0
 
         def on_generation_token() -> None:
             nonlocal tokens_since_cancel_check
-            tokens_since_cancel_check += 1
-            if tokens_since_cancel_check >= self.check_for_cancel_every:
-                tokens_since_cancel_check = 0
+            tokens_since_cancel_check, should_check = advance_coordination_counter(
+                tokens_since_cancel_check,
+                self.check_for_cancel_every,
+            )
+            if should_check:
                 self.agree_on_cancellations()
                 if self.should_cancel(task.task_id):
                     self._cancelled_tasks.add(task.task_id)

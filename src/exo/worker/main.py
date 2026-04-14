@@ -117,8 +117,13 @@ class Worker:
             self._stopped.set()
 
     async def _forward_info(self, recv: Receiver[GatheredInfo]):
+        last_info_by_type: dict[type[GatheredInfo], GatheredInfo] = {}
         with recv as info_stream:
             async for info in info_stream:
+                info_type = type(info)
+                if last_info_by_type.get(info_type) == info:
+                    continue
+                last_info_by_type[info_type] = info
                 await self.event_sender.send(
                     NodeGatheredInfo(
                         node_id=self.node_id,

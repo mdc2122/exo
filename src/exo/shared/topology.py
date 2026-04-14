@@ -226,19 +226,21 @@ class Topology:
         return topology
 
     def is_rdma_cycle(self, cycle: Cycle) -> bool:
-        node_idxs = [node for node in cycle]
-        rx_idxs = [self._vertex_indices[idx] for idx in node_idxs]
-        for rid in rx_idxs:
-            for neighbor_rid in self._graph.neighbors(rid):
-                if neighbor_rid not in rx_idxs:
-                    continue
-                has_rdma = False
-                for edge in self._graph.get_all_edge_data(rid, neighbor_rid):
-                    if isinstance(edge, RDMAConnection):
-                        has_rdma = True
-                        break
-                if not has_rdma:
-                    return False
+        node_ids = list(cycle)
+        if len(node_ids) < 2:
+            return False
+
+        for index, source in enumerate(node_ids):
+            sink = node_ids[(index + 1) % len(node_ids)]
+            has_rdma = any(
+                isinstance(edge, RDMAConnection)
+                for edge in self.get_all_connections_between(source, sink)
+            ) or any(
+                isinstance(edge, RDMAConnection)
+                for edge in self.get_all_connections_between(sink, source)
+            )
+            if not has_rdma:
+                return False
         return True
 
     def get_thunderbolt_bridge_cycles(

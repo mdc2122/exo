@@ -1,6 +1,7 @@
 """Shared types for MLX-related functionality."""
 
 from collections.abc import Sequence
+from typing import Protocol
 
 from mlx import core as mx
 from mlx import nn as nn
@@ -12,9 +13,16 @@ from mlx_lm.models.cache import (
     RotatingKVCache,
 )
 
+
+class LayerCache(Protocol):
+    offset: int
+
+    def trim(self, n: int) -> int: ...
+
+
 # This list contains one cache entry per transformer layer
 KVCacheType = Sequence[
-    KVCache | RotatingKVCache | QuantizedKVCache | ArraysCache | CacheList
+    KVCache | RotatingKVCache | QuantizedKVCache | ArraysCache | CacheList | LayerCache
 ]
 
 

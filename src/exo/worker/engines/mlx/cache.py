@@ -4,6 +4,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Protocol, cast
 
 import mlx.core as mx
+import numpy as np
 import psutil
 from mlx_lm.models.cache import (
     ArraysCache,
@@ -15,13 +16,19 @@ from mlx_lm.models.cache import (
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.shared.types.memory import Memory
-from exo.shared.types.mlx import KVCacheType, Model
+from exo.shared.types.mlx import KVCacheType, LayerCache, Model
 from exo.worker.engines.mlx.constants import (
     CACHE_GROUP_SIZE,
     KV_CACHE_BITS,
-    TURBOQUANT_FUSED,
+    TURBOQUANT_CACHE_VARIANT,
+    TURBOQUANT_GROUP_SIZE,
     TURBOQUANT_KV_BITS,
     TURBOQUANT_KV_SEED,
+    TURBOQUANT_USE_NORMALIZATION,
+    TURBOQUANT_USE_QJL,
+    TURBOQUANT_USE_ROTATION,
+    TURBOQUANT_V3_OUTLIER_BITS,
+    TURBOQUANT_V3_OUTLIER_CHANNELS,
 )
 from exo.worker.runner.bootstrap import logger
 
@@ -29,8 +36,31 @@ if TYPE_CHECKING:
     from exo.worker.engines.mlx.vision import MediaRegion
 
 
-class TurboQuantCacheConstructor(Protocol):
-    def __call__(self, *, bits: int, seed: int, fused: bool = False) -> KVCache: ...
+class TurboQuantV2CacheConstructor(Protocol):
+    def __call__(
+        self,
+        *,
+        head_dim: int,
+        bits: int,
+        group_size: int,
+        use_qjl: bool,
+        use_rotation: bool,
+        use_normalization: bool,
+        seed: int,
+    ) -> LayerCache: ...
+
+
+class TurboQuantV3CacheConstructor(Protocol):
+    def __call__(
+        self,
+        *,
+        head_dim: int,
+        bits: int,
+        use_qjl: bool,
+        n_outlier: int,
+        outlier_bits: int,
+        seed: int,
+    ) -> LayerCache: ...
 
 
 # Fraction of device memory above which LRU eviction kicks in.
@@ -61,11 +91,44 @@ class CacheSnapshot:
         self.token_count = token_count
 
 
+def _detached_copy(a: mx.array) -> mx.array:
+    dtype = a.dtype
+    if dtype == mx.bfloat16:
+        return mx.array(np.array(a.astype(mx.float32))).astype(mx.bfloat16)
+    return mx.array(np.array(a))
+
+
+def copy_rotating_kv_cache(cache: RotatingKVCache) -> RotatingKVCache | None:
+    """
+    Deepcopy copies the metadata associated with an mx array.
+    Specifically, it shares a shared_ptr to the underlying data and
+    the mlx graph inputs of the array. This causes a memory leak for rotating
+    kv cache. By creating an np array, no metadata is stored so the old cache
+    can be cleaned up nicely.
+    """
+    if cache.keys is None or cache.values is None:
+        return None
+    n = min(cache.max_size, cache.keys.shape[2])
+    k_slice = _detached_copy(cache.keys[..., -n:, :])
+    v_slice = _detached_copy(cache.values[..., -n:, :])
+    mx.eval(k_slice, v_slice)
+    snap = RotatingKVCache.__new__(RotatingKVCache)
+    snap.keys = k_slice
+    snap.values = v_slice
+    snap.offset = cache.offset
+    snap._idx = n
+    snap.keep = cache.keep
+    snap.max_size = cache.max_size
+    return snap
+
+
 def snapshot_ssm_states(cache: KVCacheType) -> CacheSnapshot:
     states: list[ArraysCache | RotatingKVCache | None] = []
     for c in cache:
-        if isinstance(c, (ArraysCache, RotatingKVCache)):
+        if isinstance(c, ArraysCache):
             states.append(deepcopy(c))
+        elif isinstance(c, RotatingKVCache):
+            states.append(copy_rotating_kv_cache(c))
         else:
             states.append(None)
     token_count = cache_length(cache)
@@ -336,7 +399,12 @@ def encode_prompt(tokenizer: TokenizerWrapper, prompt: str) -> mx.array:
 
 
 def _entry_length(
-    c: KVCache | RotatingKVCache | QuantizedKVCache | ArraysCache | CacheList,
+    c: KVCache
+    | RotatingKVCache
+    | QuantizedKVCache
+    | ArraysCache
+    | CacheList
+    | LayerCache,
 ) -> int:
     # Use .offset attribute which KVCache types have (len() not implemented in older QuantizedKVCache).
     if hasattr(c, "offset"):
@@ -349,7 +417,7 @@ def _entry_length(
 
 def cache_length(cache: KVCacheType) -> int:
     """Get the number of tokens in a KV cache."""
-    return max(_entry_length(c) for c in cache)
+    return max((_entry_length(c) for c in cache), default=0)
 
 
 def get_prefix_length(prompt: mx.array, cached_prompt: mx.array) -> int:
@@ -374,52 +442,115 @@ def get_memory_used_percentage() -> float:
     return float(mem.percent / 100)
 
 
-def _supports_turboquant_mla_cache(model: Model) -> bool:
+def _resolve_turboquant_head_dim(model: Model) -> int:
+    if len(model.layers) == 0:
+        raise ValueError("TurboQuant requires a model with at least one layer")
+
+    first_layer: object = model.layers[0]
+    for container_name, attr_name in (
+        ("self_attn", "head_dim"),
+        ("attention", "head_dim"),
+        ("attn", "head_dim"),
+    ):
+        container: object | None = getattr(first_layer, container_name, None)
+        if container is None:
+            continue
+        head_dim = getattr(container, attr_name, None)
+        if isinstance(head_dim, int):
+            return head_dim
+
+    head_dim = getattr(model, "head_dim", None)
+    if isinstance(head_dim, int):
+        return head_dim
+
+    raise ValueError(
+        f"TurboQuant could not infer attention head_dim from {type(first_layer).__name__}"
+    )
+
+
+def _uses_mla_companion_cache(model: Model) -> bool:
     model_type = str(getattr(model, "model_type", "")).lower()
     return model_type in {"deepseek_v32", "glm_moe_dsa"}
 
 
-def _load_turboquant_kv_cache_class() -> TurboQuantCacheConstructor:
-    try:
-        module = import_module("turboquant_mlx.cache")
-    except ImportError as exc:
-        raise ImportError(
-            "EXO_TURBOQUANT_KV_BITS is set, but turboquant-mlx is not installed in "
-            "the active exo environment"
-        ) from exc
+def _apply_turboquant_patch() -> None:
+    patch_module = import_module("turboquant.patch")
+    apply_patch = getattr(patch_module, "apply", None)
+    if apply_patch is None:
+        raise ImportError("turboquant.patch does not expose apply()")
+    apply_patch()
 
-    turboquant_class = getattr(module, "TurboQuantKVCache", None)
+
+def _load_turboquant_v2_class() -> TurboQuantV2CacheConstructor:
+    module = import_module("turboquant.cache_v2")
+    turboquant_class = getattr(module, "TurboQuantKVCacheV2", None)
     if turboquant_class is None:
-        raise ImportError("turboquant_mlx.cache does not expose TurboQuantKVCache")
-    return cast(TurboQuantCacheConstructor, turboquant_class)
+        raise ImportError("turboquant.cache_v2 does not expose TurboQuantKVCacheV2")
+    return cast(TurboQuantV2CacheConstructor, turboquant_class)
 
 
-def _make_turboquant_mla_cache(model: Model) -> KVCacheType:
-    turboquant_class = _load_turboquant_kv_cache_class()
+def _load_turboquant_v3_class() -> TurboQuantV3CacheConstructor:
+    module = import_module("turboquant.cache_v3")
+    turboquant_class = getattr(module, "TurboQuantKVCacheV3", None)
+    if turboquant_class is None:
+        raise ImportError("turboquant.cache_v3 does not expose TurboQuantKVCacheV3")
+    return cast(TurboQuantV3CacheConstructor, turboquant_class)
+
+
+def _make_turboquant_layer_cache(model: Model, layer_index: int) -> LayerCache:
     bits = TURBOQUANT_KV_BITS
-    assert bits is not None
-    if TURBOQUANT_FUSED:
-        patch_module = import_module("turboquant_mlx.patch")
-        apply_patch = getattr(patch_module, "apply_patch", None)
-        if apply_patch is None:
-            raise ImportError("turboquant_mlx.patch does not expose apply_patch")
-        apply_patch()
-    logger.info(
-        "Using TurboQuant KV cache for {} with {}-bit compression (fused={})",
-        getattr(model, "model_type", type(model).__name__),
-        bits,
-        TURBOQUANT_FUSED,
-    )
-    return [
-        CacheList(
-            turboquant_class(
-                bits=bits,
-                seed=TURBOQUANT_KV_SEED,
-                fused=TURBOQUANT_FUSED,
-            ),
-            KVCache(),
+    if bits is None:
+        raise ValueError("TurboQuant cache requested with EXO_TURBOQUANT_KV_BITS unset")
+
+    head_dim = _resolve_turboquant_head_dim(model)
+    seed = TURBOQUANT_KV_SEED + layer_index
+
+    if TURBOQUANT_CACHE_VARIANT.lower() == "v3":
+        outlier_bits = TURBOQUANT_V3_OUTLIER_BITS or min(4, bits + 1)
+        turboquant_class = _load_turboquant_v3_class()
+        return turboquant_class(
+            head_dim=head_dim,
+            bits=bits,
+            use_qjl=TURBOQUANT_USE_QJL,
+            n_outlier=TURBOQUANT_V3_OUTLIER_CHANNELS,
+            outlier_bits=outlier_bits,
+            seed=seed,
         )
-        for _ in model.layers
+
+    turboquant_class = _load_turboquant_v2_class()
+    return turboquant_class(
+        head_dim=head_dim,
+        bits=bits,
+        group_size=TURBOQUANT_GROUP_SIZE,
+        use_qjl=TURBOQUANT_USE_QJL,
+        use_rotation=TURBOQUANT_USE_ROTATION,
+        use_normalization=TURBOQUANT_USE_NORMALIZATION,
+        seed=seed,
+    )
+
+
+def _make_turboquant_kv_cache(model: Model) -> KVCacheType:
+    _apply_turboquant_patch()
+    model_type_label = str(getattr(model, "model_type", type(model).__name__))
+    logger.info(
+        "Using TurboQuant {} cache for {} (bits={}, qjl={}, rotation={}, normalization={})",
+        TURBOQUANT_CACHE_VARIANT.lower(),
+        model_type_label,
+        TURBOQUANT_KV_BITS,
+        TURBOQUANT_USE_QJL,
+        TURBOQUANT_USE_ROTATION,
+        TURBOQUANT_USE_NORMALIZATION,
+    )
+
+    if _uses_mla_companion_cache(model):
+        return [
+            CacheList(_make_turboquant_layer_cache(model, layer_index), KVCache())
+            for layer_index, _layer in enumerate(model.layers)
+        ]
+
+    return [
+        _make_turboquant_layer_cache(model, layer_index)
+        for layer_index, _layer in enumerate(model.layers)
     ]
 
 
@@ -428,8 +559,8 @@ def make_kv_cache(
 ) -> KVCacheType:
     assert hasattr(model, "layers")
 
-    if TURBOQUANT_KV_BITS is not None and _supports_turboquant_mla_cache(model):
-        return _make_turboquant_mla_cache(model)
+    if TURBOQUANT_KV_BITS is not None:
+        return _make_turboquant_kv_cache(model)
 
     if hasattr(model, "make_cache"):
         logger.info("Using MLX LM's make cache")

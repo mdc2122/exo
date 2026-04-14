@@ -832,15 +832,25 @@ def mx_all_gather_tasks(
     tasks: list[TextGeneration],
     group: mx.distributed.Group | None,
 ) -> tuple[list[TextGeneration], list[TextGeneration]]:
+    if group is None:
+        return tasks, []
+
     uuid_byte_length = 36
 
     n_tasks = len(tasks)
+    has_any_tasks = mx.distributed.all_sum(
+        mx.array([1 if n_tasks > 0 else 0], dtype=mx.int32),
+        group=group,
+    )
+    if int(has_any_tasks.item()) == 0:
+        return [], []
+
     all_counts = cast(
         list[int],
         mx.distributed.all_gather(mx.array([n_tasks]), group=group).tolist(),
     )
     max_tasks = max(all_counts)
-    world_size: int = 1 if group is None else group.size()
+    world_size = group.size()
 
     if max_tasks == 0:
         return [], []

@@ -58,6 +58,7 @@ from mlx_lm.models.step3p5 import Model as Step35Model
 from mlx_lm.models.step3p5 import Step3p5MLP as Step35MLP
 from mlx_lm.models.step3p5 import Step3p5Model as Step35InnerModel
 
+from exo.shared.tracing import trace
 from exo.shared.types.worker.shards import PipelineShardMetadata
 from exo.worker.runner.bootstrap import logger
 
@@ -148,6 +149,19 @@ class CustomMlxLayer(nn.Module):
                 return getattr(original_layer, name)
 
 
+class DecodeTracedLayer(CustomMlxLayer):
+    def __init__(self, original_layer: _LayerCallable, trace_name: str, rank: int):
+        super().__init__(original_layer)
+        self.trace_name = trace_name
+        self.rank = rank
+
+    def __call__(self, x: mx.array, *args: object, **kwargs: object) -> mx.array:
+        if x.shape[1] != 1:
+            return self.original_layer(x, *args, **kwargs)
+        with trace(self.trace_name, self.rank, "compute"):
+            return self.original_layer(x, *args, **kwargs)
+
+
 class PipelineFirstLayer(CustomMlxLayer):
     def __init__(
         self,
@@ -191,7 +205,8 @@ class PipelineLastLayer(CustomMlxLayer):
             x, *args, **kwargs
         ).arguments.get("cache", None)
 
-        output: mx.array = self.original_layer(x, *args, **kwargs)
+        with trace("pipeline_layer", self.r, "compute"):
+            output: mx.array = self.original_layer(x, *args, **kwargs)
 
         # Eval layer output to materialize it before send — this splits the graph
         # so the send is isolated and the receiving rank's recv can complete.
@@ -203,9 +218,10 @@ class PipelineLastLayer(CustomMlxLayer):
                     (output, (self.r + 1) % self.s, self.group)
                 )
             else:
-                output = mx.distributed.send(
-                    output, (self.r + 1) % self.s, group=self.group
-                )
+                with trace("pipeline_send", self.r, "comm"):
+                    output = mx.distributed.send(
+                        output, (self.r + 1) % self.s, group=self.group
+                    )
             if cache is not None:
                 # CacheList (used by MLA models like DeepSeekV32, GLM MoE DSA)
                 # doesn't have .keys directly; access via first sub-cache.
@@ -217,10 +233,11 @@ class PipelineLastLayer(CustomMlxLayer):
                 mx.eval(_cache.keys)  # type: ignore
 
         if not self.is_prefill:
-            output = mx.distributed.all_gather(output, group=self.group)[
-                -output.shape[0] :
-            ]
-            mx.eval(output)
+            with trace("pipeline_all_gather", self.r, "comm"):
+                output = mx.distributed.all_gather(output, group=self.group)[
+                    -output.shape[0] :
+                ]
+                mx.eval(output)
 
         return output
 
@@ -788,11 +805,15 @@ class ShardedMoE(CustomMlxLayer):
         self.sharding_group: mx.distributed.Group | None = None
 
     def __call__(self, x: mx.array) -> mx.array:
+        rank = 0 if self.sharding_group is None else self.sharding_group.rank()
         if self.sharding_group is not None:
-            x = sum_gradients(self.sharding_group)(x)
-        y = self.original_layer.__call__(x)
+            with trace("moe_sum_gradients", rank, "comm"):
+                x = sum_gradients(self.sharding_group)(x)
+        with trace("moe_forward", rank, "compute"):
+            y = self.original_layer.__call__(x)
         if self.sharding_group is not None:
-            y = mx.distributed.all_sum(y, group=self.sharding_group)
+            with trace("moe_all_sum", rank, "comm"):
+                y = mx.distributed.all_sum(y, group=self.sharding_group)
         return y
 
 
@@ -1236,7 +1257,12 @@ class GlmMoeDsaShardingStrategy(TensorParallelShardingStrategy):
             # MultiLinear weights are head-major; slice heads manually.
             layer.self_attn.embed_q.apply(shard_heads)
             layer.self_attn.unembed_out.apply(shard_heads)
-
+            rank = self.group.rank()
+            cast(Any, layer).self_attn = DecodeTracedLayer(
+                cast(_LayerCallable, cast(object, layer.self_attn)),
+                f"glm_self_attn_{i:02d}",
+                rank,
+            )
             if isinstance(layer.mlp, DeepseekV32MLP):
                 layer.mlp.gate_proj = self.all_to_sharded_linear(layer.mlp.gate_proj)
                 layer.mlp.down_proj = self.sharded_to_all_linear(layer.mlp.down_proj)
@@ -1257,6 +1283,12 @@ class GlmMoeDsaShardingStrategy(TensorParallelShardingStrategy):
                 self.sharded_to_all_linear_in_place(layer.mlp.switch_mlp.down_proj)
                 self.all_to_sharded_linear_in_place(layer.mlp.switch_mlp.up_proj)
                 cast(Any, layer.mlp).sharding_group = self.group
+
+            cast(Any, layer).mlp = DecodeTracedLayer(
+                cast(_LayerCallable, cast(object, layer.mlp)),
+                f"glm_mlp_{i:02d}",
+                rank,
+            )
 
             mx.eval(layer)
             if on_layer_loaded is not None:

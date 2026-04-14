@@ -16,6 +16,7 @@ from exo.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from exo.shared.topology import Topology
 from exo.shared.types.common import NodeId
 from exo.shared.types.memory import Memory
+from exo.shared.types.multiaddr import Multiaddr
 from exo.shared.types.profiling import (
     NetworkInterfaceInfo,
     NodeNetworkInfo,
@@ -283,42 +284,69 @@ def test_get_mlx_jaccl_coordinators():
     node_b_id = NodeId()
     node_c_id = NodeId()
 
-    # fully connected (directed) between the 3 nodes
+    # fully connected (directed) between the 3 nodes using routable addresses
     conn_a_b = Connection(
-        source=node_a_id, sink=node_b_id, edge=create_socket_connection(1)
+        source=node_a_id,
+        sink=node_b_id,
+        edge=SocketConnection(
+            sink_multiaddr=Multiaddr(address="/ip4/192.168.68.56/tcp/1234")
+        ),
     )
     conn_b_a = Connection(
-        source=node_b_id, sink=node_a_id, edge=create_socket_connection(2)
+        source=node_b_id,
+        sink=node_a_id,
+        edge=SocketConnection(
+            sink_multiaddr=Multiaddr(address="/ip4/192.168.68.55/tcp/1234")
+        ),
     )
     conn_b_c = Connection(
-        source=node_b_id, sink=node_c_id, edge=create_socket_connection(3)
+        source=node_b_id,
+        sink=node_c_id,
+        edge=SocketConnection(
+            sink_multiaddr=Multiaddr(address="/ip4/192.168.68.57/tcp/1234")
+        ),
     )
     conn_c_b = Connection(
-        source=node_c_id, sink=node_b_id, edge=create_socket_connection(4)
+        source=node_c_id,
+        sink=node_b_id,
+        edge=SocketConnection(
+            sink_multiaddr=Multiaddr(address="/ip4/192.168.68.56/tcp/1234")
+        ),
     )
     conn_c_a = Connection(
-        source=node_c_id, sink=node_a_id, edge=create_socket_connection(5)
+        source=node_c_id,
+        sink=node_a_id,
+        edge=SocketConnection(
+            sink_multiaddr=Multiaddr(address="/ip4/192.168.68.55/tcp/1234")
+        ),
     )
     conn_a_c = Connection(
-        source=node_a_id, sink=node_c_id, edge=create_socket_connection(6)
+        source=node_a_id,
+        sink=node_c_id,
+        edge=SocketConnection(
+            sink_multiaddr=Multiaddr(address="/ip4/192.168.68.57/tcp/1234")
+        ),
     )
 
     network_a = NodeNetworkInfo(
         interfaces=[
-            NetworkInterfaceInfo(name="en0", ip_address="169.254.0.5"),
-            NetworkInterfaceInfo(name="en0", ip_address="169.254.0.2"),
+            NetworkInterfaceInfo(
+                name="en0", ip_address="192.168.68.55", interface_type="ethernet"
+            ),
         ]
     )
     network_b = NodeNetworkInfo(
         interfaces=[
-            NetworkInterfaceInfo(name="en0", ip_address="169.254.0.1"),
-            NetworkInterfaceInfo(name="en0", ip_address="169.254.0.4"),
+            NetworkInterfaceInfo(
+                name="en0", ip_address="192.168.68.56", interface_type="ethernet"
+            ),
         ]
     )
     network_c = NodeNetworkInfo(
         interfaces=[
-            NetworkInterfaceInfo(name="en0", ip_address="169.254.0.3"),
-            NetworkInterfaceInfo(name="en0", ip_address="169.254.0.6"),
+            NetworkInterfaceInfo(
+                name="en0", ip_address="192.168.68.57", interface_type="ethernet"
+            ),
         ]
     )
     node_network = {
@@ -382,6 +410,59 @@ def test_get_mlx_jaccl_coordinators():
     assert coordinators[node_c_id] == (
         f"{conn_c_a.edge.sink_multiaddr.ip_address}:5000"
     ), "node_c should use the IP from conn_c_a"
+
+
+def test_get_mlx_jaccl_coordinators_prefers_ethernet_over_tailscale():
+    node_a_id = NodeId()
+    node_b_id = NodeId()
+
+    tailscale_conn = Connection(
+        source=node_b_id,
+        sink=node_a_id,
+        edge=SocketConnection(
+            sink_multiaddr=Multiaddr(address="/ip4/100.69.240.64/tcp/5000")
+        ),
+    )
+    ethernet_conn = Connection(
+        source=node_b_id,
+        sink=node_a_id,
+        edge=SocketConnection(
+            sink_multiaddr=Multiaddr(address="/ip4/192.168.68.55/tcp/5000")
+        ),
+    )
+
+    node_network = {
+        node_a_id: NodeNetworkInfo(
+            interfaces=[
+                NetworkInterfaceInfo(
+                    name="en0",
+                    ip_address="192.168.68.55",
+                    interface_type="ethernet",
+                ),
+                NetworkInterfaceInfo(
+                    name="utun4",
+                    ip_address="100.69.240.64",
+                    interface_type="unknown",
+                ),
+            ]
+        ),
+        node_b_id: NodeNetworkInfo(interfaces=[]),
+    }
+
+    topology = Topology()
+    topology.add_node(node_a_id)
+    topology.add_node(node_b_id)
+    topology.add_connection(tailscale_conn)
+    topology.add_connection(ethernet_conn)
+
+    coordinators = get_mlx_jaccl_coordinators(
+        node_a_id,
+        coordinator_port=5000,
+        cycle_digraph=topology,
+        node_network=node_network,
+    )
+
+    assert coordinators[node_b_id] == "192.168.68.55:5000"
 
 
 class TestAllocateLayersProportionally:

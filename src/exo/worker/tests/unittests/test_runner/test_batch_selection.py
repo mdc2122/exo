@@ -53,3 +53,33 @@ def test_builder_keeps_batch_generator_for_single_node_turboquant(
     generator = builder.build()
 
     assert isinstance(generator, runner_module.BatchGenerator)
+
+
+@pytest.mark.parametrize("falsey_value", ["", "0", "false", "False", "off", "no"])
+def test_builder_keeps_batch_generator_for_falsey_no_batch_override(
+    monkeypatch: pytest.MonkeyPatch,
+    falsey_value: str,
+) -> None:
+    monkeypatch.setenv("EXO_NO_BATCH", falsey_value)
+    monkeypatch.setattr(runner_module, "TURBOQUANT_KV_BITS", None)
+
+    builder = _builder_with_group(group=_FakeGroup())
+
+    generator = builder.build()
+
+    assert isinstance(generator, runner_module.BatchGenerator)
+
+
+@pytest.mark.parametrize("truthy_value", ["1", "true", "TRUE", "on", "yes"])
+def test_builder_uses_sequential_generator_for_truthy_no_batch_override(
+    monkeypatch: pytest.MonkeyPatch,
+    truthy_value: str,
+) -> None:
+    monkeypatch.setenv("EXO_NO_BATCH", truthy_value)
+    monkeypatch.setattr(runner_module, "TURBOQUANT_KV_BITS", None)
+
+    builder = _builder_with_group(group=_FakeGroup())
+
+    generator = builder.build()
+
+    assert isinstance(generator, runner_module.SequentialGenerator)

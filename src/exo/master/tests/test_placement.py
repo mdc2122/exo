@@ -470,6 +470,74 @@ def test_tensor_rdma_backend_connectivity_matrix(
             assert len(ip_part.split(".")) == 4
 
 
+def test_tensor_rdma_backend_accepts_single_direction_rdma_edge(
+    model_card: ModelCard,
+) -> None:
+    topology = Topology()
+    model_card.n_layers = 12
+    model_card.storage_size = Memory.from_bytes(1000)
+
+    node_a = NodeId()
+    node_b = NodeId()
+
+    node_memory = {
+        node_a: create_node_memory(500),
+        node_b: create_node_memory(500),
+    }
+    ethernet_a = NetworkInterfaceInfo(name="en0", ip_address="10.0.0.1")
+    ethernet_b = NetworkInterfaceInfo(name="en0", ip_address="10.0.0.2")
+    node_network = {
+        node_a: NodeNetworkInfo(interfaces=[ethernet_a]),
+        node_b: NodeNetworkInfo(interfaces=[ethernet_b]),
+    }
+
+    topology.add_node(node_a)
+    topology.add_node(node_b)
+    topology.add_connection(
+        Connection(
+            source=node_a,
+            sink=node_b,
+            edge=SocketConnection(
+                sink_multiaddr=Multiaddr(address="/ip4/10.0.0.2/tcp/8000")
+            ),
+        )
+    )
+    topology.add_connection(
+        Connection(
+            source=node_b,
+            sink=node_a,
+            edge=SocketConnection(
+                sink_multiaddr=Multiaddr(address="/ip4/10.0.0.1/tcp/8000")
+            ),
+        )
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_a, edge=create_rdma_connection(4))
+    )
+
+    cic = PlaceInstance(
+        sharding=Sharding.Tensor,
+        instance_meta=InstanceMeta.MlxJaccl,
+        command_id=CommandId(),
+        model_card=model_card,
+        min_nodes=1,
+    )
+
+    placements = place_instance(cic, topology, {}, node_memory, node_network)
+
+    assert len(placements) == 1
+    instance = next(iter(placements.values()))
+    assert isinstance(instance, MlxJacclInstance)
+    assert instance.jaccl_devices is not None
+
+    matrix = instance.jaccl_devices
+    assert len(matrix) == 2
+    for i in range(2):
+        assert matrix[i][i] is None
+    assert matrix[0][1] == "rdma_en4"
+    assert matrix[1][0] == "rdma_en4"
+
+
 def _make_task(
     instance_id: InstanceId,
     status: TaskStatus = TaskStatus.Running,

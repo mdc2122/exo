@@ -1,6 +1,6 @@
 import contextlib
-from collections.abc import Generator, Mapping
 import ipaddress
+from collections.abc import Generator, Mapping
 
 from loguru import logger
 
@@ -320,9 +320,16 @@ def get_mlx_jaccl_devices_matrix(
                     matrix[i][j] = conn.source_rdma_iface
                     break
             else:
-                raise ValueError(
-                    "Current jaccl backend requires all-to-all RDMA connections"
-                )
+                for reverse_conn in cycle_digraph.get_all_connections_between(
+                    node_j, node_i
+                ):
+                    if isinstance(reverse_conn, RDMAConnection):
+                        matrix[i][j] = reverse_conn.sink_rdma_iface
+                        break
+                else:
+                    raise ValueError(
+                        "Current jaccl backend requires all-to-all RDMA connections"
+                    )
 
     return matrix
 
@@ -409,7 +416,7 @@ def _find_ip_prioritised(
     return min(
         ips,
         key=lambda ip: (
-            0 if _is_tailscale_ip(ip) else 1,
+            1 if _is_tailscale_ip(ip) else 0,
             priority.get(ip_to_type.get(ip, "unknown"), 2),
         ),
     )

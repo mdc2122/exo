@@ -150,9 +150,7 @@ class Runner:
         self.send_task_status(task.task_id, TaskStatus.Running)
 
         match task:
-            case ConnectToGroup() if isinstance(
-                self.current_status, (RunnerIdle, RunnerFailed)
-            ):
+            case ConnectToGroup() if isinstance(self.current_status, RunnerIdle):
                 assert isinstance(self.generator, Builder)
                 logger.info("runner connecting")
                 self.update_status(RunnerConnecting())
@@ -343,15 +341,6 @@ class Runner:
                     )
 
                 elif self.device_rank == 0:
-                    if os.environ.get("EXO_TURBOQUANT_TRACE", "0") == "1":
-                        logger.info(
-                            "rank0 token emit: command_id={} token={} text={!r} finish_reason={} thinking={}",
-                            command_id,
-                            response.token,
-                            response.text,
-                            response.finish_reason,
-                            response.is_thinking,
-                        )
                     assert response.finish_reason not in (
                         "error",
                         "tool_calls",
@@ -431,18 +420,24 @@ class Builder:
             )
 
         device_rank = 0 if self.group is None else self.group.rank()
-
-        sequential_reason: str | None = None
         if os.environ.get("EXO_NO_BATCH"):
-            sequential_reason = "batching disabled"
-        elif TURBOQUANT_KV_BITS is not None and self.group is not None:
-            sequential_reason = (
-                "TurboQuant clustered safety fallback enabled while the batched path"
-                " remains under recovery"
+            logger.info("using SequentialGenerator (batching disabled)")
+            return SequentialGenerator(
+                model=self.inference_model,
+                tokenizer=self.tokenizer,
+                group=self.group,
+                tool_parser=tool_parser,
+                kv_prefix_cache=kv_prefix_cache,
+                model_id=self.model_id,
+                device_rank=device_rank,
+                cancel_receiver=self.cancel_receiver,
+                event_sender=self.event_sender,
+                vision_processor=vision_processor,
             )
-
-        if sequential_reason is not None:
-            logger.info("using SequentialGenerator ({})", sequential_reason)
+        if TURBOQUANT_KV_BITS is not None:
+            logger.info(
+                "using SequentialGenerator (TurboQuant single-request safety mode)"
+            )
             return SequentialGenerator(
                 model=self.inference_model,
                 tokenizer=self.tokenizer,
