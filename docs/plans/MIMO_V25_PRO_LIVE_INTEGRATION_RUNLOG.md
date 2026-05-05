@@ -84,3 +84,46 @@ Next safe live smoke step:
 3. Send a text-only dry chat request only after an operator intentionally provisions compatible MiMo Pro weights/config in the model cache.
 4. Before any inference smoke, send a MiMo Pro request containing `image_url`, `video_url`, and an audio-shaped dict part and confirm each returns HTTP 400 before media fetch/download/worker dispatch.
 5. Run a known-good Kimi K2.6/Kimi K2.5 video upload/chat smoke separately to verify video behavior remains intact.
+
+## 2026-05-05 runtime smoke continuation
+
+Follow-up after the clean live integration commit:
+
+- Full MiMo Pro artifacts were found locally at `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/hf/XiaomiMiMo--MiMo-V2.5-Pro` (`du -sh`: `962G`).
+- A no-download/offline exo API smoke was attempted with `EXO_MODELS_READ_ONLY_DIRS=/Volumes/GLM5-NVMe/exo/mimo-v25-pro/hf`, `EXO_OFFLINE=true`, no TurboQuant settings, and an isolated smoke home/port.
+- First smoke attempt failed before API readiness because `EXO_DASHBOARD_DIR=dashboard/build` resolves relative to `$HOME`; it expected `/Users/studio2/dashboard/build`.
+- Second smoke attempt used `EXO_DASHBOARD_DIR=exo/dashboard/build` and reached the API. It confirmed the Pro model card was available and generated placement previews, but with only one Studio2 node visible in this isolated smoke:
+  - node RAM available: about `527,649,112,064` bytes
+  - Pro storage size before correction: `1,250,000,000,000` bytes
+  - placement previews: Pipeline/Ring, Pipeline/Jaccl, Tensor/Ring, Tensor/Jaccl all returned `No cycles found with sufficient memory`
+- No model weights were loaded, no inference was run, no download was started, and no live service was left running.
+
+Runtime integration fixes added after the smoke evidence:
+
+- Register MLX-LM model type alias `mimo_v2 -> mimo_v2_flash` in `src/exo/worker/engines/mlx/utils_mlx.py`, because the local MiMo Pro `config.json` uses `model_type: mimo_v2` while the pinned MLX-LM runtime module is `mlx_lm.models.mimo_v2_flash`.
+- Correct the MiMo Pro model-card storage estimate from `1,250,000,000,000` bytes to the actual local safetensors index total `1,033,369,538,304` bytes. This still cannot fit on one 512 GiB Studio node, but should permit placement only when enough cluster nodes are visible.
+- Add a no-weight-load runtime regression test at `src/exo/worker/engines/mlx/tests/test_mimo_mlx_runtime.py` covering the alias and local config compatibility with the pinned MLX-LM MiMo V2 implementation.
+
+Verification command:
+
+```bash
+EXO_DASHBOARD_DIR=exo/dashboard/build \
+EXO_MODELS_READ_ONLY_DIRS=/Volumes/GLM5-NVMe/exo/mimo-v25-pro/hf \
+EXO_OFFLINE=true \
+uv run pytest \
+  src/exo/worker/engines/mlx/tests/test_mimo_mlx_runtime.py \
+  src/exo/shared/tests/test_mimo_v25_pro_model_card.py \
+  src/exo/api/tests/test_mimo_v25_pro_chat_adapter.py \
+  src/exo/api/tests/test_video_uploads.py \
+  -q
+```
+
+Result:
+
+```text
+29 passed in 2.35s
+```
+
+Ruff and basedpyright were also clean for the new runtime/test files.
+
+Current online status: MiMo Pro is still not online. The next safe runtime step is to start the actual multi-node exo cluster, confirm at least enough nodes are visible to cover ~1.033 TB model storage/RAM budget, then create a Pipeline or Tensor instance from `/instance/previews` and run one tiny text-only `/v1/chat/completions` request. Do not use TurboQuant for this path.

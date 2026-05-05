@@ -40,7 +40,7 @@ import contextlib
 
 import mlx.core as mx
 import mlx.nn as nn
-from mlx_lm.utils import load_model
+import mlx_lm.utils as mlx_lm_utils
 from pydantic import RootModel
 
 from exo.download.download_utils import build_model_path
@@ -70,6 +70,13 @@ from exo.worker.engines.mlx.auto_parallel import (
     tensor_auto_parallel,
 )
 from exo.worker.runner.bootstrap import logger
+
+# MiMo V2.5 Pro ships config model_type="mimo_v2" while the MLX-LM
+# implementation module in the pinned runtime is named mimo_v2_flash. Register
+# the alias before load_model is called so both single-node and sharded load
+# paths can resolve the text-only MiMo V2 causal LM implementation.
+cast(dict[str, str], mlx_lm_utils.MODEL_REMAPPING).setdefault("mimo_v2", "mimo_v2_flash")
+load_model = mlx_lm_utils.load_model
 
 Group = mx.distributed.Group
 

@@ -16,4 +16,4 @@ capabilities = ["text", "agentic", "long-context"]
 context_length = 1048576
 
 [storage_size]
-in_bytes = 1250000000000
+in_bytes = 1033369538304
