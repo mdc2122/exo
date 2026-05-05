@@ -33,6 +33,7 @@ CUSTOM_MODEL_ID: Final[str] = "XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX"
 BASE_MODEL_ID: Final[str] = "XiaomiMiMo/MiMo-V2.5-Pro"
 DEFAULT_GROUP_SIZE: Final[int] = 64
 DEFAULT_BITS: Final[int] = 6
+FP8_BLOCK_SIZE: Final[int] = 128
 HEADROOM_BYTES: Final[int] = 250 * 1024**3
 COPIED_FILE_NAMES: Final[frozenset[str]] = frozenset(
     {
@@ -419,12 +420,37 @@ def write_output_index(output_dir: Path, manifest: RunManifest) -> None:
     )
 
 
+def _ceil_div(numerator: int, denominator: int) -> int:
+    if denominator <= 0:
+        raise ValueError(f"denominator must be positive, got {denominator}")
+    return -(-numerator // denominator)
+
+
 def _broadcast_scale_inv(scale_inv: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
     if len(shape) != 2:
         raise ValueError(f"FP8 dequantization currently expects rank-2 weights, got {shape}")
-    row_block = shape[0] // scale_inv.shape[0]
-    col_block = shape[1] // scale_inv.shape[1]
-    return scale_inv.repeat_interleave(row_block, dim=0).repeat_interleave(col_block, dim=1)
+    if scale_inv.ndim != 2:
+        raise ValueError(f"FP8 scale_inv must be rank-2, got {tuple(scale_inv.shape)}")
+    rows, cols = int(shape[0]), int(shape[1])
+    scale_rows, scale_cols = int(scale_inv.shape[0]), int(scale_inv.shape[1])
+    if rows <= 0 or cols <= 0:
+        raise ValueError(f"FP8 target shape must be positive, got {shape}")
+    if scale_rows <= 0 or scale_cols <= 0:
+        raise ValueError(f"FP8 scale_inv shape must be positive, got {tuple(scale_inv.shape)}")
+
+    required_scale_rows = _ceil_div(rows, FP8_BLOCK_SIZE)
+    required_scale_cols = _ceil_div(cols, FP8_BLOCK_SIZE)
+    if scale_rows < required_scale_rows or scale_cols < required_scale_cols:
+        raise ValueError(
+            "FP8 scale_inv does not cover target shape with 128x128 source blocks: "
+            f"scale_inv={tuple(scale_inv.shape)} target={tuple(shape)} "
+            f"required_scale_shape={(required_scale_rows, required_scale_cols)}"
+        )
+
+    expanded = scale_inv.repeat_interleave(FP8_BLOCK_SIZE, dim=0).repeat_interleave(
+        FP8_BLOCK_SIZE, dim=1
+    )
+    return expanded[:rows, :cols]
 
 
 def _torch_to_mx(tensor: torch.Tensor) -> mx.array:

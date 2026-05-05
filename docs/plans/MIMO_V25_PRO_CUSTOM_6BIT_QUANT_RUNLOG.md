@@ -390,3 +390,150 @@ After completion:
 6. Only after valid placement/load, run one tiny text-only generation request.
 7. Do not send media requests for this Pro Track A model.
 8. Do not use TurboQuant for this path.
+
+## 2026-05-05 CON-75 real-shard FP8 scale broadcast repair
+
+### Failure reproduced
+
+A focused diagnostic loaded only `model_mtp.safetensors` and the paired MTP QKV tensors:
+
+- `model.mtp.layers.0.self_attn.qkv_proj.weight`: shape `[27136, 6144]`, dtype `torch.float8_e4m3fn`
+- `model.mtp.layers.0.self_attn.qkv_proj.weight_scale_inv`: shape `[216, 48]`, dtype `torch.float32`
+
+The previous broadcast helper inferred block sizes with integer division:
+
+- row block: `27136 // 216 = 125`
+- column block: `6144 // 48 = 128`
+- expanded scale shape: `[27000, 6144]`
+
+Multiplying `[27136, 6144]` by `[27000, 6144]` reproduced the real failure:
+
+```text
+RuntimeError: The size of tensor a (27136) must match the size of tensor b (27000) at non-singleton dimension 0
+```
+
+Correct semantics for these FP8 source tensors are fixed 128x128 block scales. `scale_inv` may contain extra scale rows/columns for partial final blocks. For the MTP QKV tensor, `[216,48]` expands to `[27648,6144]` and must then be cropped to the target weight shape `[27136,6144]`.
+
+### Harness fix
+
+Updated `scripts/mimo_v25_pro_6bit_quantize.py`:
+
+- Added explicit `FP8_BLOCK_SIZE = 128`.
+- Validates target and scale tensors are positive rank-2 shapes.
+- Computes required scale shape with ceil-div over 128x128 source blocks.
+- Fails if the scale tensor does not cover the target.
+- Expands each scale value over 128 rows/columns and crops to exactly the target tensor shape.
+
+Regression tests added in `scripts/test_mimo_v25_pro_6bit_quantize.py`:
+
+- Exact MTP QKV case: target `[27136,6144]`, scale `[216,48]`, verifying crop from the extra FP8 block rows.
+- Normal divisible case: target `[256,256]`, scale `[2,2]`, verifying standard 128x128 block expansion.
+
+### Focused verification commands and exact results
+
+```bash
+uv run pytest scripts/test_mimo_v25_pro_6bit_quantize.py -q
+# 14 passed in 1.08s
+# exit 0
+
+uv run ruff check scripts/mimo_v25_pro_6bit_quantize.py scripts/test_mimo_v25_pro_6bit_quantize.py
+# All checks passed!
+# exit 0
+
+uv run basedpyright scripts/mimo_v25_pro_6bit_quantize.py scripts/test_mimo_v25_pro_6bit_quantize.py
+# 83 errors, 0 warnings, 0 notes
+# exit 1
+```
+
+`basedpyright` failures are pre-existing strict typing issues in this standalone script/test path (JSON `Any`, safetensors stub gaps, total=False TypedDict required-key access, argparse `Any`, and private test helper usage). The FP8 repair did not introduce a new runtime regression in the focused pytest/ruff checks. An earlier attempted `ruff check ... docs/plans/MIMO_V25_PRO_CUSTOM_6BIT_QUANT_RUNLOG.md` was an invalid target because Ruff parsed Markdown as Python and produced syntax errors; Ruff was rerun on the changed Python files only and passed.
+
+### Failed manifest cleanup / resume state
+
+Before cleanup, the official output manifest at `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/MiMo-V2.5-Pro-6bit/quantization_manifest.json` had:
+
+```text
+{'failed': 1, 'dry-run': 33}
+model_mtp.safetensors: failed RuntimeError('The size of tensor a (27136) must match the size of tensor b (27000) at non-singleton dimension 0')
+tmp files: 0
+```
+
+Ran:
+
+```bash
+uv run python scripts/mimo_v25_pro_6bit_quantize.py --cleanup-incomplete
+uv run python scripts/mimo_v25_pro_6bit_quantize.py --dry-run
+```
+
+After cleanup and dry-run regeneration:
+
+```text
+{'dry-run': 34}
+model_mtp.safetensors status: dry-run
+model_mtp.safetensors error: None
+tmp_count: 0
+expected_output_size_bytes: 895286156544
+```
+
+### Real-shard pilot
+
+A real-shard pilot converted only `model_mtp.safetensors` into an approved child output:
+
+```bash
+OUT=/Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/MiMo-V2.5-Pro-6bit/pilot-model-mtp-20260505T184640Z
+LOG=/Volumes/GLM5-NVMe/exo/mimo-v25-pro/logs/mimo-v25-pro-6bit-model-mtp-pilot-20260505T184640Z.log
+uv run python scripts/mimo_v25_pro_6bit_quantize.py \
+  --output "$OUT" \
+  --include-shard model_mtp.safetensors \
+  --convert 2>&1 | tee "$LOG"
+```
+
+Pilot result:
+
+```text
+counts {'complete': 1}
+model_mtp.safetensors status: complete
+output_size: 1659958379
+error: None
+tmp_count: 0
+sample source_scale_inv: model.mtp.layers.0.self_attn.qkv_proj.weight_scale_inv
+```
+
+Disk check after the pilot showed about `1.2Ti` available on `/Volumes/GLM5-NVMe`.
+
+### Current full conversion status
+
+Because the real-shard pilot passed and disk remained sufficient, full conversion was relaunched in the background:
+
+```bash
+LOG=/Volumes/GLM5-NVMe/exo/mimo-v25-pro/logs/mimo-v25-pro-6bit-convert-resume-20260505T184658Z.log
+PIDFILE=/Volumes/GLM5-NVMe/exo/mimo-v25-pro/logs/mimo-v25-pro-6bit-convert-resume-20260505T184658Z.pid
+nohup uv run python scripts/mimo_v25_pro_6bit_quantize.py --convert >"$LOG" 2>&1 &
+echo 54533 > "$PIDFILE"
+```
+
+Monitoring commands:
+
+```bash
+ps -p 54533 -o pid=,stat=,etime=,command=
+tail -f /Volumes/GLM5-NVMe/exo/mimo-v25-pro/logs/mimo-v25-pro-6bit-convert-resume-20260505T184658Z.log
+uv run python - <<'PY'
+import json
+from pathlib import Path
+manifest = json.loads(Path('/Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/MiMo-V2.5-Pro-6bit/quantization_manifest.json').read_text())
+counts = {}
+for shard in manifest.get('shards', {}).values():
+    counts[shard.get('status')] = counts.get(shard.get('status'), 0) + 1
+print(counts)
+PY
+```
+
+Observed immediately after launch:
+
+```text
+PID 54533 running: uv run python scripts/mimo_v25_pro_6bit_quantize.py --convert
+status_counts {'complete': 1, 'running': 1, 'dry-run': 32}
+model_mtp.safetensors: complete
+model_pp0_ep0_shard0.safetensors: running
+```
+
+The official source checkpoint under `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/hf/XiaomiMiMo--MiMo-V2.5-Pro` was not modified.

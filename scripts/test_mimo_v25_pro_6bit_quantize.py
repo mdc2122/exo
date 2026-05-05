@@ -119,6 +119,30 @@ def test_tensor_plan_skips_unpaired_fp8_weight() -> None:
     assert "no same-shard" in entry["reason"]
 
 
+def test_broadcast_scale_inv_crops_extra_fp8_block_rows_for_mtp_qkv() -> None:
+    scale_inv = torch.arange(216 * 48, dtype=torch.float32).reshape(216, 48)
+
+    broadcast = quantize._broadcast_scale_inv(scale_inv, (27136, 6144))
+
+    assert broadcast.shape == (27136, 6144)
+    assert broadcast[0, 0] == scale_inv[0, 0]
+    assert broadcast[127, 127] == scale_inv[0, 0]
+    assert broadcast[128, 0] == scale_inv[1, 0]
+    assert broadcast[27135, 6143] == scale_inv[211, 47]
+
+
+def test_broadcast_scale_inv_preserves_normal_divisible_fp8_blocks() -> None:
+    scale_inv = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
+
+    broadcast = quantize._broadcast_scale_inv(scale_inv, (256, 256))
+
+    assert broadcast.shape == (256, 256)
+    assert torch.all(broadcast[:128, :128] == 1.0)
+    assert torch.all(broadcast[:128, 128:] == 2.0)
+    assert torch.all(broadcast[128:, :128] == 3.0)
+    assert torch.all(broadcast[128:, 128:] == 4.0)
+
+
 def test_write_config_replaces_official_fp8_quantization_metadata(tmp_path: Path) -> None:
     source = tmp_path / "source"
     output = tmp_path / "output"
