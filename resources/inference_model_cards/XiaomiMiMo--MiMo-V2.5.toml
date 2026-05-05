@@ -1,0 +1,28 @@
+# Track B native omnimodal artifact for Xiaomi MiMo-V2.5.
+# Official checkpoint is FP8 E4M3 mixed with BF16 ignored layers, not full BF16.
+model_id = "XiaomiMiMo/MiMo-V2.5"
+n_layers = 48
+hidden_size = 4096
+num_key_value_heads = 4
+architecture = "MiMoV2ForCausalLM"
+supports_tensor = true
+tasks = ["TextGeneration"]
+family = "mimo"
+quantization = "fp8"
+base_model = "MiMo-V2.5"
+capabilities = ["text", "image", "video", "audio", "agentic", "long-context"]
+
+context_length = 1048576
+
+[storage_size]
+in_bytes = 315031102208
+
+[vision]
+image_token_id = 151655
+image_token = "<|image_pad|>"
+model_type = "mimovl"
+weights_repo = "XiaomiMiMo/MiMo-V2.5"
+processor_repo = "XiaomiMiMo/MiMo-V2.5"
+temporal_merge_kernel_size = 2
+sample_fps = 2.0
+in_patch_limit_each_frame = 4096
