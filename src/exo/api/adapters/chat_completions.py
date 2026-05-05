@@ -33,6 +33,7 @@ from exo.api.types import (
 )
 from exo.download.download_utils import create_http_session
 from exo.shared.constants import allow_kimi_video, allow_kimi_video_data_urls
+from exo.shared.models.model_cards import MIMO_V25_PRO_MODEL_ID
 from exo.shared.types.chunks import (
     ErrorChunk,
     PrefillProgressChunk,
@@ -743,9 +744,80 @@ def validate_kimi_video_feature_enabled(request: ChatCompletionRequest) -> None:
     )
 
 
+def _is_mimo_v25_pro_request(request: ChatCompletionRequest) -> bool:
+    return request.model == MIMO_V25_PRO_MODEL_ID
+
+
+def _mapping_media_marker(content_part: Mapping[object, object]) -> str | None:
+    raw_type = content_part.get("type")
+    normalized_type = raw_type.lower() if isinstance(raw_type, str) else ""
+    if normalized_type in {
+        "audio",
+        "image",
+        "image_url",
+        "input_audio",
+        "input_image",
+        "input_video",
+        "speech",
+        "video",
+        "video_url",
+    }:
+        return normalized_type
+    for marker in ("audio", "image", "image_url", "input_audio", "video", "video_url"):
+        if marker in content_part:
+            return marker
+    if _is_raw_frame_array_video_payload(content_part):
+        return "video"
+    return None
+
+
+def _content_part_media_marker(content_part: object) -> str | None:
+    if isinstance(content_part, ChatCompletionMessageImageUrl):
+        return "image_url"
+    if isinstance(content_part, ChatCompletionMessageVideoUrl):
+        return "video_url"
+    if isinstance(content_part, Mapping):
+        return _mapping_media_marker(cast(Mapping[object, object], content_part))
+    return None
+
+
+def _message_media_marker(message: ChatCompletionMessage) -> str | None:
+    content = message.content
+    if isinstance(content, list):
+        for part in content:
+            marker = _content_part_media_marker(part)
+            if marker is not None:
+                return marker
+        return None
+    return _content_part_media_marker(content)
+
+
+def validate_mimo_v25_pro_text_only_request(request: ChatCompletionRequest) -> None:
+    """Fail closed for MiMo Pro media requests before media fetch or dispatch."""
+    if not _is_mimo_v25_pro_request(request):
+        return
+
+    for message_index, message in enumerate(request.messages):
+        marker = _message_media_marker(message)
+        if marker is None:
+            continue
+        raise VideoValidationError(
+            status_code=400,
+            code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
+            param=f"messages[{message_index}].content",
+            message=(
+                f"{MIMO_V25_PRO_MODEL_ID} is text-only in Track A and does not "
+                f"support media content ({marker}). Submit a text-only request; "
+                "image, video, audio, speech, multimodal, and omnimodal inputs "
+                "are rejected before inference or media download."
+            ),
+        )
+
+
 async def chat_request_to_text_generation(
     request: ChatCompletionRequest,
 ) -> TextGenerationTaskParams:
+    validate_mimo_v25_pro_text_only_request(request)
     validate_video_url_content_array_shape(request)
     validate_single_video_url_part_per_request(request)
     validate_video_streaming_not_requested(request)

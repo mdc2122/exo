@@ -124,6 +124,23 @@ class VisionCardConfig(CamelCaseModel):
     in_patch_limit_each_frame: int = 4096
 
 
+MIMO_V25_PRO_MODEL_ID = ModelId("XiaomiMiMo/MiMo-V2.5-Pro")
+MIMO_V25_PRO_ARCHITECTURE = "MiMoV2ForCausalLM"
+_MEDIA_CAPABILITY_MARKERS = frozenset(
+    {
+        "audio",
+        "image",
+        "images",
+        "multimodal",
+        "omni",
+        "omnimodal",
+        "speech",
+        "video",
+        "vision",
+    }
+)
+
+
 class ModelCard(CamelCaseModel):
     model_id: ModelId
     storage_size: Memory
@@ -132,6 +149,7 @@ class ModelCard(CamelCaseModel):
     supports_tensor: bool
     num_key_value_heads: PositiveInt | None = None
     tasks: list[ModelTask]
+    architecture: str = ""
     components: list[ComponentInfo] | None = None
     family: str = ""
     quantization: str = ""
@@ -151,6 +169,25 @@ class ModelCard(CamelCaseModel):
                 "vision",
                 self.vision.model_copy(update={"weights_repo": str(self.model_id)}),
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_mimo_v25_pro_text_only_surface(self) -> "ModelCard":
+        if self.model_id != MIMO_V25_PRO_MODEL_ID:
+            return self
+
+        if self.architecture != MIMO_V25_PRO_ARCHITECTURE:
+            raise ValueError(
+                f"{MIMO_V25_PRO_MODEL_ID} requires architecture "
+                f"{MIMO_V25_PRO_ARCHITECTURE}"
+            )
+        if self.tasks != [ModelTask.TextGeneration]:
+            raise ValueError(f"{MIMO_V25_PRO_MODEL_ID} supports text generation only")
+        if self.vision is not None:
+            raise ValueError(f"{MIMO_V25_PRO_MODEL_ID} must not declare vision support")
+        declared_capabilities = {capability.lower() for capability in self.capabilities}
+        if not _MEDIA_CAPABILITY_MARKERS.isdisjoint(declared_capabilities):
+            raise ValueError(f"{MIMO_V25_PRO_MODEL_ID} must not declare media capabilities")
         return self
 
     @field_validator("tasks", mode="before")
@@ -247,9 +284,16 @@ class ConfigData(BaseModel):
     )
     max_position_embeddings: int = 0
     vision: VisionCardConfig | None = None
+    num_nextn_predict_layers: int | None = None
+    mtp_enabled: bool | None = None
+    use_mtp: bool | None = None
+    mtp_config: dict[str, Any] | None = None
 
     @property
     def supports_tensor(self) -> bool:
+        if self.architectures == [MIMO_V25_PRO_ARCHITECTURE]:
+            return self._mimo_v25_pro_mtp_absent_or_disabled()
+
         return self.architectures in [
             ["Glm4MoeLiteForCausalLM"],
             ["GlmMoeDsaForCausalLM"],
@@ -265,6 +309,17 @@ class ConfigData(BaseModel):
             ["Step3p5ForCausalLM"],
             ["NemotronHForCausalLM"],
         ]
+
+    def _mimo_v25_pro_mtp_absent_or_disabled(self) -> bool:
+        mtp_field_values: tuple[object, ...] = (
+            self.num_nextn_predict_layers,
+            self.mtp_enabled,
+            self.use_mtp,
+        )
+        return all(
+            _is_mimo_v25_pro_disabled_mtp_value(field_value)
+            for field_value in mtp_field_values
+        ) and _mimo_v25_pro_mtp_config_absent_or_disabled(self.mtp_config)
 
     @model_validator(mode="before")
     @classmethod
@@ -301,6 +356,31 @@ class ConfigData(BaseModel):
             )
 
         return data
+
+
+def _mimo_v25_pro_mtp_config_absent_or_disabled(
+    mtp_config: dict[str, Any] | None,
+) -> bool:
+    if mtp_config is None:
+        return True
+
+    mtp_config_values: list[object] = list(mtp_config.values())
+    return all(
+        _is_mimo_v25_pro_disabled_mtp_value(field_value)
+        for field_value in mtp_config_values
+    )
+
+
+def _is_mimo_v25_pro_disabled_mtp_value(field_value: object) -> bool:
+    return (
+        field_value is None
+        or field_value is False
+        or (
+            isinstance(field_value, int)
+            and not isinstance(field_value, bool)
+            and field_value == 0
+        )
+    )
 
 
 async def fetch_config_data(model_id: ModelId) -> ConfigData:

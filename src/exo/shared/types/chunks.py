@@ -32,6 +32,7 @@ class TokenChunk(BaseChunk):
 
 class ErrorChunk(BaseChunk):
     error_message: str
+    error_code: str | None = None
     finish_reason: Literal["error"] = "error"
 
 
