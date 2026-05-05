@@ -125,6 +125,10 @@ class VisionCardConfig(CamelCaseModel):
 
 
 MIMO_V25_PRO_MODEL_ID = ModelId("XiaomiMiMo/MiMo-V2.5-Pro")
+MIMO_V25_PRO_6BIT_MLX_MODEL_ID = ModelId("XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX")
+MIMO_V25_PRO_MODEL_IDS = frozenset(
+    {MIMO_V25_PRO_MODEL_ID, MIMO_V25_PRO_6BIT_MLX_MODEL_ID}
+)
 MIMO_V25_PRO_ARCHITECTURE = "MiMoV2ForCausalLM"
 _MEDIA_CAPABILITY_MARKERS = frozenset(
     {
@@ -173,21 +177,21 @@ class ModelCard(CamelCaseModel):
 
     @model_validator(mode="after")
     def _validate_mimo_v25_pro_text_only_surface(self) -> "ModelCard":
-        if self.model_id != MIMO_V25_PRO_MODEL_ID:
+        if self.model_id not in MIMO_V25_PRO_MODEL_IDS:
             return self
 
         if self.architecture != MIMO_V25_PRO_ARCHITECTURE:
             raise ValueError(
-                f"{MIMO_V25_PRO_MODEL_ID} requires architecture "
+                f"{self.model_id} requires architecture "
                 f"{MIMO_V25_PRO_ARCHITECTURE}"
             )
         if self.tasks != [ModelTask.TextGeneration]:
-            raise ValueError(f"{MIMO_V25_PRO_MODEL_ID} supports text generation only")
+            raise ValueError(f"{self.model_id} supports text generation only")
         if self.vision is not None:
-            raise ValueError(f"{MIMO_V25_PRO_MODEL_ID} must not declare vision support")
+            raise ValueError(f"{self.model_id} must not declare vision support")
         declared_capabilities = {capability.lower() for capability in self.capabilities}
         if not _MEDIA_CAPABILITY_MARKERS.isdisjoint(declared_capabilities):
-            raise ValueError(f"{MIMO_V25_PRO_MODEL_ID} must not declare media capabilities")
+            raise ValueError(f"{self.model_id} must not declare media capabilities")
         return self
 
     @field_validator("tasks", mode="before")

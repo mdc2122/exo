@@ -1,0 +1,18 @@
+# Custom MLX affine 6-bit Track A text-only artifact for Xiaomi MiMo-V2.5-Pro.
+# This is a separate model identity from the official FP8 source card.
+model_id = "XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX"
+n_layers = 70
+hidden_size = 6144
+num_key_value_heads = 8
+architecture = "MiMoV2ForCausalLM"
+supports_tensor = true
+tasks = ["TextGeneration"]
+family = "mimo"
+quantization = "6bit-mlx-affine"
+base_model = "XiaomiMiMo/MiMo-V2.5-Pro"
+capabilities = ["text", "agentic", "long-context"]
+
+context_length = 1048576
+
+[storage_size]
+in_bytes = 895286156544
