@@ -1,5 +1,4 @@
 import itertools
-import os
 import time
 from abc import ABC, abstractmethod
 from collections import deque
@@ -16,6 +15,7 @@ from exo.shared.types.events import ChunkGenerated, Event
 from exo.shared.types.mlx import Model
 from exo.shared.types.tasks import CANCEL_ALL_TASKS, TaskId, TextGeneration
 from exo.shared.types.text_generation import TextGenerationTaskParams
+from exo.shared.types.video_errors import VisionPreprocessingError
 from exo.shared.types.worker.runner_response import GenerationResponse, ToolCallResponse
 from exo.utils.channels import MpReceiver, MpSender
 from exo.worker.engines.mlx.cache import KVPrefixCache
@@ -87,16 +87,6 @@ class InferenceGenerator(ABC):
 
     @abstractmethod
     def close(self) -> None: ...
-
-
-def advance_coordination_counter(
-    tokens_since_last_check: int, check_for_cancel_every: int
-) -> tuple[int, bool]:
-    threshold = max(check_for_cancel_every, 1)
-    updated_tokens = tokens_since_last_check + 1
-    if updated_tokens >= threshold:
-        return 0, True
-    return updated_tokens, False
 
 
 EXO_RUNNER_MUST_FAIL = "EXO RUNNER MUST FAIL"
@@ -205,6 +195,9 @@ class SequentialGenerator(InferenceGenerator):
             else:
                 return map(lambda task: (task, Cancelled()), self._cancelled_tasks)
 
+            if self._active is None:
+                return map(lambda task: (task, Cancelled()), self._cancelled_tasks)
+
         assert self._active is not None
 
         task, mlx_gen, queue, output_generator = self._active
@@ -224,6 +217,9 @@ class SequentialGenerator(InferenceGenerator):
             if self._queue:
                 self._start_next()
 
+        except VisionPreprocessingError as e:
+            self._send_error(task, e)
+            self._active = None
         except Exception as e:
             self._send_error(task, e)
             self._active = None
@@ -238,6 +234,10 @@ class SequentialGenerator(InferenceGenerator):
         task = self._queue.popleft()
         try:
             mlx_gen = self._build_generator(task)
+        except VisionPreprocessingError as e:
+            self._send_error(task, e)
+            self._active = None
+            return
         except Exception as e:
             self._send_error(task, e)
             raise
@@ -259,6 +259,7 @@ class SequentialGenerator(InferenceGenerator):
 
     def _send_error(self, task: TextGeneration, e: Exception) -> None:
         if self.device_rank == 0:
+            error_code = e.code if isinstance(e, VisionPreprocessingError) else None
             self.event_sender.send(
                 ChunkGenerated(
                     command_id=task.command_id,
@@ -266,6 +267,7 @@ class SequentialGenerator(InferenceGenerator):
                         model=self.model_id,
                         finish_reason="error",
                         error_message=str(e),
+                        error_code=error_code,
                     ),
                 )
             )
@@ -287,15 +289,20 @@ class SequentialGenerator(InferenceGenerator):
                     )
                 )
 
-        tokens_since_cancel_check = 0
+        def distributed_prompt_progress_callback() -> None:
+            self.agree_on_cancellations()
+            if self.should_cancel(task.task_id):
+                raise PrefillCancelled()
+
+            self.agree_on_tasks()
+
+        tokens_since_cancel_check = self.check_for_cancel_every
 
         def on_generation_token() -> None:
             nonlocal tokens_since_cancel_check
-            tokens_since_cancel_check, should_check = advance_coordination_counter(
-                tokens_since_cancel_check,
-                self.check_for_cancel_every,
-            )
-            if should_check:
+            tokens_since_cancel_check += 1
+            if tokens_since_cancel_check >= self.check_for_cancel_every:
+                tokens_since_cancel_check = 0
                 self.agree_on_cancellations()
                 if self.should_cancel(task.task_id):
                     raise PrefillCancelled()
@@ -309,7 +316,7 @@ class SequentialGenerator(InferenceGenerator):
             prompt=prompt,
             kv_prefix_cache=self.kv_prefix_cache,
             on_prefill_progress=on_prefill_progress,
-            distributed_prompt_progress_callback=None,
+            distributed_prompt_progress_callback=distributed_prompt_progress_callback,
             on_generation_token=on_generation_token,
             group=self.group,
             vision_processor=self.vision_processor,
@@ -411,6 +418,9 @@ class BatchGenerator(InferenceGenerator):
                 uid = self._start_task(task)
             except PrefillCancelled:
                 continue
+            except VisionPreprocessingError as e:
+                self._send_error(task, e)
+                continue
             except Exception as e:
                 self._send_error(task, e)
                 raise
@@ -435,9 +445,6 @@ class BatchGenerator(InferenceGenerator):
 
         results = self._mlx_gen.step()
 
-        if self.device_rank == 0 and os.environ.get("EXO_TURBOQUANT_TRACE", "0") == "1":
-            logger.info("rank0 batch step returned {} raw responses", len(results))
-
         output: list[
             tuple[TaskId, GenerationResponse | ToolCallResponse | Cancelled | Finished]
         ] = []
@@ -451,17 +458,6 @@ class BatchGenerator(InferenceGenerator):
             queue.push(response)
             # If a generator fails to parse for some reason and returns early, we should not crash
             while (parsed := next(output_generator, None)) is not None:
-                if (
-                    self.device_rank == 0
-                    and os.environ.get("EXO_TURBOQUANT_TRACE", "0") == "1"
-                ):
-                    logger.info(
-                        "rank0 parsed response: uid={} task_id={} parsed_type={} finish_reason={}",
-                        uid,
-                        task.task_id,
-                        type(parsed).__name__,
-                        getattr(parsed, "finish_reason", None),
-                    )
                 output.append((task.task_id, parsed))
 
             # check if original response was terminal and append a Finished()
@@ -501,6 +497,7 @@ class BatchGenerator(InferenceGenerator):
 
     def _send_error(self, task: TextGeneration, e: Exception) -> None:
         if self.device_rank == 0:
+            error_code = e.code if isinstance(e, VisionPreprocessingError) else None
             self.event_sender.send(
                 ChunkGenerated(
                     command_id=task.command_id,
@@ -508,6 +505,7 @@ class BatchGenerator(InferenceGenerator):
                         model=self.model_id,
                         finish_reason="error",
                         error_message=str(e),
+                        error_code=error_code,
                     ),
                 )
             )
@@ -540,15 +538,20 @@ class BatchGenerator(InferenceGenerator):
                     )
                 )
 
-        tokens_since_cancel_check = 0
+        def distributed_prompt_progress_callback() -> None:
+            self.agree_on_cancellations()
+            if self.should_cancel(task.task_id):
+                raise PrefillCancelled()
+
+            self.agree_on_tasks()
+
+        tokens_since_cancel_check = self.check_for_cancel_every
 
         def on_generation_token() -> None:
             nonlocal tokens_since_cancel_check
-            tokens_since_cancel_check, should_check = advance_coordination_counter(
-                tokens_since_cancel_check,
-                self.check_for_cancel_every,
-            )
-            if should_check:
+            tokens_since_cancel_check += 1
+            if tokens_since_cancel_check >= self.check_for_cancel_every:
+                tokens_since_cancel_check = 0
                 self.agree_on_cancellations()
                 if self.should_cancel(task.task_id):
                     self._cancelled_tasks.add(task.task_id)
@@ -562,7 +565,7 @@ class BatchGenerator(InferenceGenerator):
             task_params=task.task_params,
             prompt=prompt,
             on_prefill_progress=on_prefill_progress,
-            distributed_prompt_progress_callback=None,
+            distributed_prompt_progress_callback=distributed_prompt_progress_callback,
             on_generation_token=on_generation_token,
         )
         logger.info(

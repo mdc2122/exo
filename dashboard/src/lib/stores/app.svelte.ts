@@ -257,11 +257,13 @@ interface RawStateResponse {
 }
 
 export interface MessageAttachment {
-  type: "image" | "text" | "file" | "generated-image";
+  type: "image" | "text" | "file" | "video" | "generated-image";
   name: string;
   content?: string;
   preview?: string;
+  url?: string;
   mimeType?: string;
+  size?: number;
 }
 
 export interface TopLogprob {
@@ -2231,6 +2233,23 @@ class AppStore {
     return null;
   }
 
+  async uploadVideo(file: File): Promise<string> {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const response = await fetch("/v1/videos", {
+      method: "POST",
+      body: formData,
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Video upload failed: ${response.status} - ${errorText}`);
+    }
+
+    const payload = (await response.json()) as { url: string };
+    return payload.url;
+  }
+
   /**
    * Send a message to the LLM and stream the response
    */
@@ -2239,7 +2258,9 @@ class AppStore {
     files?: {
       id: string;
       name: string;
+      size: number;
       type: string;
+      file: File;
       textContent?: string;
       preview?: string;
     }[],
@@ -2267,8 +2288,18 @@ class AppStore {
     let fileContext = "";
 
     if (files && files.length > 0) {
+      const videoFiles = files.filter(
+        (file) => file.type === "video/mp4" || file.name.toLowerCase().endsWith(".mp4"),
+      );
+      if (videoFiles.length > 1) {
+        this.isLoading = false;
+        throw new Error("Only one MP4 video can be attached per chat request.");
+      }
+
       for (const file of files) {
         const isImage = file.type.startsWith("image/");
+        const isVideo =
+          file.type === "video/mp4" || file.name.toLowerCase().endsWith(".mp4");
 
         if (isImage && file.preview) {
           attachments.push({
@@ -2276,6 +2307,17 @@ class AppStore {
             name: file.name,
             preview: file.preview,
             mimeType: file.type,
+            size: file.size,
+          });
+        } else if (isVideo) {
+          const videoUrl = await this.uploadVideo(file.file);
+          attachments.push({
+            type: "video",
+            name: file.name,
+            preview: file.preview,
+            url: videoUrl,
+            mimeType: file.type || "video/mp4",
+            size: file.size,
           });
         } else if (file.textContent) {
           attachments.push({
@@ -2344,24 +2386,32 @@ class AppStore {
       const apiMessages = [
         systemPrompt,
         ...targetConversation.messages.slice(0, -1).map((m) => {
-          // Check if this message has image attachments
-          const imageAttachments = m.attachments?.filter(
-            (a) => a.type === "image" && a.preview,
+          // Check if this message has image/video attachments
+          const mediaAttachments = m.attachments?.filter(
+            (a) =>
+              (a.type === "image" && a.preview) ||
+              (a.type === "video" && a.url),
           );
 
-          if (imageAttachments && imageAttachments.length > 0) {
-            // Build multimodal content array (OpenAI vision format)
+          if (mediaAttachments && mediaAttachments.length > 0) {
+            // Build multimodal content array (OpenAI vision/video format)
             const contentParts: Array<
               | { type: "text"; text: string }
               | { type: "image_url"; image_url: { url: string } }
+              | { type: "video_url"; video_url: { url: string } }
             > = [];
 
-            // Add image parts first
-            for (const img of imageAttachments) {
-              if (img.preview) {
+            // Add media parts first
+            for (const media of mediaAttachments) {
+              if (media.type === "image" && media.preview) {
                 contentParts.push({
                   type: "image_url",
-                  image_url: { url: img.preview },
+                  image_url: { url: media.preview },
+                });
+              } else if (media.type === "video" && media.url) {
+                contentParts.push({
+                  type: "video_url",
+                  video_url: { url: media.url },
                 });
               }
             }
@@ -2405,6 +2455,10 @@ class AppStore {
         }),
       ];
 
+      const hasVideoAttachment = targetConversation.messages
+        .slice(0, -1)
+        .some((m) => m.attachments?.some((a) => a.type === "video" && a.url));
+
       // Determine the model to use
       const modelToUse = this.getModelForRequest();
       if (!modelToUse) {
@@ -2424,28 +2478,56 @@ class AppStore {
       const abortController = new AbortController();
       this.currentAbortController = abortController;
 
+      const requestBody = {
+        model: modelToUse,
+        messages: apiMessages,
+        temperature: 0.7,
+        stream: !hasVideoAttachment,
+        ...(hasVideoAttachment
+          ? { max_tokens: 512 }
+          : { logprobs: true, top_logprobs: 5 }),
+        ...(enableThinking != null && {
+          enable_thinking: enableThinking,
+        }),
+      };
+
       const response = await fetch("/v1/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          model: modelToUse,
-          messages: apiMessages,
-          temperature: 0.7,
-          stream: true,
-          logprobs: true,
-          top_logprobs: 5,
-          ...(enableThinking != null && {
-            enable_thinking: enableThinking,
-          }),
-        }),
+        body: JSON.stringify(requestBody),
         signal: abortController.signal,
       });
 
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(`API error: ${response.status} - ${errorText}`);
+      }
+
+      if (hasVideoAttachment) {
+        const jsonResponse = (await response.json()) as {
+          choices?: Array<{
+            message?: { content?: string; reasoning_content?: string };
+          }>;
+          usage?: { completion_tokens?: number };
+        };
+        const responseMessage = jsonResponse.choices?.[0]?.message;
+        const displayContent = responseMessage?.content ?? "";
+        const thinkingContent = responseMessage?.reasoning_content ?? "";
+        this.currentResponse = displayContent;
+        this.totalTokens = jsonResponse.usage?.completion_tokens ?? 0;
+        this.updateConversationMessage(
+          targetConversationId,
+          assistantMessage.id,
+          (msg) => {
+            msg.content = displayContent;
+            msg.thinking = thinkingContent || undefined;
+          },
+        );
+        this.syncActiveMessagesIfNeeded(targetConversationId);
+        this.persistConversation(targetConversationId);
+        return;
       }
 
       const reader = response.body?.getReader();

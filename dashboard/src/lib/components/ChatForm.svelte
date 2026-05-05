@@ -25,16 +25,7 @@
     modelTasks?: Record<string, string[]>;
     modelCapabilities?: Record<string, string[]>;
     onSend?: () => void;
-    onAutoSend: (
-      content: string,
-      files?: {
-        id: string;
-        name: string;
-        type: string;
-        textContent?: string;
-        preview?: string;
-      }[],
-    ) => void;
+    onAutoSend: (content: string, files?: ChatUploadedFile[]) => void;
     onOpenModelPicker?: () => void;
     modelDisplayOverride?: string;
   }
@@ -67,8 +58,27 @@
   const currentEditingImage = $derived(editingImage());
   const isEditMode = $derived(currentEditingImage !== null);
 
-  // Accept all supported file types
-  const acceptString = getAcceptString(["image", "text", "pdf"]);
+  function modelSupportsVideoInput(modelId: string): boolean {
+    const caps = modelCapabilities[modelId] || [];
+    const normalized = modelId.toLowerCase();
+    return (
+      caps.includes("vision") ||
+      caps.includes("video") ||
+      (normalized.includes("kimi") && normalized.includes("k2.6"))
+    );
+  }
+
+  // Accept MP4 only when the selected model can use vision/video input.
+  const acceptString = $derived(
+    getAcceptString([
+      "image",
+      "text",
+      "pdf",
+      ...(currentModel && modelSupportsVideoInput(currentModel)
+        ? (["video"] as const)
+        : []),
+    ]),
+  );
 
   function modelSupportsImageGeneration(modelId: string): boolean {
     const tasks = modelTasks[modelId] || [];

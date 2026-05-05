@@ -1,0 +1,30 @@
+1d0927fc wip: rollback anchor pre-turboquant-glm51 2026-04-13
+7ef1cf52 Delay placement until cluster memory state converges
+fd7076a5 Keep clustered TurboQuant off the fragile batched decode path
+77cf5219 Protect TurboQuant batched recovery with cache-fallback regression coverage
+a32f15a1 feat(tp): add GlmMoeDsaShardingStrategy for GLM-5.1 tensor parallelism
+8281164a feat(turboquant): add TurboQuant MLA cache integration for GLM-5.1
+38181ff1 fix(rdma): fix jaccl int32 overflow using uint8 array dtype
+6cb11df7 Add native video support (MoonViT-3D temporal processing) to Kimi K2.5
+f94c2976 Stabilize election and ring host selection
+f3ec42d3 Make connectivity discovery API-port aware
+d9ed9430 Fix Nemotron cache leak upstream (#1819)
+c6815bfd Only update KV prefix cache on a good cache hit (#1817)
+39c39e81 Integrations helpers (#1810)
+e5cb7b80 Add SSE-keepalive to not time out on long prefill on clients (#1803)
+635801d5 Add multimodality! (#1802)
+2efbb8ab Improve exo harness with path state (#1815)
+c6c5a3e7 feat: /state/paths (#1796)
+10ef7ec9 feat: add Firefox AI sidebar (?q=) support to dashboard (#1814)
+1e51dc89 chore: bump exo-version with release version (#1807)
+5327bdde Fix custom model add requiring two attempts + enlarge sidebar buttons (#1805)
+15f1b61f Rework model storage directory management (for external storage) (#1765)
+90343001 [Fix]  Node hang on reelection (#1801)
+1d1dfaa1 Don't download original/ and metal/ folders from HF (#1800)
+7625213d fix: enable macmon if preflight fails (#1799)
+f318f9ea Fix macOS build bundling wrong macmon binary (#1797)
+30fd5aa1 Prefer higher % downloaded nodes for API placement previews (#1795)
+6de14cfe Support image generation cancellation (#1774)
+fc1ae901 fix: DeepSeek V3.2 warmup crash and tool calling + add catalog cards (#1769)
+565ed41c Fix occasional warmup bugs by using mlx_generate (#1794)
+2da740c3 Feat/static peer discovery (#1690)

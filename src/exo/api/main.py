@@ -1,6 +1,7 @@
 import base64
 import contextlib
 import json
+import os
 import random
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
@@ -22,10 +23,12 @@ from hypercorn.typing import ASGIFramework
 from loguru import logger
 
 from exo.api.adapters.chat_completions import (
+    VideoValidationError,
     chat_request_to_text_generation,
     collect_chat_response,
     fetch_image_url,
     generate_chat_stream,
+    get_max_video_payload_bytes,
 )
 from exo.api.adapters.claude import (
     claude_request_to_text_generation,
@@ -92,6 +95,8 @@ from exo.api.types import (
     TraceRankStats,
     TraceResponse,
     TraceStatsResponse,
+    VideoErrorResponse,
+    VideoUploadResponse,
     normalize_image_size,
 )
 from exo.api.types.claude_api import (
@@ -117,6 +122,7 @@ from exo.api.types.openai_responses import (
 )
 from exo.master.image_store import ImageStore
 from exo.master.placement import place_instance as get_instance_placements
+from exo.master.video_store import VideoStore
 from exo.shared.apply import apply
 from exo.shared.constants import (
     DASHBOARD_DIR,
@@ -125,6 +131,7 @@ from exo.shared.constants import (
     EXO_IMAGE_CACHE_DIR,
     EXO_MAX_CHUNK_SIZE,
     EXO_TRACING_CACHE_DIR,
+    EXO_VIDEO_CACHE_DIR,
 )
 from exo.shared.election import ElectionMessage
 from exo.shared.logging import InterceptLogger
@@ -184,16 +191,26 @@ from exo.utils.task_group import TaskGroup
 
 _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
 ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
-PLACE_INSTANCE_RETRYABLE_ERRORS = (
-    "No cycles found with sufficient memory",
-    "Requested RDMA (MlxJaccl) but no RDMA-connected cycles available",
-)
-PLACE_INSTANCE_READY_TIMEOUT_SECONDS = 30.0
-PLACE_INSTANCE_RETRY_INTERVAL_SECONDS = 1.0
 
 
 def _format_to_content_type(image_format: Literal["png", "jpeg", "webp"] | None) -> str:
     return f"image/{image_format or 'png'}"
+
+
+def _video_error_status_code(code: str) -> int:
+    """Map an OpenAI-style structured video error code to its HTTP status."""
+    mapping: dict[str, int] = {
+        "video_too_large": 413,
+        "video_url_blocked": 400,
+        "unsupported_video_format": 415,
+        "video_fetch_failed": 400,
+        "video_decode_failed": 400,
+        "multiple_videos_unsupported": 400,
+        "invalid_video_url": 400,
+        "video_streaming_unsupported": 400,
+        "video_duration_unsupported": 413,
+    }
+    return mapping.get(code, 500)
 
 
 def _ensure_seed(params: AdvancedImageParams | None) -> AdvancedImageParams:
@@ -262,6 +279,7 @@ class API:
             CommandId, Sender[ImageChunk | ErrorChunk]
         ] = {}
         self._image_store = ImageStore(EXO_IMAGE_CACHE_DIR)
+        self._video_store = VideoStore(EXO_VIDEO_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
     def reset(self, result_clock: int, event_receiver: Receiver[IndexedEvent]):
@@ -290,6 +308,11 @@ class API:
     async def http_exception_handler(
         self, _: Request, exc: HTTPException
     ) -> JSONResponse:
+        if isinstance(exc, VideoValidationError):
+            return JSONResponse(
+                exc.to_response().model_dump(),
+                status_code=exc.status_code,
+            )
         err = ErrorResponse(
             error=ErrorInfo(
                 message=exc.detail,
@@ -333,6 +356,8 @@ class API:
         self.app.post("/bench/images/edits")(self.bench_image_edits)
         self.app.get("/images")(self.list_images)
         self.app.get("/images/{image_id}")(self.get_image)
+        self.app.post("/v1/videos")(self.upload_video)
+        self.app.get("/v1/videos/{video_id}")(self.get_video)
         self.app.post("/v1/messages", response_model=None)(self.claude_messages)
         self.app.post("/v1/responses", response_model=None)(self.openai_responses)
         self.app.post("/v1/cancel/{command_id}")(self.cancel_command)
@@ -389,7 +414,6 @@ class API:
             instance_meta=payload.instance_meta,
             min_nodes=payload.min_nodes,
         )
-        await self._wait_for_place_instance_ready(command)
         await self._send(command)
 
         return CreateInstanceResponse(
@@ -397,50 +421,6 @@ class API:
             command_id=command.command_id,
             model_card=command.model_card,
         )
-
-    async def _wait_for_place_instance_ready(self, command: PlaceInstance) -> None:
-        deadline = time.monotonic() + PLACE_INSTANCE_READY_TIMEOUT_SECONDS
-
-        while True:
-            try:
-                get_instance_placements(
-                    command,
-                    topology=self.state.topology,
-                    current_instances=self.state.instances,
-                    node_memory=self.state.node_memory,
-                    node_network=self.state.node_network,
-                    download_status=self.state.downloads,
-                )
-                return
-            except ValueError as exc:
-                detail = str(exc)
-                if detail not in PLACE_INSTANCE_RETRYABLE_ERRORS:
-                    raise HTTPException(status_code=409, detail=detail) from exc
-
-                topology_nodes = len(list(self.state.topology.list_nodes()))
-                node_memory_nodes = len(self.state.node_memory)
-                node_network_nodes = len(self.state.node_network)
-                if time.monotonic() >= deadline:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            "Placement not ready after "
-                            f"{PLACE_INSTANCE_READY_TIMEOUT_SECONDS:.0f}s: {detail} "
-                            f"(topology_nodes={topology_nodes}, "
-                            f"node_memory_nodes={node_memory_nodes}, "
-                            f"node_network_nodes={node_network_nodes})"
-                        ),
-                    ) from exc
-
-                logger.info(
-                    "place_instance preflight waiting for placement readiness: "
-                    "error={} topology_nodes={} node_memory_nodes={} node_network_nodes={}",
-                    detail,
-                    topology_nodes,
-                    node_memory_nodes,
-                    node_network_nodes,
-                )
-                await anyio.sleep(PLACE_INSTANCE_RETRY_INTERVAL_SECONDS)
 
     async def create_instance(
         self, payload: CreateInstanceParams
@@ -847,7 +827,12 @@ class API:
                 command.command_id,
                 self._token_chunk_stream(command.command_id),
             )
-            status_code = 500 if isinstance(response, ErrorResponse) else 200
+            if isinstance(response, VideoErrorResponse):
+                status_code = _video_error_status_code(response.error.code)
+            elif isinstance(response, ErrorResponse):
+                status_code = 500
+            else:
+                status_code = 200
             return JSONResponse(response.model_dump(), status_code=status_code)
 
     async def bench_chat_completions(
@@ -939,6 +924,58 @@ class API:
         host = request.headers.get("host", f"localhost:{self.port}")
         scheme = "https" if request.url.scheme == "https" else "http"
         return f"{scheme}://{host}/v1/images/{image_id}"
+
+    async def upload_video(
+        self, request: Request, file: Annotated[UploadFile, File(...)]
+    ) -> VideoUploadResponse:
+        content_type = file.content_type or ""
+        filename = file.filename or ""
+        if content_type != "video/mp4" or not filename.lower().endswith(".mp4"):
+            raise VideoValidationError(
+                status_code=400,
+                code="invalid_video_url",
+                param="file",
+                message="Only H.264/MP4 uploads are supported.",
+            )
+
+        video_bytes = await file.read()
+        max_bytes = get_max_video_payload_bytes()
+        if len(video_bytes) > max_bytes:
+            actual_mib = len(video_bytes) / 1024 / 1024
+            max_mib = max_bytes / 1024 / 1024
+            raise VideoValidationError(
+                status_code=413,
+                code="video_too_large",
+                param="file",
+                message=(
+                    f"video payload is too large: {actual_mib:.2f} MiB exceeds "
+                    f"the configured limit of {max_mib:.2f} MiB. "
+                    "Use a shorter/lower-bitrate clip or raise EXO_KIMI_VIDEO_MAX_BYTES."
+                ),
+            )
+
+        stored = self._video_store.store(video_bytes, content_type)
+        return VideoUploadResponse(
+            video_id=str(stored.video_id),
+            url=self._build_video_url(request, stored.video_id),
+            content_type=stored.content_type,
+            bytes=stored.byte_count,
+            expires_at=stored.expires_at,
+        )
+
+    async def get_video(self, video_id: str) -> FileResponse:
+        stored = self._video_store.get(Id(video_id))
+        if stored is None:
+            raise HTTPException(status_code=404, detail="Video not found or expired")
+        return FileResponse(path=stored.file_path, media_type=stored.content_type)
+
+    def _build_video_url(self, request: Request, video_id: Id) -> str:
+        public_base_url = os.getenv("EXO_MEDIA_PUBLIC_BASE_URL")
+        if public_base_url is not None and public_base_url.strip() != "":
+            return f"{public_base_url.rstrip('/')}/v1/videos/{video_id}"
+        host = request.headers.get("host", f"localhost:{self.port}")
+        scheme = "https" if request.url.scheme == "https" else "http"
+        return f"{scheme}://{host}/v1/videos/{video_id}"
 
     async def image_generations(
         self, request: Request, payload: ImageGenerationTaskParams
@@ -1878,11 +1915,6 @@ class API:
     async def _send(self, command: Command):
         while self.paused:
             await self.paused_ev.wait()
-        logger.info(
-            "API sending command: type={} command_id={}",
-            type(command).__name__,
-            getattr(command, "command_id", None),
-        )
         await self.command_sender.send(
             ForwarderCommand(origin=self._system_id, command=command)
         )

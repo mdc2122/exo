@@ -1,0 +1,19 @@
+ .../src/lib/components/ChatAttachments.svelte      |   8 +
+ dashboard/src/lib/components/ChatForm.svelte       |  34 +-
+ dashboard/src/lib/components/ChatMessages.svelte   |   9 +
+ dashboard/src/lib/stores/app.svelte.ts             | 124 +++-
+ dashboard/src/lib/types/files.ts                   |  17 +-
+ src/exo/api/adapters/chat_completions.py           | 814 ++++++++++++++++++++-
+ src/exo/api/main.py                                | 146 ++--
+ src/exo/api/types/__init__.py                      |   3 +
+ src/exo/api/types/api.py                           |  36 +-
+ src/exo/master/placement.py                        |  21 +
+ src/exo/master/placement_utils.py                  |  29 +-
+ src/exo/shared/constants.py                        |  32 +
+ src/exo/shared/types/text_generation.py            |  20 +
+ .../worker/engines/mlx/generator/batch_generate.py |  45 +-
+ src/exo/worker/engines/mlx/generator/generate.py   |  51 +-
+ src/exo/worker/engines/mlx/utils_mlx.py            | 180 ++++-
+ src/exo/worker/engines/mlx/vision.py               | 471 ++++++++++--
+ .../worker/runner/llm_inference/batch_generator.py |  81 +-
+ 18 files changed, 1842 insertions(+), 279 deletions(-)

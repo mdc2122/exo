@@ -1,0 +1,23 @@
+## rollback/pre-tq-glm51-20260413-2030
+ M dashboard/src/lib/components/ChatAttachments.svelte
+ M dashboard/src/lib/components/ChatForm.svelte
+ M dashboard/src/lib/components/ChatMessages.svelte
+ M dashboard/src/lib/stores/app.svelte.ts
+ M dashboard/src/lib/types/files.ts
+ M src/exo/api/adapters/chat_completions.py
+ M src/exo/api/main.py
+ M src/exo/api/types/__init__.py
+ M src/exo/api/types/api.py
+ M src/exo/master/placement.py
+ M src/exo/master/placement_utils.py
+ M src/exo/shared/constants.py
+ M src/exo/shared/types/text_generation.py
+ M src/exo/worker/engines/mlx/generator/batch_generate.py
+ M src/exo/worker/engines/mlx/generator/generate.py
+ M src/exo/worker/engines/mlx/utils_mlx.py
+ M src/exo/worker/engines/mlx/vision.py
+ M src/exo/worker/runner/llm_inference/batch_generator.py
+?? .ouroboros/
+?? src/exo/api/tests/test_video_uploads.py
+?? src/exo/master/video_store.py
+?? src/exo/shared/types/video_errors.py

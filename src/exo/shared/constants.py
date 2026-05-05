@@ -86,6 +86,7 @@ EXO_CUSTOM_MODEL_CARDS_DIR = EXO_DATA_HOME / "custom_model_cards"
 
 EXO_EVENT_LOG_DIR = EXO_DATA_HOME / "event_log"
 EXO_IMAGE_CACHE_DIR = EXO_CACHE_HOME / "images"
+EXO_VIDEO_CACHE_DIR = EXO_CACHE_HOME / "videos"
 EXO_TRACING_CACHE_DIR = EXO_CACHE_HOME / "traces"
 
 EXO_ENABLE_IMAGE_MODELS = (
@@ -97,3 +98,34 @@ EXO_OFFLINE = os.getenv("EXO_OFFLINE", "false").lower() == "true"
 EXO_TRACING_ENABLED = os.getenv("EXO_TRACING_ENABLED", "false").lower() == "true"
 
 EXO_MAX_CONCURRENT_REQUESTS = int(os.getenv("EXO_MAX_CONCURRENT_REQUESTS", "8"))
+
+EXO_KIMI_VIDEO_ENABLED_ENV = "EXO_KIMI_VIDEO_ENABLED"
+EXO_KIMI_VIDEO_ENABLED_DEFAULT = False
+EXO_KIMI_VIDEO_ALLOW_DATA_URLS_ENV = "EXO_KIMI_VIDEO_ALLOW_DATA_URLS"
+EXO_KIMI_VIDEO_ALLOW_DATA_URLS_DEFAULT = False
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def allow_kimi_video() -> bool:
+    """Return whether Kimi video_url chat completions are enabled.
+
+    This v1 gate is intentionally disabled by default so live text traffic and
+    Kimi image paths are not exposed to video preprocessing until an operator
+    opts in and smoke checks pass.
+    """
+    raw = os.getenv(EXO_KIMI_VIDEO_ENABLED_ENV)
+    if raw is None:
+        return EXO_KIMI_VIDEO_ENABLED_DEFAULT
+    return raw.lower() in _TRUTHY_ENV_VALUES
+
+
+def allow_kimi_video_data_urls() -> bool:
+    """Return whether inline base64 video data: URLs are enabled for Kimi video.
+
+    This flag is intentionally disabled by default so base64 video payloads do
+    not enter live cluster traffic until an operator opts in for bounded smokes.
+    """
+    raw = os.getenv(EXO_KIMI_VIDEO_ALLOW_DATA_URLS_ENV)
+    if raw is None:
+        return EXO_KIMI_VIDEO_ALLOW_DATA_URLS_DEFAULT
+    return raw.lower() in _TRUTHY_ENV_VALUES

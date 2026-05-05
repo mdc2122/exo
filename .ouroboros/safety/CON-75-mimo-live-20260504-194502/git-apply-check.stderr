@@ -1,0 +1,5 @@
+error: src/exo/api/adapters/chat_completions.py: already exists in working directory
+error: src/exo/api/main.py: already exists in working directory
+error: src/exo/api/types/__init__.py: already exists in working directory
+error: src/exo/api/types/api.py: already exists in working directory
+error: src/exo/shared/models/model_cards.py: already exists in working directory

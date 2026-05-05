@@ -1,0 +1,8 @@
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/branch.txt
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/diffstat.txt
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/full.patch
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/status.txt
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/untracked-manifest.txt
+src/exo/api/tests/test_video_uploads.py
+src/exo/master/video_store.py
+src/exo/shared/types/video_errors.py

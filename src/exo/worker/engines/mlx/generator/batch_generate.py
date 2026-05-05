@@ -1,8 +1,7 @@
 import contextlib
-import os
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Protocol, cast
+from typing import Callable, cast
 
 import mlx.core as mx
 from mlx_lm.generate import (
@@ -11,7 +10,7 @@ from mlx_lm.generate import (
 from mlx_lm.generate import (
     generation_stream,
 )
-from mlx_lm.models.cache import CacheList, RotatingKVCache
+from mlx_lm.models.cache import RotatingKVCache
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 from mlx_lm.tokenizer_utils import StreamingDetokenizer, TokenizerWrapper
 
@@ -26,6 +25,7 @@ from exo.api.types import (
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
 from exo.shared.types.text_generation import TextGenerationTaskParams
+from exo.shared.types.video_errors import VisionPreprocessingError
 from exo.shared.types.worker.runner_response import GenerationResponse
 from exo.worker.engines.mlx.cache import (
     CacheSnapshot,
@@ -54,34 +54,6 @@ from exo.worker.engines.mlx.vision import (
 from exo.worker.runner.bootstrap import logger
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
-
-
-class _NativeCacheCarrier(Protocol):
-    _native_cache: object | None
-
-
-def _batch_compatible_cache(layer_cache: object) -> object:
-    if os.environ.get("EXO_TURBOQUANT_NATIVE_BATCH_FALLBACK", "0") != "1":
-        return layer_cache
-    native_cache = cast(
-        object | None,
-        getattr(cast(_NativeCacheCarrier, layer_cache), "_native_cache", None),
-    )
-    if native_cache is not None:
-        return native_cache
-    if isinstance(layer_cache, CacheList):
-        sub_caches = cast(
-            tuple[object, ...],
-            layer_cache.caches,  # pyright: ignore[reportAttributeAccessIssue]
-        )
-        return CacheList(
-            *(_batch_compatible_cache(sub_cache) for sub_cache in sub_caches)
-        )
-    return layer_cache
-
-
-def _cache_for_batch_engine(cache: KVCacheType) -> list[object]:
-    return [_batch_compatible_cache(layer_cache) for layer_cache in cache]
 
 
 def _stop_sequences(task_params: TextGenerationTaskParams) -> list[str]:
@@ -178,6 +150,8 @@ class ExoBatchGenerator:
                     model_id=task_params.model,
                     task_params=task_params,
                     videos=task_params.videos,
+                    video_sources=task_params.video_sources,
+                    video_urls=task_params.video_urls,
                 )
                 if vision is not None:
                     logger.info(
@@ -186,6 +160,11 @@ class ExoBatchGenerator:
                         vision.embeddings.shape,
                         len(vision.media_regions),
                     )
+            except VisionPreprocessingError:
+                logger.opt(exception=True).error(
+                    "Vision processing failed; surfacing structured error"
+                )
+                raise
             except Exception:
                 logger.opt(exception=True).warning(
                     "Vision processing failed, falling back to text-only"
@@ -286,7 +265,7 @@ class ExoBatchGenerator:
                 media_regions,
             )
 
-        last_tokens = prompt_tokens[-1:]
+        last_tokens = prompt_tokens[-2:]
 
         logits_processors: list[Callable[[mx.array, mx.array], mx.array]] = (
             make_logits_processors(
@@ -304,7 +283,7 @@ class ExoBatchGenerator:
         uids = self._mlx_gen.insert(
             prompts=[last_tokens.tolist()],
             max_tokens=[max_tokens],
-            caches=[_cache_for_batch_engine(list(cache))],
+            caches=[list(cache)],
             samplers=[sampler],
             logits_processors=[logits_processors],
         )

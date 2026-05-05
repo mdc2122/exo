@@ -1,3 +1,4 @@
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportUnnecessaryTypeIgnoreComment=false
 import base64
 import contextlib
 import hashlib
@@ -5,17 +6,22 @@ import importlib
 import inspect
 import io
 import json
+import os
 import re
+import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlsplit
+
+import httpx
 
 if TYPE_CHECKING:
     from mlx_vlm.utils import ImageProcessor
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
-from mlx_lm.tokenizer_utils import TokenizerWrapper
 from mlx.utils import tree_flatten
+from mlx_lm.tokenizer_utils import TokenizerWrapper
 from mlx_vlm.prompt_utils import get_message_json
 from mlx_vlm.utils import load_image_processor
 from PIL import Image
@@ -26,7 +32,16 @@ from exo.download.download_utils import build_model_path
 from exo.shared.models.model_cards import VisionCardConfig
 from exo.shared.types.common import ModelId
 from exo.shared.types.mlx import Model
-from exo.shared.types.text_generation import TextGenerationTaskParams
+from exo.shared.types.text_generation import TextGenerationTaskParams, VideoSource
+from exo.shared.types.video_errors import (
+    VIDEO_ERROR_CODE_DECODE_FAILED,
+    VIDEO_ERROR_CODE_DURATION_UNSUPPORTED,
+    VIDEO_ERROR_CODE_FETCH_FAILED,
+    VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
+    VIDEO_ERROR_CODE_TOO_LARGE,
+    VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
+    VisionPreprocessingError,
+)
 from exo.worker.engines.mlx.cache import encode_prompt
 from exo.worker.engines.mlx.utils_mlx import (
     fix_unmatched_think_end_tokens,
@@ -38,6 +53,249 @@ from exo.worker.runner.bootstrap import logger
 def _filter_config(cls: type, d: dict[str, Any]) -> dict[str, Any]:
     valid = set(inspect.signature(cls.__init__).parameters.keys()) - {"self"}
     return {k: v for k, v in d.items() if k in valid}  # type: ignore
+
+
+DEFAULT_MAX_VIDEO_PAYLOAD_BYTES = 4 * 1024 * 1024
+DEFAULT_MAX_VIDEO_DURATION_SECONDS = 10.0
+DEFAULT_KIMI_VIDEO_FETCH_CONNECT_TIMEOUT_SECONDS = 5.0
+DEFAULT_KIMI_VIDEO_FETCH_READ_TIMEOUT_SECONDS = 15.0
+DEFAULT_KIMI_VIDEO_FETCH_TOTAL_TIMEOUT_SECONDS = 30.0
+KIMI_VIDEO_FETCH_CHUNK_BYTES = 64 * 1024
+DEFAULT_KIMI_VIDEO_ALLOWED_CODECS = ("h264",)
+# PyAV/ffprobe report ISO BMFF MP4 as this comma-separated format family.
+DEFAULT_KIMI_VIDEO_ALLOWED_CONTAINERS = ("mov", "mp4", "m4a", "3gp", "3g2", "mj2")
+
+
+def _get_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return float(raw)
+
+
+def _get_max_video_payload_bytes() -> int:
+    raw = os.getenv("EXO_KIMI_VIDEO_MAX_BYTES")
+    if raw is None or raw == "":
+        raw = os.getenv("EXO_MAX_VIDEO_PAYLOAD_BYTES")
+    if raw is None or raw == "":
+        return DEFAULT_MAX_VIDEO_PAYLOAD_BYTES
+    return int(raw)
+
+
+def _get_max_video_duration_seconds() -> float:
+    raw = os.getenv("EXO_KIMI_VIDEO_MAX_DURATION_SECONDS")
+    if raw is None or raw == "":
+        return DEFAULT_MAX_VIDEO_DURATION_SECONDS
+    return float(raw)
+
+
+def _get_csv_env_values(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    values = tuple(value.strip().lower() for value in raw.split(",") if value.strip())
+    return values or default
+
+
+def _split_container_names(format_name: str) -> tuple[str, ...]:
+    return tuple(
+        part.strip().lower() for part in format_name.split(",") if part.strip()
+    )
+
+
+def _probe_stream_codec_name(stream: object) -> str | None:
+    codec_context = getattr(stream, "codec_context", None)
+    codec_context_name = getattr(codec_context, "name", None)
+    if isinstance(codec_context_name, str) and codec_context_name.strip():
+        return codec_context_name.strip().lower()
+
+    codec = getattr(stream, "codec", None)
+    codec_name = getattr(codec, "name", None)
+    if isinstance(codec_name, str) and codec_name.strip():
+        return codec_name.strip().lower()
+
+    direct_codec_name = getattr(stream, "codec_name", None)
+    if isinstance(direct_codec_name, str) and direct_codec_name.strip():
+        return direct_codec_name.strip().lower()
+
+    return None
+
+
+def _probe_container_names(container: object) -> tuple[str, ...]:
+    container_format = getattr(container, "format", None)
+    format_name = getattr(container_format, "name", None)
+    if not isinstance(format_name, str):
+        return ()
+    return _split_container_names(format_name)
+
+
+def _validate_video_metadata_before_decode(container: object, stream: object) -> None:
+    """Fail closed on unsupported/unprobeable metadata before frame decode.
+
+    V1 intentionally keeps support narrow to MP4/H.264 because broad codec and
+    container coverage is out of scope and risky for the live MLX cluster. This
+    inspection uses only demuxer metadata already available after `av.open()`;
+    it does not decode frames or place large frame tensors into process state.
+    """
+
+    codec_name = _probe_stream_codec_name(stream)
+    if codec_name is None:
+        raise VisionPreprocessingError(
+            "unprobeable video codec: the selected runner could not safely "
+            "identify the video stream codec before decode. Kimi video_url v1 "
+            "supports only bounded MP4/H.264 inputs.",
+            code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
+        )
+
+    allowed_codecs = _get_csv_env_values(
+        "EXO_KIMI_VIDEO_ALLOWED_CODECS", DEFAULT_KIMI_VIDEO_ALLOWED_CODECS
+    )
+    if codec_name not in allowed_codecs:
+        raise VisionPreprocessingError(
+            f"unsupported video codec '{codec_name}' for Kimi video_url v1. "
+            f"Supported codecs: {sorted(allowed_codecs)}.",
+            code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
+        )
+
+    container_names = _probe_container_names(container)
+    if not container_names:
+        raise VisionPreprocessingError(
+            "unprobeable video container: the selected runner could not safely "
+            "identify the video container before decode. Kimi video_url v1 "
+            "supports only bounded MP4/H.264 inputs.",
+            code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
+        )
+
+    allowed_containers = _get_csv_env_values(
+        "EXO_KIMI_VIDEO_ALLOWED_CONTAINERS", DEFAULT_KIMI_VIDEO_ALLOWED_CONTAINERS
+    )
+    if not any(container_name in allowed_containers for container_name in container_names):
+        raise VisionPreprocessingError(
+            f"unsupported video container '{','.join(container_names)}' for Kimi "
+            f"video_url v1. Supported containers: {sorted(allowed_containers)}.",
+            code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
+        )
+
+
+def _validate_video_duration_seconds(
+    duration_seconds: float, max_seconds: float | None = None
+) -> None:
+    resolved_max_seconds = (
+        _get_max_video_duration_seconds() if max_seconds is None else max_seconds
+    )
+    if duration_seconds <= resolved_max_seconds:
+        return
+    raise VisionPreprocessingError(
+        "Long videos are out of scope for v1: "
+        f"{duration_seconds:.2f}s exceeds the configured limit of "
+        f"{resolved_max_seconds:.2f}s. Use a short video fixture or raise "
+        "EXO_KIMI_VIDEO_MAX_DURATION_SECONDS after throughput smokes pass.",
+        code=VIDEO_ERROR_CODE_DURATION_UNSUPPORTED,
+    )
+
+
+def _validate_video_payload_size(byte_count: int, max_bytes: int | None = None) -> None:
+    resolved_max_bytes = _get_max_video_payload_bytes() if max_bytes is None else max_bytes
+    if byte_count <= resolved_max_bytes:
+        return
+    actual_mib = byte_count / 1024 / 1024
+    max_mib = resolved_max_bytes / 1024 / 1024
+    # Kept as ValueError for backward-compat with existing tests; callers
+    # that need a structured code wrap this in VisionPreprocessingError.
+    raise ValueError(
+        f"video payload is too large: {actual_mib:.2f} MiB exceeds "
+        f"the configured limit of {max_mib:.2f} MiB"
+    )
+
+
+def _fetch_video_url_as_base64(url: str, max_bytes: int | None = None) -> str:
+    resolved_max_bytes = _get_max_video_payload_bytes() if max_bytes is None else max_bytes
+    parsed_url = urlsplit(url)
+    if parsed_url.scheme not in {"http", "https"}:
+        raise VisionPreprocessingError(
+            "unsupported video URL scheme: only http and https video URLs "
+            f"can be fetched by the worker, got {parsed_url.scheme!r}",
+            code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
+        )
+    if parsed_url.netloc == "":
+        raise VisionPreprocessingError(
+            f"invalid video URL {url!r}: missing network location",
+            code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
+        )
+
+    connect_timeout_seconds = _get_float_env(
+        "EXO_KIMI_VIDEO_FETCH_CONNECT_TIMEOUT_SECONDS",
+        DEFAULT_KIMI_VIDEO_FETCH_CONNECT_TIMEOUT_SECONDS,
+    )
+    read_timeout_seconds = _get_float_env(
+        "EXO_KIMI_VIDEO_FETCH_READ_TIMEOUT_SECONDS",
+        DEFAULT_KIMI_VIDEO_FETCH_READ_TIMEOUT_SECONDS,
+    )
+    total_timeout_seconds = _get_float_env(
+        "EXO_KIMI_VIDEO_FETCH_TIMEOUT_SECONDS",
+        DEFAULT_KIMI_VIDEO_FETCH_TOTAL_TIMEOUT_SECONDS,
+    )
+    http_timeout = httpx.Timeout(
+        timeout=total_timeout_seconds,
+        connect=connect_timeout_seconds,
+        read=read_timeout_seconds,
+        write=connect_timeout_seconds,
+        pool=connect_timeout_seconds,
+    )
+    started_at = time.monotonic()
+    data = bytearray()
+
+    try:
+        with (
+            httpx.Client(timeout=http_timeout, follow_redirects=False) as client,
+            client.stream("GET", url, headers={"User-Agent": "exo/1.0"}) as response,
+        ):
+            response.raise_for_status()
+            content_length = cast(str | None, response.headers.get("Content-Length"))
+            if content_length is not None:
+                _validate_video_payload_size(
+                    int(content_length), max_bytes=resolved_max_bytes
+                )
+            for chunk in response.iter_bytes(chunk_size=KIMI_VIDEO_FETCH_CHUNK_BYTES):
+                if time.monotonic() - started_at > total_timeout_seconds:
+                    raise VisionPreprocessingError(
+                        f"timed out while fetching video URL {url!r} after "
+                        f"{total_timeout_seconds:.2f}s",
+                        code=VIDEO_ERROR_CODE_FETCH_FAILED,
+                    )
+                data.extend(chunk)
+                _validate_video_payload_size(len(data), max_bytes=resolved_max_bytes)
+    except VisionPreprocessingError:
+        raise
+    except httpx.HTTPError as exc:
+        raise VisionPreprocessingError(
+            f"failed to fetch video URL {url!r}: {exc}",
+            code=VIDEO_ERROR_CODE_FETCH_FAILED,
+        ) from exc
+
+    return base64.b64encode(bytes(data)).decode("ascii")
+
+
+def _wrap_fetch_video_url_for_structured_errors(url: str) -> str:
+    """Call _fetch_video_url_as_base64 but translate raw exceptions into
+    VisionPreprocessingError with stable codes. Network/IO failures map to
+    video_fetch_failed; size-limit ValueErrors map to video_too_large.
+    Anything else maps to video_fetch_failed as a safe default.
+    """
+    try:
+        return _fetch_video_url_as_base64(url)
+    except ValueError as exc:
+        # _validate_video_payload_size raises ValueError when the response
+        # exceeds the configured size limit.
+        raise VisionPreprocessingError(
+            f"video at {url} exceeds the configured size limit: {exc}",
+            code=VIDEO_ERROR_CODE_TOO_LARGE,
+        ) from exc
+    except (httpx.HTTPError, OSError) as exc:
+        raise VisionPreprocessingError(
+            f"failed to fetch video URL {url!r}: {exc}",
+            code=VIDEO_ERROR_CODE_FETCH_FAILED,
+        ) from exc
 
 
 _video_processor_patched = False
@@ -73,25 +331,52 @@ def extract_video_frames(
     import av
 
     raw = base64.b64decode(video_data)
-    container = av.open(io.BytesIO(raw))
-    stream = container.streams.video[0]
-    total_frames = stream.frames or 0
-    video_fps = float(stream.average_rate or 30)
+    try:
+        container = av.open(io.BytesIO(raw))
+    except Exception as exc:
+        raise VisionPreprocessingError(
+            "unprobeable video container: the selected runner could not safely "
+            "inspect video metadata before decode. Kimi video_url v1 supports "
+            "only bounded MP4/H.264 inputs.",
+            code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
+        ) from exc
+    try:
+        video_streams = list(getattr(container.streams, "video", []))
+        if not video_streams:
+            raise VisionPreprocessingError(
+                "unprobeable video stream: no video stream was found during "
+                "safe metadata inspection before decode. Kimi video_url v1 "
+                "supports only bounded MP4/H.264 inputs.",
+                code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
+            )
+        stream = video_streams[0]
+        _validate_video_metadata_before_decode(container, stream)
+        duration_seconds: float | None = None
+        if stream.duration is not None and stream.time_base is not None:
+            duration_seconds = float(stream.duration * stream.time_base)
+        elif container.duration is not None:
+            duration_seconds = float(container.duration) / 1_000_000.0
+        if duration_seconds is not None:
+            _validate_video_duration_seconds(duration_seconds)
+        total_frames = stream.frames or 0
+        video_fps = float(stream.average_rate or 30)
 
-    effective_fps = min(sample_fps, video_fps)
-    sampled_count = max(round(total_frames * effective_fps / video_fps), 1)
-    indices = (
-        np.linspace(0, total_frames - 1, sampled_count).round().astype(int).tolist()
-    )
-    index_set = set(indices)
+        effective_fps = min(sample_fps, video_fps)
+        sampled_count = max(round(total_frames * effective_fps / video_fps), 1)
+        indices = (
+            np.linspace(0, total_frames - 1, sampled_count).round().astype(int).tolist()
+        )
+        index_set = set(indices)
 
-    all_frames: list[Image.Image] = []
-    for i, frame in enumerate(container.decode(video=0)):
-        if i in index_set:
-            all_frames.append(frame.to_image().convert("RGB"))
-        if len(all_frames) >= len(indices):
-            break
-    container.close()
+        all_frames: list[Image.Image] = []
+        for i, frame in enumerate(container.decode(video=0)):
+            if i in index_set:
+                all_frames.append(frame.to_image().convert("RGB"))
+            if len(all_frames) >= len(indices):
+                break
+    finally:
+        with contextlib.suppress(Exception):
+            container.close()
 
     chunks: list[list[Image.Image]] = []
     for start in range(0, len(all_frames), temporal_chunk_size):
@@ -111,7 +396,7 @@ def preprocess_video_chunk(
 ) -> dict[str, np.ndarray]:
     import math
 
-    T = len(frames)
+    frame_count = len(frames)
     w, h = frames[0].size
 
     factor = merge_kernel_size * patch_size
@@ -142,13 +427,18 @@ def preprocess_video_chunk(
 
     pixel_values = np.stack(pixel_arrays, axis=0)
 
-    _, H, W, C = pixel_values.shape
+    _, height, width, channels = pixel_values.shape
     patches = pixel_values.reshape(
-        T, H // patch_size, patch_size, W // patch_size, patch_size, C
+        frame_count,
+        height // patch_size,
+        patch_size,
+        width // patch_size,
+        patch_size,
+        channels,
     )
     patches = patches.transpose(0, 1, 3, 5, 2, 4)
-    patches = patches.reshape(-1, C, patch_size, patch_size)
-    grid_thw = np.array([T, H // patch_size, W // patch_size])
+    patches = patches.reshape(-1, channels, patch_size, patch_size)
+    grid_thw = np.array([frame_count, height // patch_size, width // patch_size])
 
     return {"pixel_values": patches, "grid_thw": grid_thw}
 
@@ -197,11 +487,28 @@ def make_video_chunk_prompts(
     return prompts
 
 
-def expand_video_placeholder(text: str, chunk_prompts: list[str]) -> str:
+def expand_video_placeholder(
+    text: str,
+    chunk_prompts: list[str],
+    image_token: str | None = None,
+    n_tokens_per_chunk: list[int] | None = None,
+) -> str:
     placeholder = "<|kimi_k25_video_placeholder|>"
     if placeholder not in text:
         return text
-    replacement = "".join(chunk_prompts)
+
+    expanded_chunks: list[str] = []
+    for i, chunk_prompt in enumerate(chunk_prompts):
+        n_tokens = (
+            n_tokens_per_chunk[i]
+            if n_tokens_per_chunk is not None and i < len(n_tokens_per_chunk)
+            else 1
+        )
+        if image_token is not None and n_tokens > 1:
+            chunk_prompt = chunk_prompt.replace(image_token, image_token * n_tokens, 1)
+        expanded_chunks.append(chunk_prompt)
+
+    replacement = "".join(expanded_chunks)
     return text.replace(placeholder, replacement, 1)
 
 
@@ -603,10 +910,7 @@ class VisionEncoder:
                 grid_thw=grid_hw,
             )
             logger.info("encode_images: vision tower forward done")
-            if isinstance(result, tuple):
-                hidden_states = result[0]
-            else:
-                hidden_states = result
+            hidden_states = result[0] if isinstance(result, tuple) else result
         else:
             logger.info(
                 "encode_images: vision tower forward start needs_nhwc=False pixel_values_shape={} grid_thw_shape={}",
@@ -725,6 +1029,25 @@ def create_vision_embeddings(
     return input_embeddings
 
 
+def _build_media_region_payloads(
+    images: list[str],
+    videos: list[str],
+    video_chunk_counts: list[int],
+) -> list[str]:
+    """Return payloads aligned to contiguous image-token regions in the prompt.
+
+    Image inputs produce one media-token region each. Kimi video inputs expand one
+    logical video placeholder into one timestamped media-token region per
+    extracted chunk, so the same video payload must be repeated once per chunk
+    for prefix-cache content hashing.
+    """
+    payloads = list(images)
+    for index, video_payload in enumerate(videos):
+        chunk_count = video_chunk_counts[index] if index < len(video_chunk_counts) else 1
+        payloads.extend([video_payload] * chunk_count)
+    return payloads
+
+
 def _find_media_regions(
     prompt_tokens: mx.array,
     images: list[str],
@@ -764,6 +1087,28 @@ def _find_media_regions(
     return regions
 
 
+def _resolve_video_payloads_for_preprocessing(
+    videos: list[str],
+    video_sources: list[VideoSource],
+    video_urls: list[str],
+) -> list[str]:
+    """Resolve local base64 sources and remote URLs into Kimi video payloads.
+
+    Normalized base64 VideoSource payloads are already validated by the API
+    adapter and should flow directly into local Kimi frame extraction. HTTP(S)
+    video_url values intentionally keep the existing worker-side fetch wrapper
+    so the remote URL path remains unchanged.
+    """
+    resolved_videos = [source.as_pipeline_payload() for source in video_sources]
+    resolved_videos.extend(videos)
+    for video_url in video_urls:
+        logger.debug("Fetching Kimi video URL on worker")
+        resolved_videos.append(
+            _wrap_fetch_video_url_for_structured_errors(video_url)
+        )
+    return resolved_videos
+
+
 class VisionProcessor:
     """
     Pipeline for vision models:
@@ -796,9 +1141,17 @@ class VisionProcessor:
         model: Model,
         task_params: TextGenerationTaskParams,
         videos: list[str] | None = None,
+        video_sources: list[VideoSource] | None = None,
+        video_urls: list[str] | None = None,
     ) -> VisionResult:
         videos = videos or []
-        logger.info(f"Vision pipeline: {len(images)} image(s), {len(videos)} video(s)")
+        video_sources = video_sources or []
+        video_urls = video_urls or []
+        logger.info(
+            f"Vision pipeline: {len(images)} image(s), "
+            f"{len(videos)} inline video(s), {len(video_sources)} normalized video source(s), "
+            f"{len(video_urls)} video URL(s)"
+        )
 
         all_features_parts: list[mx.array] = []
         all_n_tokens: list[int] = []
@@ -822,13 +1175,31 @@ class VisionProcessor:
             )
 
         video_chunk_prompts: list[str] = []
-        if videos:
+        video_chunk_token_counts: list[int] = []
+        video_chunk_counts: list[int] = []
+        resolved_videos = _resolve_video_payloads_for_preprocessing(
+            videos=videos,
+            video_sources=video_sources,
+            video_urls=video_urls,
+        )
+        if resolved_videos:
             sample_fps = self.vision_config.sample_fps
             chunk_size = self.vision_config.temporal_merge_kernel_size
-            for video_b64 in videos:
-                chunks = extract_video_frames(
-                    video_b64, sample_fps=sample_fps, temporal_chunk_size=chunk_size
-                )
+            for video_b64 in resolved_videos:
+                try:
+                    chunks = extract_video_frames(
+                        video_b64,
+                        sample_fps=sample_fps,
+                        temporal_chunk_size=chunk_size,
+                    )
+                except VisionPreprocessingError:
+                    raise
+                except Exception as exc:
+                    raise VisionPreprocessingError(
+                        f"failed to decode video: {exc}",
+                        code=VIDEO_ERROR_CODE_DECODE_FAILED,
+                    ) from exc
+                video_chunk_counts.append(len(chunks))
                 logger.info(
                     f"Video extracted: {len(chunks)} chunks of {chunk_size} frames"
                 )
@@ -846,6 +1217,7 @@ class VisionProcessor:
                     )
                     all_features_parts.append(chunk_features)
                     all_n_tokens.extend(chunk_n_tokens)
+                    video_chunk_token_counts.extend(chunk_n_tokens)
 
         if all_features_parts:
             combined_features = mx.concatenate(all_features_parts, axis=0)
@@ -869,7 +1241,12 @@ class VisionProcessor:
         )
 
         if video_chunk_prompts:
-            prompt = expand_video_placeholder(prompt, video_chunk_prompts)
+            prompt = expand_video_placeholder(
+                prompt,
+                video_chunk_prompts,
+                image_token=image_token,
+                n_tokens_per_chunk=video_chunk_token_counts,
+            )
 
         logger.info(
             f"Expanded prompt has {prompt.count(image_token)} media_token occurrences, total len={len(prompt)}"
@@ -892,10 +1269,14 @@ class VisionProcessor:
         )
         mx.eval(embeddings)
 
-        all_media = images + videos
+        media_payloads = _build_media_region_payloads(
+            images,
+            resolved_videos,
+            video_chunk_counts,
+        )
         media_regions = _find_media_regions(
             prompt_tokens,
-            all_media,
+            media_payloads,
             self.vision_config.image_token_id,
         )
 
@@ -916,8 +1297,10 @@ def prepare_vision(
     model_id: ModelId,
     task_params: TextGenerationTaskParams,
     videos: list[str] | None = None,
+    video_sources: list[VideoSource] | None = None,
+    video_urls: list[str] | None = None,
 ) -> VisionResult | None:
-    if not images and not videos:
+    if not images and not videos and not video_sources and not video_urls:
         return None
     if chat_template_messages is None:
         logger.warning("Vision request missing chat_template_messages — ignoring media")
@@ -930,4 +1313,6 @@ def prepare_vision(
         model=model,
         task_params=task_params,
         videos=videos or [],
+        video_sources=video_sources or [],
+        video_urls=video_urls or [],
     )

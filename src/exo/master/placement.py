@@ -1,3 +1,4 @@
+import os
 import random
 from collections.abc import Mapping
 from copy import deepcopy
@@ -102,6 +103,21 @@ def _cycle_download_score(
     )
 
 
+def _rotate_cycle_to_rank0_pin(
+    cycle: Cycle, pinned_rank0_node_id: NodeId | None = None
+) -> Cycle:
+    resolved_pin = pinned_rank0_node_id or os.environ.get("EXO_PIN_RANK0_NODE_ID")
+    if not resolved_pin:
+        return cycle
+
+    try:
+        pin_index = cycle.node_ids.index(NodeId(resolved_pin))
+    except ValueError:
+        return cycle
+
+    return Cycle(cycle.node_ids[pin_index:] + cycle.node_ids[:pin_index])
+
+
 def place_instance(
     command: PlaceInstance,
     topology: Topology,
@@ -110,6 +126,7 @@ def place_instance(
     node_network: Mapping[NodeId, NodeNetworkInfo],
     required_nodes: set[NodeId] | None = None,
     download_status: Mapping[NodeId, Sequence[DownloadProgress]] | None = None,
+    pinned_rank0_node_id: NodeId | None = None,
 ) -> dict[InstanceId, Instance]:
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
@@ -189,6 +206,10 @@ def place_instance(
                 start=Memory(),
             ),
         ),
+    )
+
+    selected_cycle = _rotate_cycle_to_rank0_pin(
+        selected_cycle, pinned_rank0_node_id=pinned_rank0_node_id
     )
 
     # Single-node: force Pipeline/Ring (Tensor and Jaccl require multi-node)

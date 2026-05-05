@@ -43,6 +43,24 @@ class InputMessage(BaseModel, frozen=True):
     content: str
 
 
+class VideoSource(BaseModel, frozen=True):
+    """Normalized internal representation for one validated video payload.
+
+    V1 only supports bounded base64-encoded MP4 payloads from validated
+    data:video/mp4;base64 URLs. The worker-side Kimi video pipeline still
+    consumes raw base64 strings, so this type keeps source metadata at the API
+    boundary and exposes the exact payload via as_pipeline_payload().
+    """
+
+    type: Literal["base64"] = "base64"
+    media_type: Literal["video/mp4"] = "video/mp4"
+    data: str
+    byte_count: int = Field(ge=0)
+
+    def as_pipeline_payload(self) -> str:
+        return self.data
+
+
 class TextGenerationTaskParams(BaseModel, frozen=True):
     """Canonical internal task params for text generation.
 
@@ -72,6 +90,8 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
     repetition_context_size: int | None = None
     images: list[str] = Field(default_factory=list)
     videos: list[str] = Field(default_factory=list)
+    video_sources: list[VideoSource] = Field(default_factory=list)
+    video_urls: list[str] = Field(default_factory=list)
     image_hashes: dict[int, str] = Field(default_factory=dict)
     total_input_chunks: int = 0
     image_count: int = 0

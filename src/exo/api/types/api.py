@@ -29,6 +29,22 @@ class ErrorResponse(BaseModel):
     error: ErrorInfo
 
 
+# OpenAI-style structured error envelope used for video request validation.
+# Mirrors the shape OpenAI uses for invalid_request_error responses, where
+# `code` is a stable string slug (e.g. "video_too_large") rather than a
+# numeric HTTP status. Kept distinct from ErrorInfo so existing endpoints
+# that rely on `code: int` are unaffected.
+class VideoErrorInfo(BaseModel):
+    message: str
+    type: str = "invalid_request_error"
+    code: str
+    param: str | None = "messages.content[].video_url.url"
+
+
+class VideoErrorResponse(BaseModel):
+    error: VideoErrorInfo
+
+
 class ModelListModel(BaseModel):
     id: str
     object: str = "model"
@@ -67,13 +83,14 @@ class ChatCompletionMessageImageUrl(BaseModel):
 
 class ChatCompletionMessageVideoUrl(BaseModel):
     type: Literal["video_url"] = "video_url"
-    video_url: dict[str, str]  # {"url": "data:video/mp4;base64,..."}
+    video_url: object  # Expected shape: {"url": "https://..."} or gated data:video URL; adapter validates OpenAI-style errors.
 
 
 ChatCompletionContentPart = (
     ChatCompletionMessageText
     | ChatCompletionMessageImageUrl
     | ChatCompletionMessageVideoUrl
+    | dict[str, Any]
 )
 
 
@@ -238,6 +255,15 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: str | dict[str, Any] | None = None
     parallel_tool_calls: bool | None = None
     user: str | None = None
+    kimi_video_allow_local_urls: bool | None = Field(
+        default=None,
+        description=(
+            "exo extension: allow node-local Kimi video_url targets such as "
+            "localhost or private/link-local IPs for intentional single-node "
+            "video smokes. Defaults to false so cluster requests fail closed."
+        ),
+        json_schema_extra={"x-exo-extension": True},
+    )
 
 
 class BenchChatCompletionRequest(ChatCompletionRequest):
@@ -424,6 +450,14 @@ class ImageListItem(BaseModel, frozen=True):
 
 class ImageListResponse(BaseModel, frozen=True):
     data: list[ImageListItem]
+
+
+class VideoUploadResponse(BaseModel, frozen=True):
+    video_id: str
+    url: str
+    content_type: str
+    bytes: int
+    expires_at: float
 
 
 class StartDownloadParams(CamelCaseModel):

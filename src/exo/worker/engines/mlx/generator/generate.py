@@ -26,6 +26,10 @@ from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from exo.shared.types.video_errors import (
+    VIDEO_ERROR_CODE_DECODE_FAILED,
+    VisionPreprocessingError,
+)
 from exo.shared.types.worker.runner_response import (
     GenerationResponse,
 )
@@ -82,14 +86,27 @@ def patch_embed_tokens(
 
     def _inject(input_ids: mx.array) -> mx.array:
         start = offset[0]
-        if start >= end_offset:
-            return original_embed(input_ids)  # type: ignore
         chunk_len = input_ids.shape[-1]
-        end = min(start + chunk_len, end_offset)
+        end = start + chunk_len
         offset[0] = end
-        if end - start < chunk_len:
+
+        overlap_start = max(start, start_offset)
+        overlap_end = min(end, end_offset)
+        if overlap_start >= overlap_end:
             return original_embed(input_ids)  # type: ignore
-        return embeddings[:, start:end, :]
+
+        original = cast(mx.array, original_embed(input_ids))
+        local_start = overlap_start - start
+        local_end = overlap_end - start
+        patched = embeddings[:, overlap_start:overlap_end, :]
+
+        parts: list[mx.array] = []
+        if local_start > 0:
+            parts.append(original[:, :local_start, :])
+        parts.append(patched)
+        if local_end < chunk_len:
+            parts.append(original[:, local_end:, :])
+        return mx.concatenate(parts, axis=1)
 
     for attr in dir(original_embed):  # type: ignore
         if not attr.startswith("_") and not hasattr(_inject, attr):
@@ -513,6 +530,8 @@ def mlx_generate(
                 model_id=task.model,
                 task_params=task,
                 videos=task.videos,
+                video_sources=task.video_sources,
+                video_urls=task.video_urls,
             )
             if vision is not None:
                 logger.info(
@@ -521,10 +540,26 @@ def mlx_generate(
                     vision.embeddings.shape,
                     len(vision.media_regions),
                 )
-        except Exception:
-            logger.opt(exception=True).warning(
-                "Vision processing failed, falling back to text-only"
+        except VisionPreprocessingError:
+            # Already-coded structured error — let it propagate so the
+            # API layer can map it onto an OpenAI-style envelope.
+            logger.opt(exception=True).error(
+                "Vision preprocessing failed with structured error code"
             )
+            raise
+        except Exception as exc:
+            # Anything we didn't already classify is treated as a decode
+            # failure. Re-raise as VisionPreprocessingError so the worker
+            # error channel surfaces a stable code instead of silently
+            # falling back to text-only generation (which produces a
+            # plausible-looking but media-blind response).
+            logger.opt(exception=True).error(
+                "Vision preprocessing failed; surfacing structured error"
+            )
+            raise VisionPreprocessingError(
+                f"vision preprocessing failed: {exc}",
+                code=VIDEO_ERROR_CODE_DECODE_FAILED,
+            ) from exc
     if vision is not None:
         all_prompt_tokens = vision.prompt_tokens
     media_regions: list[MediaRegion] = vision.media_regions if vision else []

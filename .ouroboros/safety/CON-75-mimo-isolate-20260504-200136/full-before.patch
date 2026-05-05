@@ -1,0 +1,3148 @@
+diff --git a/dashboard/src/lib/components/ChatAttachments.svelte b/dashboard/src/lib/components/ChatAttachments.svelte
+index 7c579a23..ea628906 100644
+--- a/dashboard/src/lib/components/ChatAttachments.svelte
++++ b/dashboard/src/lib/components/ChatAttachments.svelte
+@@ -21,6 +21,8 @@
+         return "📑";
+       case "audio":
+         return "🎵";
++      case "video":
++        return "🎬";
+       default:
+         return "📎";
+     }
+@@ -48,6 +50,12 @@
+             alt={file.name}
+             class="w-8 h-8 object-cover rounded border border-exo-yellow/20"
+           />
++        {:else if file.preview && getFileCategory(file.type, file.name) === "video"}
++          <video
++            src={file.preview}
++            class="w-12 h-8 object-cover rounded border border-exo-yellow/20"
++            muted
++          ></video>
+         {:else}
+           <span class="text-base">{getFileIcon(file)}</span>
+         {/if}
+diff --git a/dashboard/src/lib/components/ChatForm.svelte b/dashboard/src/lib/components/ChatForm.svelte
+index e768ce33..1be40206 100644
+--- a/dashboard/src/lib/components/ChatForm.svelte
++++ b/dashboard/src/lib/components/ChatForm.svelte
+@@ -25,16 +25,7 @@
+     modelTasks?: Record<string, string[]>;
+     modelCapabilities?: Record<string, string[]>;
+     onSend?: () => void;
+-    onAutoSend: (
+-      content: string,
+-      files?: {
+-        id: string;
+-        name: string;
+-        type: string;
+-        textContent?: string;
+-        preview?: string;
+-      }[],
+-    ) => void;
++    onAutoSend: (content: string, files?: ChatUploadedFile[]) => void;
+     onOpenModelPicker?: () => void;
+     modelDisplayOverride?: string;
+   }
+@@ -67,8 +58,27 @@
+   const currentEditingImage = $derived(editingImage());
+   const isEditMode = $derived(currentEditingImage !== null);
+ 
+-  // Accept all supported file types
+-  const acceptString = getAcceptString(["image", "text", "pdf"]);
++  function modelSupportsVideoInput(modelId: string): boolean {
++    const caps = modelCapabilities[modelId] || [];
++    const normalized = modelId.toLowerCase();
++    return (
++      caps.includes("vision") ||
++      caps.includes("video") ||
++      (normalized.includes("kimi") && normalized.includes("k2.6"))
++    );
++  }
++
++  // Accept MP4 only when the selected model can use vision/video input.
++  const acceptString = $derived(
++    getAcceptString([
++      "image",
++      "text",
++      "pdf",
++      ...(currentModel && modelSupportsVideoInput(currentModel)
++        ? (["video"] as const)
++        : []),
++    ]),
++  );
+ 
+   function modelSupportsImageGeneration(modelId: string): boolean {
+     const tasks = modelTasks[modelId] || [];
+diff --git a/dashboard/src/lib/components/ChatMessages.svelte b/dashboard/src/lib/components/ChatMessages.svelte
+index c716ec3b..fe015dc4 100644
+--- a/dashboard/src/lib/components/ChatMessages.svelte
++++ b/dashboard/src/lib/components/ChatMessages.svelte
+@@ -139,6 +139,8 @@
+         return "🖼";
+       case "text":
+         return "📄";
++      case "video":
++        return "🎬";
+       default:
+         return "📎";
+     }
+@@ -408,6 +410,13 @@
+                                 expandedImageSrc = attachment.preview;
+                             }}
+                           />
++                        {:else if attachment.type === "video" && attachment.preview}
++                          <video
++                            src={attachment.preview}
++                            class="w-16 h-10 object-cover rounded border border-exo-yellow/20"
++                            muted
++                            controls
++                          ></video>
+                         {:else}
+                           <span>{getAttachmentIcon(attachment)}</span>
+                         {/if}
+diff --git a/dashboard/src/lib/stores/app.svelte.ts b/dashboard/src/lib/stores/app.svelte.ts
+index b43776cc..3a752d3f 100644
+--- a/dashboard/src/lib/stores/app.svelte.ts
++++ b/dashboard/src/lib/stores/app.svelte.ts
+@@ -257,11 +257,13 @@ interface RawStateResponse {
+ }
+ 
+ export interface MessageAttachment {
+-  type: "image" | "text" | "file" | "generated-image";
++  type: "image" | "text" | "file" | "video" | "generated-image";
+   name: string;
+   content?: string;
+   preview?: string;
++  url?: string;
+   mimeType?: string;
++  size?: number;
+ }
+ 
+ export interface TopLogprob {
+@@ -2231,6 +2233,23 @@ class AppStore {
+     return null;
+   }
+ 
++  async uploadVideo(file: File): Promise<string> {
++    const formData = new FormData();
++    formData.append("file", file);
++
++    const response = await fetch("/v1/videos", {
++      method: "POST",
++      body: formData,
++    });
++    if (!response.ok) {
++      const errorText = await response.text();
++      throw new Error(`Video upload failed: ${response.status} - ${errorText}`);
++    }
++
++    const payload = (await response.json()) as { url: string };
++    return payload.url;
++  }
++
+   /**
+    * Send a message to the LLM and stream the response
+    */
+@@ -2239,7 +2258,9 @@ class AppStore {
+     files?: {
+       id: string;
+       name: string;
++      size: number;
+       type: string;
++      file: File;
+       textContent?: string;
+       preview?: string;
+     }[],
+@@ -2267,8 +2288,18 @@ class AppStore {
+     let fileContext = "";
+ 
+     if (files && files.length > 0) {
++      const videoFiles = files.filter(
++        (file) => file.type === "video/mp4" || file.name.toLowerCase().endsWith(".mp4"),
++      );
++      if (videoFiles.length > 1) {
++        this.isLoading = false;
++        throw new Error("Only one MP4 video can be attached per chat request.");
++      }
++
+       for (const file of files) {
+         const isImage = file.type.startsWith("image/");
++        const isVideo =
++          file.type === "video/mp4" || file.name.toLowerCase().endsWith(".mp4");
+ 
+         if (isImage && file.preview) {
+           attachments.push({
+@@ -2276,6 +2307,17 @@ class AppStore {
+             name: file.name,
+             preview: file.preview,
+             mimeType: file.type,
++            size: file.size,
++          });
++        } else if (isVideo) {
++          const videoUrl = await this.uploadVideo(file.file);
++          attachments.push({
++            type: "video",
++            name: file.name,
++            preview: file.preview,
++            url: videoUrl,
++            mimeType: file.type || "video/mp4",
++            size: file.size,
+           });
+         } else if (file.textContent) {
+           attachments.push({
+@@ -2344,24 +2386,32 @@ class AppStore {
+       const apiMessages = [
+         systemPrompt,
+         ...targetConversation.messages.slice(0, -1).map((m) => {
+-          // Check if this message has image attachments
+-          const imageAttachments = m.attachments?.filter(
+-            (a) => a.type === "image" && a.preview,
++          // Check if this message has image/video attachments
++          const mediaAttachments = m.attachments?.filter(
++            (a) =>
++              (a.type === "image" && a.preview) ||
++              (a.type === "video" && a.url),
+           );
+ 
+-          if (imageAttachments && imageAttachments.length > 0) {
+-            // Build multimodal content array (OpenAI vision format)
++          if (mediaAttachments && mediaAttachments.length > 0) {
++            // Build multimodal content array (OpenAI vision/video format)
+             const contentParts: Array<
+               | { type: "text"; text: string }
+               | { type: "image_url"; image_url: { url: string } }
++              | { type: "video_url"; video_url: { url: string } }
+             > = [];
+ 
+-            // Add image parts first
+-            for (const img of imageAttachments) {
+-              if (img.preview) {
++            // Add media parts first
++            for (const media of mediaAttachments) {
++              if (media.type === "image" && media.preview) {
+                 contentParts.push({
+                   type: "image_url",
+-                  image_url: { url: img.preview },
++                  image_url: { url: media.preview },
++                });
++              } else if (media.type === "video" && media.url) {
++                contentParts.push({
++                  type: "video_url",
++                  video_url: { url: media.url },
+                 });
+               }
+             }
+@@ -2405,6 +2455,10 @@ class AppStore {
+         }),
+       ];
+ 
++      const hasVideoAttachment = targetConversation.messages
++        .slice(0, -1)
++        .some((m) => m.attachments?.some((a) => a.type === "video" && a.url));
++
+       // Determine the model to use
+       const modelToUse = this.getModelForRequest();
+       if (!modelToUse) {
+@@ -2424,22 +2478,25 @@ class AppStore {
+       const abortController = new AbortController();
+       this.currentAbortController = abortController;
+ 
++      const requestBody = {
++        model: modelToUse,
++        messages: apiMessages,
++        temperature: 0.7,
++        stream: !hasVideoAttachment,
++        ...(hasVideoAttachment
++          ? { max_tokens: 512 }
++          : { logprobs: true, top_logprobs: 5 }),
++        ...(enableThinking != null && {
++          enable_thinking: enableThinking,
++        }),
++      };
++
+       const response = await fetch("/v1/chat/completions", {
+         method: "POST",
+         headers: {
+           "Content-Type": "application/json",
+         },
+-        body: JSON.stringify({
+-          model: modelToUse,
+-          messages: apiMessages,
+-          temperature: 0.7,
+-          stream: true,
+-          logprobs: true,
+-          top_logprobs: 5,
+-          ...(enableThinking != null && {
+-            enable_thinking: enableThinking,
+-          }),
+-        }),
++        body: JSON.stringify(requestBody),
+         signal: abortController.signal,
+       });
+ 
+@@ -2448,6 +2505,31 @@ class AppStore {
+         throw new Error(`API error: ${response.status} - ${errorText}`);
+       }
+ 
++      if (hasVideoAttachment) {
++        const jsonResponse = (await response.json()) as {
++          choices?: Array<{
++            message?: { content?: string; reasoning_content?: string };
++          }>;
++          usage?: { completion_tokens?: number };
++        };
++        const responseMessage = jsonResponse.choices?.[0]?.message;
++        const displayContent = responseMessage?.content ?? "";
++        const thinkingContent = responseMessage?.reasoning_content ?? "";
++        this.currentResponse = displayContent;
++        this.totalTokens = jsonResponse.usage?.completion_tokens ?? 0;
++        this.updateConversationMessage(
++          targetConversationId,
++          assistantMessage.id,
++          (msg) => {
++            msg.content = displayContent;
++            msg.thinking = thinkingContent || undefined;
++          },
++        );
++        this.syncActiveMessagesIfNeeded(targetConversationId);
++        this.persistConversation(targetConversationId);
++        return;
++      }
++
+       const reader = response.body?.getReader();
+       if (!reader) {
+         throw new Error("No response body");
+diff --git a/dashboard/src/lib/types/files.ts b/dashboard/src/lib/types/files.ts
+index 4b11f128..babeeedf 100644
+--- a/dashboard/src/lib/types/files.ts
++++ b/dashboard/src/lib/types/files.ts
+@@ -20,7 +20,7 @@ export interface ChatAttachment {
+   mimeType?: string;
+ }
+ 
+-export type FileCategory = "image" | "text" | "pdf" | "audio" | "unknown";
++export type FileCategory = "image" | "text" | "pdf" | "audio" | "video" | "unknown";
+ 
+ export const IMAGE_EXTENSIONS = [
+   ".jpg",
+@@ -99,6 +99,9 @@ export const AUDIO_MIME_TYPES = [
+   "audio/mp4",
+ ];
+ 
++export const VIDEO_EXTENSIONS = [".mp4"];
++export const VIDEO_MIME_TYPES = ["video/mp4"];
++
+ /**
+  * Get file category based on MIME type and extension
+  */
+@@ -123,6 +126,12 @@ export function getFileCategory(
+   ) {
+     return "audio";
+   }
++  if (
++    VIDEO_MIME_TYPES.includes(mimeType) ||
++    VIDEO_EXTENSIONS.includes(extension)
++  ) {
++    return "video";
++  }
+   if (
+     TEXT_MIME_TYPES.includes(mimeType) ||
+     TEXT_EXTENSIONS.includes(extension) ||
+@@ -153,6 +162,9 @@ export function getAcceptString(categories: FileCategory[]): string {
+       case "audio":
+         accepts.push(...AUDIO_EXTENSIONS, ...AUDIO_MIME_TYPES);
+         break;
++      case "video":
++        accepts.push(...VIDEO_EXTENSIONS, ...VIDEO_MIME_TYPES);
++        break;
+     }
+   }
+ 
+@@ -227,6 +239,9 @@ export async function processUploadedFiles(
+       } else if (category === "audio") {
+         const preview = await readFileAsDataURL(file);
+         results.push({ ...base, preview });
++      } else if (category === "video") {
++        const preview = URL.createObjectURL(file);
++        results.push({ ...base, preview });
+       } else {
+         results.push(base);
+       }
+diff --git a/src/exo/api/adapters/chat_completions.py b/src/exo/api/adapters/chat_completions.py
+index 285bbe82..f629d691 100644
+--- a/src/exo/api/adapters/chat_completions.py
++++ b/src/exo/api/adapters/chat_completions.py
+@@ -1,10 +1,16 @@
+ """OpenAI Chat Completions API adapter for converting requests/responses."""
+ 
+ import base64
++import binascii
++import ipaddress
++import os
+ import re
+ import time
+-from collections.abc import AsyncGenerator
+-from typing import Any
++from collections.abc import AsyncGenerator, Mapping
++from typing import Any, cast
++from urllib.parse import urlparse
++
++from fastapi import HTTPException
+ 
+ from exo.api.types import (
+     ChatCompletionChoice,
+@@ -22,8 +28,11 @@ from exo.api.types import (
+     StreamingChoiceResponse,
+     ToolCall,
+     Usage,
++    VideoErrorInfo,
++    VideoErrorResponse,
+ )
+ from exo.download.download_utils import create_http_session
++from exo.shared.constants import allow_kimi_video, allow_kimi_video_data_urls
+ from exo.shared.types.chunks import (
+     ErrorChunk,
+     PrefillProgressChunk,
+@@ -34,8 +43,188 @@ from exo.shared.types.common import CommandId
+ from exo.shared.types.text_generation import (
+     InputMessage,
+     TextGenerationTaskParams,
++    VideoSource,
+     resolve_reasoning_params,
+ )
++from exo.shared.types.video_errors import (
++    VIDEO_ERROR_CODE_DECODE_FAILED as VIDEO_ERROR_CODE_DECODE_FAILED,
++)
++from exo.shared.types.video_errors import (
++    VIDEO_ERROR_CODE_FETCH_FAILED as VIDEO_ERROR_CODE_FETCH_FAILED,
++)
++from exo.shared.types.video_errors import (
++    VIDEO_ERROR_CODE_INVALID_VIDEO_URL as VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++)
++from exo.shared.types.video_errors import (
++    VIDEO_ERROR_CODE_MULTIPLE_VIDEOS as VIDEO_ERROR_CODE_MULTIPLE_VIDEOS,
++)
++from exo.shared.types.video_errors import (
++    VIDEO_ERROR_CODE_STREAMING_UNSUPPORTED as VIDEO_ERROR_CODE_STREAMING_UNSUPPORTED,
++)
++from exo.shared.types.video_errors import (
++    VIDEO_ERROR_CODE_TOO_LARGE as VIDEO_ERROR_CODE_TOO_LARGE,
++)
++from exo.shared.types.video_errors import (
++    VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT as VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
++)
++from exo.shared.types.video_errors import (
++    VIDEO_ERROR_CODE_URL_BLOCKED as VIDEO_ERROR_CODE_URL_BLOCKED,
++)
++
++DEFAULT_MAX_VIDEO_PAYLOAD_BYTES = 100 * 1024 * 1024
++_MISSING_VIDEO_URL_FIELD = object()
++_DATA_VIDEO_MP4_BASE64_RE = re.compile(
++    r"\Adata:video/mp4;base64,(?P<payload>.*)\Z",
++    re.IGNORECASE | re.DOTALL,
++)
++_DATA_URL_HEADER_RE = re.compile(r"\Adata:(?P<header>[^,]*)(?:,|\Z)", re.IGNORECASE | re.DOTALL)
++
++# Codecs explicitly listed by Moonshot's chat-with-video documentation.
++# Indexed by lowercase MIME subtype (the bit after `video/`). Mirrored as
++# file extensions for HTTP(S) URL path-suffix sniffing.
++SUPPORTED_VIDEO_MIME_TYPES: frozenset[str] = frozenset(
++    {
++        "video/mp4",
++        "video/mpeg",
++        "video/quicktime",
++        "video/x-msvideo",
++        "video/x-flv",
++        "video/mpg",
++        "video/webm",
++        "video/x-ms-wmv",
++        "video/3gpp",
++    }
++)
++SUPPORTED_VIDEO_MIME_SUBTYPES: frozenset[str] = frozenset(
++    {mime_type.split("/", maxsplit=1)[1] for mime_type in SUPPORTED_VIDEO_MIME_TYPES}
++)
++SUPPORTED_VIDEO_EXTENSIONS: frozenset[str] = frozenset(
++    {".mp4", ".mpeg", ".mpg", ".mov", ".avi", ".flv", ".webm", ".wmv", ".3gp", ".3gpp"}
++)
++
++class VideoValidationError(HTTPException):
++    """HTTPException subclass that carries an OpenAI-style structured error
++    envelope for video request validation failures. The API exception
++    handler detects this subclass and emits VideoErrorResponse JSON instead
++    of the legacy ErrorResponse shape.
++    """
++
++    def __init__(
++        self,
++        *,
++        status_code: int,
++        message: str,
++        code: str,
++        param: str | None = "messages.content[].video_url.url",
++    ) -> None:
++        super().__init__(status_code=status_code, detail=message)
++        self.error_code: str = code
++        self.error_message: str = message
++        self.error_param: str | None = param
++
++    def to_response(self) -> VideoErrorResponse:
++        return VideoErrorResponse(
++            error=VideoErrorInfo(
++                message=self.error_message,
++                code=self.error_code,
++                param=self.error_param,
++            )
++        )
++
++
++def get_max_video_payload_bytes() -> int:
++    raw = os.getenv("EXO_KIMI_VIDEO_MAX_BYTES")
++    if raw is None or raw == "":
++        raw = os.getenv("EXO_MAX_VIDEO_PAYLOAD_BYTES")
++    if raw is None or raw == "":
++        return DEFAULT_MAX_VIDEO_PAYLOAD_BYTES
++    return int(raw)
++
++
++def allow_video_data_urls() -> bool:
++    """Return whether inline base64 video data URLs are enabled."""
++    return allow_kimi_video_data_urls()
++
++
++def validate_video_payload_size(byte_count: int, max_bytes: int | None = None) -> None:
++    resolved_max_bytes = get_max_video_payload_bytes() if max_bytes is None else max_bytes
++    if byte_count <= resolved_max_bytes:
++        return
++
++    actual_mib = byte_count / 1024 / 1024
++    max_mib = resolved_max_bytes / 1024 / 1024
++    raise VideoValidationError(
++        status_code=413,
++        code=VIDEO_ERROR_CODE_TOO_LARGE,
++        message=(
++            f"video payload is too large: {actual_mib:.2f} MiB exceeds "
++            f"the configured limit of {max_mib:.2f} MiB. "
++            "Use a shorter/lower-bitrate clip or raise EXO_KIMI_VIDEO_MAX_BYTES."
++        ),
++    )
++
++
++def validate_video_base64_payload_size(
++    video_b64: str, max_bytes: int | None = None
++) -> None:
++    stripped = video_b64.rstrip("=")
++    estimated_byte_count = (len(stripped) * 3) // 4
++    validate_video_payload_size(estimated_byte_count, max_bytes=max_bytes)
++
++
++def is_data_video_mp4_base64_url(url: str) -> bool:
++    """Return True for explicit Moonshot-style inline MP4 video data URLs."""
++    return _DATA_VIDEO_MP4_BASE64_RE.match(url) is not None
++
++
++def _invalid_data_video_url_error(message: str) -> VideoValidationError:
++    return VideoValidationError(
++        status_code=400,
++        code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++        message=message,
++    )
++
++
++def _validate_data_video_mp4_base64_payload(payload: str) -> None:
++    if payload == "":
++        raise _invalid_data_video_url_error(
++            "video_url.url data:video/mp4;base64 payload is empty."
++        )
++    validate_video_base64_payload_size(payload)
++    try:
++        decoded_payload = base64.b64decode(payload, validate=True)
++    except (ValueError, binascii.Error) as exc:
++        raise _invalid_data_video_url_error(
++            "video_url.url has an invalid base64 video payload."
++        ) from exc
++    validate_video_payload_size(len(decoded_payload))
++
++
++def extract_data_video_mp4_base64_payload(data_url: str) -> str:
++    """Extract and validate the payload from data:video/mp4;base64,<payload>."""
++    match = _DATA_VIDEO_MP4_BASE64_RE.match(data_url)
++    if match is None:
++        header_match = _DATA_URL_HEADER_RE.match(data_url)
++        observed_header = header_match.group("header") if header_match is not None else ""
++        observed = f"data:{observed_header}" if observed_header else "data URL"
++        raise _invalid_data_video_url_error(
++            "Malformed video_url.url data URL header. Expected exactly "
++            f"data:video/mp4;base64,<base64 payload>; received {observed!r}."
++        )
++    payload = match.group("payload")
++    _validate_data_video_mp4_base64_payload(payload)
++    return payload
++
++
++def _normalized_base64_mp4_video_source(video_b64: str) -> VideoSource:
++    """Build the normalized source object after base64 payload validation."""
++    decoded_payload = base64.b64decode(video_b64, validate=True)
++    return VideoSource(
++        type="base64",
++        media_type="video/mp4",
++        data=video_b64,
++        byte_count=len(decoded_payload),
++    )
+ 
+ 
+ def extract_base64_from_data_url(data_url: str) -> str:
+@@ -45,6 +234,225 @@ def extract_base64_from_data_url(data_url: str) -> str:
+     return data_url
+ 
+ 
++def _extract_url_path_extension(url: str) -> str | None:
++    """Return the lowercase path extension (with leading dot) for an HTTP URL."""
++    parsed = urlparse(url)
++    path = parsed.path or ""
++    dot = path.rfind(".")
++    if dot == -1:
++        return None
++    return path[dot:].lower()
++
++
++def _looks_like_local_video_path(url: str) -> bool:
++    """Return True for v1-unsupported local file video_url values.
++
++    Detect these in request validation so they fail closed before any media
++    loading or accidental base64/data-url fallback runs. HTTP(S) and data URLs
++    are handled separately by validate_video_url_format.
++    """
++    parsed = urlparse(url)
++    scheme = parsed.scheme.lower()
++    if scheme == "file":
++        return True
++    if re.match(r"\A[a-zA-Z]:[\\/]", url):
++        return True
++    if scheme:
++        return False
++
++    stripped_url = url.strip()
++    if stripped_url.startswith("//"):
++        return False
++    if stripped_url.startswith(("/", "./", "../", "~/")):
++        return True
++    if "/" in stripped_url or "\\" in stripped_url:
++        return True
++
++    path_extension = _extract_url_path_extension(stripped_url)
++    return path_extension in SUPPORTED_VIDEO_EXTENSIONS
++
++
++def _normalize_declared_video_mime_type(raw_mime_type: str) -> str:
++    return raw_mime_type.split(";", maxsplit=1)[0].strip().lower()
++
++
++def _validate_declared_video_mime_type(
++    video_url_mapping: Mapping[object, object],
++) -> None:
++    for field_name in ("mime_type", "media_type", "content_type"):
++        raw_mime_type = video_url_mapping.get(field_name)
++        if raw_mime_type is None:
++            continue
++        param = f"messages.content[].video_url.{field_name}"
++        if not isinstance(raw_mime_type, str) or raw_mime_type.strip() == "":
++            raise VideoValidationError(
++                status_code=400,
++                code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++                param=param,
++                message=f"video_url.{field_name} must be a non-empty string when provided.",
++            )
++        mime_type = _normalize_declared_video_mime_type(raw_mime_type)
++        if mime_type in SUPPORTED_VIDEO_MIME_TYPES:
++            continue
++        raise VideoValidationError(
++            status_code=415,
++            code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
++            param=param,
++            message=(
++                f"video MIME type '{mime_type}' is not supported for Kimi video_url v1. "
++                f"Supported MIME types: {sorted(SUPPORTED_VIDEO_MIME_TYPES)}."
++            ),
++        )
++
++
++def _raise_local_video_path_error(url: str) -> None:
++    raise VideoValidationError(
++        status_code=400,
++        code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++        message=(
++            "Local file paths are not supported for Kimi video_url requests in v1: "
++            f"'{url}'. Use a bounded http://, https://, or enabled "
++            "data:video/mp4;base64 URL that is safe for the selected exo cluster."
++        ),
++    )
++
++
++def validate_video_url_format(url: str) -> None:
++    """Reject video URLs whose scheme, MIME type, or extension is unsupported.
++
++    V1 accepts HTTP(S) URLs and, when explicitly enabled, bounded
++    data:video/mp4;base64 URLs. HTTP(S) URLs are sniffed via path extension.
++    Data URLs are strict: the header must be exactly video/mp4 plus base64
++    encoding, and the payload must be valid base64 before runner dispatch.
++    HTTP(S) URLs with no recognizable extension are accepted here and
++    re-checked downstream by the worker-side decoder.
++    """
++    parsed = urlparse(url)
++    scheme = parsed.scheme.lower()
++
++    if _looks_like_local_video_path(url):
++        _raise_local_video_path_error(url)
++
++    if scheme in {"http", "https"}:
++        ext = _extract_url_path_extension(url)
++        if ext is None:
++            # No extension to sniff; defer to downstream decoder.
++            return
++        if ext not in SUPPORTED_VIDEO_EXTENSIONS:
++            raise VideoValidationError(
++                status_code=415,
++                code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
++                message=(
++                    f"video extension '{ext}' is not in the supported codec "
++                    f"list. Supported extensions: "
++                    f"{sorted(SUPPORTED_VIDEO_EXTENSIONS)}."
++                ),
++            )
++        return
++
++    if scheme == "data":
++        if not allow_video_data_urls():
++            raise VideoValidationError(
++                status_code=400,
++                code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++                message=(
++                    "video data URL base64 payloads are disabled by default. "
++                    "Set EXO_KIMI_VIDEO_ALLOW_DATA_URLS=1 only for bounded "
++                    "Kimi video smokes after payload-size limits are verified."
++                ),
++            )
++        extract_data_video_mp4_base64_payload(url)
++        return
++
++    rejected_scheme = scheme or "missing"
++    raise VideoValidationError(
++        status_code=400,
++        code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++        message=(
++            f"unsupported video_url scheme '{rejected_scheme}'. "
++            "Use http://, https://, or data:video URLs for Kimi video requests. "
++            "Local paths and other remote schemes are out of scope for v1."
++        ),
++    )
++
++
++def allow_local_video_urls() -> bool:
++    # Keep the pre-candidate override as a compatibility alias so existing
++    # single-node smoke scripts do not silently lose their intentional local-URL
++    # bypass when the Kimi-specific gate is introduced.
++    return (
++        os.getenv("EXO_KIMI_VIDEO_ALLOW_LOCAL_URLS")
++        or os.getenv("EXO_ALLOW_LOCAL_VIDEO_URLS")
++        or ""
++    ).lower() in {
++        "1",
++        "true",
++        "yes",
++    }
++
++
++def _is_blocked_node_local_video_host(host: str) -> bool:
++    """Return True for URL hosts that should fail closed for cluster video fetch.
++
++    V1 worker-side video fetch runs on the selected Kimi runner. Literal
++    loopback, link-local, private LAN/ULA, unspecified, multicast, and mDNS
++    hosts are unsafe by default because they may resolve differently per Studio
++    node or be reachable only from the API node. DNS hostnames are otherwise
++    left unresolved here so validation stays cheap and avoids network side
++    effects in the API/coordinator path.
++    """
++    normalized_host = host.rstrip(".").lower()
++    local_hostnames = {"localhost", "localhost.localdomain"}
++    if normalized_host in local_hostnames or normalized_host.endswith(".localhost"):
++        return True
++    if normalized_host.endswith(".local"):
++        return True
++
++    try:
++        ip = ipaddress.ip_address(normalized_host)
++    except ValueError:
++        return False
++
++    return (
++        ip.is_loopback
++        or ip.is_link_local
++        or ip.is_private
++        or ip.is_unspecified
++        or ip.is_multicast
++        or ip.is_reserved
++    )
++
++
++def validate_distributed_video_url(
++    url: str, *, allow_node_local_video_urls: bool = False
++) -> None:
++    """Reject URLs that are likely reachable only from one node in a cluster."""
++    if allow_node_local_video_urls or allow_local_video_urls():
++        return
++
++    parsed = urlparse(url)
++    hostname = parsed.hostname
++    if hostname is None:
++        return
++
++    if not _is_blocked_node_local_video_host(hostname):
++        return
++
++    raise VideoValidationError(
++        status_code=400,
++        code=VIDEO_ERROR_CODE_URL_BLOCKED,
++        message=(
++            "video_url must be reachable from every exo node before it can be "
++            "used by distributed Kimi video requests. "
++            f"Non-cluster-reachable video URL '{url}' is only safe for "
++            "single-node testing; serve the video on a routable address such "
++            "as the Studio Tailscale IP, set EXO_KIMI_VIDEO_ALLOW_LOCAL_URLS=1, "
++            "or pass kimi_video_allow_local_urls=true for an intentional "
++            "single-node smoke override."
++        ),
++    )
++
++
+ async def fetch_image_url(url: str) -> str:
+     headers = {"User-Agent": "exo/1.0"}
+     async with (
+@@ -63,18 +471,294 @@ async def fetch_video_url(url: str) -> str:
+         session.get(url, headers=headers) as resp,
+     ):
+         resp.raise_for_status()
++        content_length = resp.headers.get("Content-Length")
++        if content_length is not None:
++            validate_video_payload_size(int(content_length))
+         data = await resp.read()
++        validate_video_payload_size(len(data))
+         return base64.b64encode(data).decode("ascii")
+ 
+ 
++def _is_raw_frame_array_video_payload(part: object) -> bool:
++    if not isinstance(part, Mapping):
++        return False
++
++    part_mapping = cast(Mapping[object, object], part)
++    frames = part_mapping.get("frames")
++    has_top_level_frames = isinstance(frames, list)
++
++    raw_type = part_mapping.get("type")
++    if isinstance(raw_type, str):
++        normalized_raw_type = raw_type.lower()
++        if has_top_level_frames and normalized_raw_type in {
++            "video",
++            "input_video",
++            "video_frames",
++            "frame_array",
++        }:
++            return True
++        nested_payload = part_mapping.get(normalized_raw_type)
++        if isinstance(nested_payload, Mapping):
++            nested_payload_mapping = cast(Mapping[object, object], nested_payload)
++            if isinstance(nested_payload_mapping.get("frames"), list):
++                return True
++
++    if not has_top_level_frames:
++        return False
++
++    # Some clients incorrectly put raw decoded/extracted frame arrays inside
++    # the video_url object instead of the supported {"url": "..."} shape.
++    return "url" not in part_mapping
++
++
++def _raise_raw_frame_array_video_payload_error(*, param: str) -> None:
++    raise VideoValidationError(
++        status_code=400,
++        code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
++        param=param,
++        message=(
++            "Raw frame-array video payloads are not supported for Kimi video "
++            "chat completions v1. Use exactly one mixed content part with a "
++            "video_url.url string: {'type': 'video_url', 'video_url': {'url': "
++            "'<http(s) URL or enabled data:video/mp4;base64 URL>'}} so the selected runner can "
++            "fetch/decode/preprocess the video through Kimi's native media-token path."
++        ),
++    )
++
++
++def _require_video_url_string(video_url: object) -> str:
++    """Validate OpenAI/Moonshot video_url part shape and return its URL.
++
++    Pydantic intentionally keeps ChatCompletionMessageVideoUrl.video_url loose so
++    malformed client payloads can be rejected here with the same structured
++    OpenAI-style envelope used by other video validation failures, instead of a
++    generic FastAPI/Pydantic 422.
++    """
++    if not isinstance(video_url, Mapping):
++        raise VideoValidationError(
++            status_code=400,
++            code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++            param="messages.content[].video_url",
++            message="video_url must be an object containing a string url field.",
++        )
++
++    video_url_mapping = cast(Mapping[object, object], video_url)
++    _validate_declared_video_mime_type(video_url_mapping)
++    if _is_raw_frame_array_video_payload(video_url_mapping):
++        _raise_raw_frame_array_video_payload_error(param="messages.content[].video_url")
++
++    if "url" not in video_url_mapping:
++        raise VideoValidationError(
++            status_code=400,
++            code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++            param="messages.content[].video_url.url",
++            message="video_url is missing required url field.",
++        )
++
++    url = video_url_mapping["url"]
++    if not isinstance(url, str):
++        raise VideoValidationError(
++            status_code=400,
++            code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++            param="messages.content[].video_url.url",
++            message="video_url.url must be a string.",
++        )
++
++    if url.strip() == "":
++        raise VideoValidationError(
++            status_code=400,
++            code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++            param="messages.content[].video_url.url",
++            message="video_url.url must not be empty.",
++        )
++
++    return url
++
++
++def _message_contains_video_url(content: object) -> bool:
++    if isinstance(content, ChatCompletionMessageVideoUrl):
++        return True
++    if isinstance(content, list):
++        parts = cast(list[object], content)
++        return any(
++            isinstance(part, ChatCompletionMessageVideoUrl)
++            or _is_raw_frame_array_video_payload(part)
++            for part in parts
++        )
++    return False
++
++
++def validate_video_url_content_array_shape(request: ChatCompletionRequest) -> None:
++    """Validate OpenAI/Moonshot mixed content-array shape for video_url.
++
++    Kimi video support intentionally accepts video_url only as one part inside a
++    mixed content array. Rejecting top-level/non-array video_url and video-only
++    arrays before URL validation avoids assertion failures and keeps malformed
++    media requests from being dispatched to workers.
++    """
++    for message_index, message in enumerate(request.messages):
++        message_content_param = f"messages[{message_index}].content"
++        content = message.content
++        if not _message_contains_video_url(content):
++            continue
++
++        if not isinstance(content, list):
++            raise VideoValidationError(
++                status_code=400,
++                code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++                param=message_content_param,
++                message=(
++                    "content containing video_url must be a mixed content array "
++                    "with at least one text part and one video_url part."
++                ),
++            )
++
++        parts = cast(list[object], content)
++        if any(_is_raw_frame_array_video_payload(part) for part in parts):
++            _raise_raw_frame_array_video_payload_error(param="messages.content[].video")
++
++        invalid_parts = [
++            part
++            for part in parts
++            if not isinstance(
++                part,
++                (
++                    ChatCompletionMessageText,
++                    ChatCompletionMessageImageUrl,
++                    ChatCompletionMessageVideoUrl,
++                ),
++            )
++        ]
++        if invalid_parts:
++            raise VideoValidationError(
++                status_code=400,
++                code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++                param="messages.content[]",
++                message=(
++                    "content arrays containing video_url may only include text, "
++                    "image_url, or video_url parts."
++                ),
++            )
++
++        text_parts = [part for part in parts if isinstance(part, ChatCompletionMessageText)]
++        if not text_parts:
++            raise VideoValidationError(
++                status_code=400,
++                code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++                param=message_content_param,
++                message=(
++                    "content containing video_url must include at least one text "
++                    "part in the same mixed content array."
++                ),
++            )
++
++        has_non_empty_text_context = any(part.text.strip() for part in text_parts)
++        if not has_non_empty_text_context:
++            same_message_scope = (
++                "same user message" if message.role == "user" else "same message"
++            )
++            raise VideoValidationError(
++                status_code=400,
++                code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++                param=message_content_param,
++                message=(
++                    f"{message.role} messages containing video_url must include "
++                    f"non-empty text context in the {same_message_scope}."
++                ),
++            )
++
++
++def _count_video_url_parts_in_message(message: ChatCompletionMessage) -> int:
++    if isinstance(message.content, ChatCompletionMessageVideoUrl):
++        return 1
++    if isinstance(message.content, list):
++        return sum(
++            1 for part in message.content if isinstance(part, ChatCompletionMessageVideoUrl)
++        )
++    return 0
++
++
++def validate_single_video_url_part_per_request(request: ChatCompletionRequest) -> None:
++    total_video_url_part_count = 0
++    for message in request.messages:
++        message_video_url_part_count = _count_video_url_parts_in_message(message)
++        if message_video_url_part_count > 1:
++            raise VideoValidationError(
++                status_code=400,
++                code=VIDEO_ERROR_CODE_MULTIPLE_VIDEOS,
++                param="messages.content[].video_url",
++                message=(
++                    "chat completions accept at most one video_url part in a single "
++                    f"message, received {message_video_url_part_count}. Submit additional "
++                    "videos as separate requests."
++                ),
++            )
++        total_video_url_part_count += message_video_url_part_count
++
++    if total_video_url_part_count > 1:
++        raise VideoValidationError(
++            status_code=400,
++            code=VIDEO_ERROR_CODE_MULTIPLE_VIDEOS,
++            param="messages.content[].video_url",
++            message=(
++                "chat completions accept at most one video_url part in a single "
++                f"chat completion request, received {total_video_url_part_count}. "
++                "Submit additional videos as separate requests."
++            ),
++        )
++
++
++def _request_contains_video_url(request: ChatCompletionRequest) -> bool:
++    return any(_count_video_url_parts_in_message(message) for message in request.messages)
++
++
++def validate_video_streaming_not_requested(request: ChatCompletionRequest) -> None:
++    if not request.stream:
++        return
++    if not _request_contains_video_url(request):
++        return
++    raise VideoValidationError(
++        status_code=400,
++        code=VIDEO_ERROR_CODE_STREAMING_UNSUPPORTED,
++        param="stream",
++        message=(
++            "Streaming video chat completions are out of scope for v1. "
++            "Set stream=false and use a short video fixture so preprocessing "
++            "latency is measured separately from generation throughput."
++        ),
++    )
++
++
++def validate_kimi_video_feature_enabled(request: ChatCompletionRequest) -> None:
++    if not _request_contains_video_url(request) or allow_kimi_video():
++        return
++    raise VideoValidationError(
++        status_code=400,
++        code=VIDEO_ERROR_CODE_URL_BLOCKED,
++        param="messages.content[].video_url",
++        message=(
++            "Kimi video_url chat completions are disabled. Set "
++            "EXO_KIMI_VIDEO_ENABLED=1 only after local smoke checks pass."
++        ),
++    )
++
++
+ async def chat_request_to_text_generation(
+     request: ChatCompletionRequest,
+ ) -> TextGenerationTaskParams:
++    validate_video_url_content_array_shape(request)
++    validate_single_video_url_part_per_request(request)
++    validate_video_streaming_not_requested(request)
++    validate_kimi_video_feature_enabled(request)
++
+     instructions: str | None = None
+     input_messages: list[InputMessage] = []
+     chat_template_messages: list[dict[str, Any]] = []
+     images: list[str] = []
+     videos: list[str] = []
++    video_sources: list[VideoSource] = []
++    video_urls: list[str] = []
++    allow_node_local_video_urls = request.kimi_video_allow_local_urls is True
+ 
+     for msg in request.messages:
+         # Normalize content to string
+@@ -97,28 +781,65 @@ async def chat_request_to_text_generation(
+                 has_images = True
+             content = ""
+         elif isinstance(msg.content, ChatCompletionMessageVideoUrl):
+-            url = msg.content.video_url.get("url", "")
+-            if url:
+-                if url.startswith(("http://", "https://")):
+-                    videos.append(await fetch_video_url(url))
++            url = _require_video_url_string(
++                getattr(msg.content, "video_url", _MISSING_VIDEO_URL_FIELD)
++            )
++            validate_video_url_format(url)
++            if url.startswith(("http://", "https://")):
++                validate_distributed_video_url(
++                    url,
++                    allow_node_local_video_urls=allow_node_local_video_urls,
++                )
++                video_urls.append(url)
++            else:
++                if is_data_video_mp4_base64_url(url):
++                    video_b64 = extract_data_video_mp4_base64_payload(url)
+                 else:
+-                    videos.append(extract_base64_from_data_url(url))
+-                has_videos = True
++                    video_b64 = extract_base64_from_data_url(url)
++                validate_video_base64_payload_size(video_b64)
++                video_sources.append(_normalized_base64_mp4_video_source(video_b64))
++            has_videos = True
+             content = ""
+         else:
++            video_url_part_count = sum(
++                1 for part in msg.content if isinstance(part, ChatCompletionMessageVideoUrl)
++            )
++            if video_url_part_count > 1:
++                raise VideoValidationError(
++                    status_code=400,
++                    code=VIDEO_ERROR_CODE_MULTIPLE_VIDEOS,
++                    param="messages.content[].video_url",
++                    message=(
++                        "chat completions accept at most one video_url part in a single "
++                        f"message, received {video_url_part_count}. Submit additional "
++                        "videos as separate requests."
++                    ),
++                )
++
+             text_parts: list[str] = []
+             for part in msg.content:
+                 if isinstance(part, ChatCompletionMessageText):
+                     text_parts.append(part.text)
+                 elif isinstance(part, ChatCompletionMessageVideoUrl):
+-                    url = part.video_url.get("url", "")
+-                    if url:
+-                        if url.startswith(("http://", "https://")):
+-                            videos.append(await fetch_video_url(url))
++                    url = _require_video_url_string(
++                        getattr(part, "video_url", _MISSING_VIDEO_URL_FIELD)
++                    )
++                    validate_video_url_format(url)
++                    if url.startswith(("http://", "https://")):
++                        validate_distributed_video_url(
++                            url,
++                            allow_node_local_video_urls=allow_node_local_video_urls,
++                        )
++                        video_urls.append(url)
++                    else:
++                        if is_data_video_mp4_base64_url(url):
++                            video_b64 = extract_data_video_mp4_base64_payload(url)
+                         else:
+-                            videos.append(extract_base64_from_data_url(url))
+-                        has_videos = True
+-                else:
++                            video_b64 = extract_base64_from_data_url(url)
++                        validate_video_base64_payload_size(video_b64)
++                        video_sources.append(_normalized_base64_mp4_video_source(video_b64))
++                    has_videos = True
++                elif isinstance(part, ChatCompletionMessageImageUrl):
+                     url = part.image_url.get("url", "")
+                     if url:
+                         if url.startswith(("http://", "https://")):
+@@ -126,6 +847,17 @@ async def chat_request_to_text_generation(
+                         else:
+                             images.append(extract_base64_from_data_url(url))
+                         has_images = True
++                else:
++                    raise VideoValidationError(
++                        status_code=400,
++                        code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++                        param="messages.content[]",
++                        message=(
++                            "content arrays may only include text, image_url, or "
++                            "supported video_url parts. Raw frame-array video payloads "
++                            "must not be used."
++                        ),
++                    )
+             content = "\n".join(text_parts)
+ 
+         # Extract system message as instructions
+@@ -157,7 +889,9 @@ async def chat_request_to_text_generation(
+                     if isinstance(part, ChatCompletionMessageText):
+                         multimodal_content.append({"type": "text", "text": part.text})
+                     elif isinstance(part, ChatCompletionMessageVideoUrl):
+-                        multimodal_content.append({"type": "video_url"})
++                        multimodal_content.append(
++                            {"type": "video_url", "video_url": part.video_url}
++                        )
+                     else:
+                         multimodal_content.append({"type": "image"})
+                 chat_template_messages.append(
+@@ -169,6 +903,18 @@ async def chat_request_to_text_generation(
+             dumped: dict[str, Any] = msg_copy.model_dump(exclude_none=True)
+             chat_template_messages.append(dumped)
+ 
++    total_video_count = len(videos) + len(video_sources) + len(video_urls)
++    if total_video_count > 1:
++        raise VideoValidationError(
++            status_code=400,
++            code=VIDEO_ERROR_CODE_MULTIPLE_VIDEOS,
++            message=(
++                f"chat completions accept at most one video per request, "
++                f"received {total_video_count}. "
++                "Submit additional videos as separate requests."
++            ),
++        )
++
+     resolved_effort, resolved_thinking = resolve_reasoning_params(
+         request.reasoning_effort, request.enable_thinking
+     )
+@@ -199,6 +945,8 @@ async def chat_request_to_text_generation(
+         repetition_context_size=request.repetition_context_size,
+         images=images,
+         videos=videos,
++        video_sources=video_sources,
++        video_urls=video_urls,
+     )
+ 
+ 
+@@ -255,14 +1003,23 @@ async def generate_chat_stream(
+                 yield f": prefill_progress {chunk.model_dump_json()}\n\n"
+ 
+             case ErrorChunk():
+-                error_response = ErrorResponse(
+-                    error=ErrorInfo(
+-                        message=chunk.error_message or "Internal server error",
+-                        type="InternalServerError",
+-                        code=500,
++                if chunk.error_code is not None:
++                    video_error_response = VideoErrorResponse(
++                        error=VideoErrorInfo(
++                            message=chunk.error_message or "Internal server error",
++                            code=chunk.error_code,
++                        )
+                     )
+-                )
+-                yield f"data: {error_response.model_dump_json()}\n\n"
++                    yield f"data: {video_error_response.model_dump_json()}\n\n"
++                else:
++                    error_response = ErrorResponse(
++                        error=ErrorInfo(
++                            message=chunk.error_message or "Internal server error",
++                            type="InternalServerError",
++                            code=500,
++                        )
++                    )
++                    yield f"data: {error_response.model_dump_json()}\n\n"
+                 yield "data: [DONE]\n\n"
+                 return
+ 
+@@ -321,7 +1078,7 @@ async def collect_chat_response(
+     chunk_stream: AsyncGenerator[
+         ErrorChunk | ToolCallChunk | TokenChunk | PrefillProgressChunk, None
+     ],
+-) -> ChatCompletionResponse | ErrorResponse:
++) -> ChatCompletionResponse | ErrorResponse | VideoErrorResponse:
+     """Collect all token chunks and return a single ChatCompletionResponse."""
+     text_parts: list[str] = []
+     thinking_parts: list[str] = []
+@@ -330,6 +1087,7 @@ async def collect_chat_response(
+     model: str | None = None
+     finish_reason: FinishReason | None = None
+     error_message: str | None = None
++    error_code: str | None = None
+     last_usage: Usage | None = None
+ 
+     async for chunk in chunk_stream:
+@@ -339,6 +1097,7 @@ async def collect_chat_response(
+ 
+             case ErrorChunk():
+                 error_message = chunk.error_message or "Internal server error"
++                error_code = chunk.error_code
+                 break
+ 
+             case TokenChunk():
+@@ -375,6 +1134,13 @@ async def collect_chat_response(
+                 finish_reason = chunk.finish_reason
+ 
+     if error_message is not None:
++        if error_code is not None:
++            return VideoErrorResponse(
++                error=VideoErrorInfo(
++                    message=error_message,
++                    code=error_code,
++                )
++            )
+         return ErrorResponse(
+             error=ErrorInfo(
+                 message=error_message,
+diff --git a/src/exo/api/main.py b/src/exo/api/main.py
+index 5b374be4..7693d7b1 100644
+--- a/src/exo/api/main.py
++++ b/src/exo/api/main.py
+@@ -1,6 +1,7 @@
+ import base64
+ import contextlib
+ import json
++import os
+ import random
+ import time
+ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
+@@ -22,10 +23,12 @@ from hypercorn.typing import ASGIFramework
+ from loguru import logger
+ 
+ from exo.api.adapters.chat_completions import (
++    VideoValidationError,
+     chat_request_to_text_generation,
+     collect_chat_response,
+     fetch_image_url,
+     generate_chat_stream,
++    get_max_video_payload_bytes,
+ )
+ from exo.api.adapters.claude import (
+     claude_request_to_text_generation,
+@@ -92,6 +95,8 @@ from exo.api.types import (
+     TraceRankStats,
+     TraceResponse,
+     TraceStatsResponse,
++    VideoErrorResponse,
++    VideoUploadResponse,
+     normalize_image_size,
+ )
+ from exo.api.types.claude_api import (
+@@ -117,6 +122,7 @@ from exo.api.types.openai_responses import (
+ )
+ from exo.master.image_store import ImageStore
+ from exo.master.placement import place_instance as get_instance_placements
++from exo.master.video_store import VideoStore
+ from exo.shared.apply import apply
+ from exo.shared.constants import (
+     DASHBOARD_DIR,
+@@ -125,6 +131,7 @@ from exo.shared.constants import (
+     EXO_IMAGE_CACHE_DIR,
+     EXO_MAX_CHUNK_SIZE,
+     EXO_TRACING_CACHE_DIR,
++    EXO_VIDEO_CACHE_DIR,
+ )
+ from exo.shared.election import ElectionMessage
+ from exo.shared.logging import InterceptLogger
+@@ -184,18 +191,28 @@ from exo.utils.task_group import TaskGroup
+ 
+ _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
+ ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
+-PLACE_INSTANCE_RETRYABLE_ERRORS = (
+-    "No cycles found with sufficient memory",
+-    "Requested RDMA (MlxJaccl) but no RDMA-connected cycles available",
+-)
+-PLACE_INSTANCE_READY_TIMEOUT_SECONDS = 30.0
+-PLACE_INSTANCE_RETRY_INTERVAL_SECONDS = 1.0
+ 
+ 
+ def _format_to_content_type(image_format: Literal["png", "jpeg", "webp"] | None) -> str:
+     return f"image/{image_format or 'png'}"
+ 
+ 
++def _video_error_status_code(code: str) -> int:
++    """Map an OpenAI-style structured video error code to its HTTP status."""
++    mapping: dict[str, int] = {
++        "video_too_large": 413,
++        "video_url_blocked": 400,
++        "unsupported_video_format": 415,
++        "video_fetch_failed": 400,
++        "video_decode_failed": 400,
++        "multiple_videos_unsupported": 400,
++        "invalid_video_url": 400,
++        "video_streaming_unsupported": 400,
++        "video_duration_unsupported": 413,
++    }
++    return mapping.get(code, 500)
++
++
+ def _ensure_seed(params: AdvancedImageParams | None) -> AdvancedImageParams:
+     """Ensure advanced params has a seed set for distributed consistency."""
+     if params is None:
+@@ -262,6 +279,7 @@ class API:
+             CommandId, Sender[ImageChunk | ErrorChunk]
+         ] = {}
+         self._image_store = ImageStore(EXO_IMAGE_CACHE_DIR)
++        self._video_store = VideoStore(EXO_VIDEO_CACHE_DIR)
+         self._tg: TaskGroup = TaskGroup()
+ 
+     def reset(self, result_clock: int, event_receiver: Receiver[IndexedEvent]):
+@@ -290,6 +308,11 @@ class API:
+     async def http_exception_handler(
+         self, _: Request, exc: HTTPException
+     ) -> JSONResponse:
++        if isinstance(exc, VideoValidationError):
++            return JSONResponse(
++                exc.to_response().model_dump(),
++                status_code=exc.status_code,
++            )
+         err = ErrorResponse(
+             error=ErrorInfo(
+                 message=exc.detail,
+@@ -333,6 +356,8 @@ class API:
+         self.app.post("/bench/images/edits")(self.bench_image_edits)
+         self.app.get("/images")(self.list_images)
+         self.app.get("/images/{image_id}")(self.get_image)
++        self.app.post("/v1/videos")(self.upload_video)
++        self.app.get("/v1/videos/{video_id}")(self.get_video)
+         self.app.post("/v1/messages", response_model=None)(self.claude_messages)
+         self.app.post("/v1/responses", response_model=None)(self.openai_responses)
+         self.app.post("/v1/cancel/{command_id}")(self.cancel_command)
+@@ -389,7 +414,6 @@ class API:
+             instance_meta=payload.instance_meta,
+             min_nodes=payload.min_nodes,
+         )
+-        await self._wait_for_place_instance_ready(command)
+         await self._send(command)
+ 
+         return CreateInstanceResponse(
+@@ -398,50 +422,6 @@ class API:
+             model_card=command.model_card,
+         )
+ 
+-    async def _wait_for_place_instance_ready(self, command: PlaceInstance) -> None:
+-        deadline = time.monotonic() + PLACE_INSTANCE_READY_TIMEOUT_SECONDS
+-
+-        while True:
+-            try:
+-                get_instance_placements(
+-                    command,
+-                    topology=self.state.topology,
+-                    current_instances=self.state.instances,
+-                    node_memory=self.state.node_memory,
+-                    node_network=self.state.node_network,
+-                    download_status=self.state.downloads,
+-                )
+-                return
+-            except ValueError as exc:
+-                detail = str(exc)
+-                if detail not in PLACE_INSTANCE_RETRYABLE_ERRORS:
+-                    raise HTTPException(status_code=409, detail=detail) from exc
+-
+-                topology_nodes = len(list(self.state.topology.list_nodes()))
+-                node_memory_nodes = len(self.state.node_memory)
+-                node_network_nodes = len(self.state.node_network)
+-                if time.monotonic() >= deadline:
+-                    raise HTTPException(
+-                        status_code=409,
+-                        detail=(
+-                            "Placement not ready after "
+-                            f"{PLACE_INSTANCE_READY_TIMEOUT_SECONDS:.0f}s: {detail} "
+-                            f"(topology_nodes={topology_nodes}, "
+-                            f"node_memory_nodes={node_memory_nodes}, "
+-                            f"node_network_nodes={node_network_nodes})"
+-                        ),
+-                    ) from exc
+-
+-                logger.info(
+-                    "place_instance preflight waiting for placement readiness: "
+-                    "error={} topology_nodes={} node_memory_nodes={} node_network_nodes={}",
+-                    detail,
+-                    topology_nodes,
+-                    node_memory_nodes,
+-                    node_network_nodes,
+-                )
+-                await anyio.sleep(PLACE_INSTANCE_RETRY_INTERVAL_SECONDS)
+-
+     async def create_instance(
+         self, payload: CreateInstanceParams
+     ) -> CreateInstanceResponse:
+@@ -847,7 +827,12 @@ class API:
+                 command.command_id,
+                 self._token_chunk_stream(command.command_id),
+             )
+-            status_code = 500 if isinstance(response, ErrorResponse) else 200
++            if isinstance(response, VideoErrorResponse):
++                status_code = _video_error_status_code(response.error.code)
++            elif isinstance(response, ErrorResponse):
++                status_code = 500
++            else:
++                status_code = 200
+             return JSONResponse(response.model_dump(), status_code=status_code)
+ 
+     async def bench_chat_completions(
+@@ -940,6 +925,58 @@ class API:
+         scheme = "https" if request.url.scheme == "https" else "http"
+         return f"{scheme}://{host}/v1/images/{image_id}"
+ 
++    async def upload_video(
++        self, request: Request, file: Annotated[UploadFile, File(...)]
++    ) -> VideoUploadResponse:
++        content_type = file.content_type or ""
++        filename = file.filename or ""
++        if content_type != "video/mp4" or not filename.lower().endswith(".mp4"):
++            raise VideoValidationError(
++                status_code=400,
++                code="invalid_video_url",
++                param="file",
++                message="Only H.264/MP4 uploads are supported.",
++            )
++
++        video_bytes = await file.read()
++        max_bytes = get_max_video_payload_bytes()
++        if len(video_bytes) > max_bytes:
++            actual_mib = len(video_bytes) / 1024 / 1024
++            max_mib = max_bytes / 1024 / 1024
++            raise VideoValidationError(
++                status_code=413,
++                code="video_too_large",
++                param="file",
++                message=(
++                    f"video payload is too large: {actual_mib:.2f} MiB exceeds "
++                    f"the configured limit of {max_mib:.2f} MiB. "
++                    "Use a shorter/lower-bitrate clip or raise EXO_KIMI_VIDEO_MAX_BYTES."
++                ),
++            )
++
++        stored = self._video_store.store(video_bytes, content_type)
++        return VideoUploadResponse(
++            video_id=str(stored.video_id),
++            url=self._build_video_url(request, stored.video_id),
++            content_type=stored.content_type,
++            bytes=stored.byte_count,
++            expires_at=stored.expires_at,
++        )
++
++    async def get_video(self, video_id: str) -> FileResponse:
++        stored = self._video_store.get(Id(video_id))
++        if stored is None:
++            raise HTTPException(status_code=404, detail="Video not found or expired")
++        return FileResponse(path=stored.file_path, media_type=stored.content_type)
++
++    def _build_video_url(self, request: Request, video_id: Id) -> str:
++        public_base_url = os.getenv("EXO_MEDIA_PUBLIC_BASE_URL")
++        if public_base_url is not None and public_base_url.strip() != "":
++            return f"{public_base_url.rstrip('/')}/v1/videos/{video_id}"
++        host = request.headers.get("host", f"localhost:{self.port}")
++        scheme = "https" if request.url.scheme == "https" else "http"
++        return f"{scheme}://{host}/v1/videos/{video_id}"
++
+     async def image_generations(
+         self, request: Request, payload: ImageGenerationTaskParams
+     ) -> ImageGenerationResponse | StreamingResponse:
+@@ -1878,11 +1915,6 @@ class API:
+     async def _send(self, command: Command):
+         while self.paused:
+             await self.paused_ev.wait()
+-        logger.info(
+-            "API sending command: type={} command_id={}",
+-            type(command).__name__,
+-            getattr(command, "command_id", None),
+-        )
+         await self.command_sender.send(
+             ForwarderCommand(origin=self._system_id, command=command)
+         )
+diff --git a/src/exo/api/types/__init__.py b/src/exo/api/types/__init__.py
+index d42f766b..cc5cbd77 100644
+--- a/src/exo/api/types/__init__.py
++++ b/src/exo/api/types/__init__.py
+@@ -57,4 +57,7 @@ from .api import TraceRankStats as TraceRankStats
+ from .api import TraceResponse as TraceResponse
+ from .api import TraceStatsResponse as TraceStatsResponse
+ from .api import Usage as Usage
++from .api import VideoErrorInfo as VideoErrorInfo
++from .api import VideoErrorResponse as VideoErrorResponse
++from .api import VideoUploadResponse as VideoUploadResponse
+ from .api import normalize_image_size as normalize_image_size
+diff --git a/src/exo/api/types/api.py b/src/exo/api/types/api.py
+index b4e6bb2b..52bff108 100644
+--- a/src/exo/api/types/api.py
++++ b/src/exo/api/types/api.py
+@@ -29,6 +29,22 @@ class ErrorResponse(BaseModel):
+     error: ErrorInfo
+ 
+ 
++# OpenAI-style structured error envelope used for video request validation.
++# Mirrors the shape OpenAI uses for invalid_request_error responses, where
++# `code` is a stable string slug (e.g. "video_too_large") rather than a
++# numeric HTTP status. Kept distinct from ErrorInfo so existing endpoints
++# that rely on `code: int` are unaffected.
++class VideoErrorInfo(BaseModel):
++    message: str
++    type: str = "invalid_request_error"
++    code: str
++    param: str | None = "messages.content[].video_url.url"
++
++
++class VideoErrorResponse(BaseModel):
++    error: VideoErrorInfo
++
++
+ class ModelListModel(BaseModel):
+     id: str
+     object: str = "model"
+@@ -67,13 +83,14 @@ class ChatCompletionMessageImageUrl(BaseModel):
+ 
+ class ChatCompletionMessageVideoUrl(BaseModel):
+     type: Literal["video_url"] = "video_url"
+-    video_url: dict[str, str]  # {"url": "data:video/mp4;base64,..."}
++    video_url: object  # Expected shape: {"url": "https://..."} or gated data:video URL; adapter validates OpenAI-style errors.
+ 
+ 
+ ChatCompletionContentPart = (
+     ChatCompletionMessageText
+     | ChatCompletionMessageImageUrl
+     | ChatCompletionMessageVideoUrl
++    | dict[str, Any]
+ )
+ 
+ 
+@@ -238,6 +255,15 @@ class ChatCompletionRequest(BaseModel):
+     tool_choice: str | dict[str, Any] | None = None
+     parallel_tool_calls: bool | None = None
+     user: str | None = None
++    kimi_video_allow_local_urls: bool | None = Field(
++        default=None,
++        description=(
++            "exo extension: allow node-local Kimi video_url targets such as "
++            "localhost or private/link-local IPs for intentional single-node "
++            "video smokes. Defaults to false so cluster requests fail closed."
++        ),
++        json_schema_extra={"x-exo-extension": True},
++    )
+ 
+ 
+ class BenchChatCompletionRequest(ChatCompletionRequest):
+@@ -426,6 +452,14 @@ class ImageListResponse(BaseModel, frozen=True):
+     data: list[ImageListItem]
+ 
+ 
++class VideoUploadResponse(BaseModel, frozen=True):
++    video_id: str
++    url: str
++    content_type: str
++    bytes: int
++    expires_at: float
++
++
+ class StartDownloadParams(CamelCaseModel):
+     target_node_id: NodeId
+     shard_metadata: ShardMetadata
+diff --git a/src/exo/master/placement.py b/src/exo/master/placement.py
+index f9380693..cdbcb1ef 100644
+--- a/src/exo/master/placement.py
++++ b/src/exo/master/placement.py
+@@ -1,3 +1,4 @@
++import os
+ import random
+ from collections.abc import Mapping
+ from copy import deepcopy
+@@ -102,6 +103,21 @@ def _cycle_download_score(
+     )
+ 
+ 
++def _rotate_cycle_to_rank0_pin(
++    cycle: Cycle, pinned_rank0_node_id: NodeId | None = None
++) -> Cycle:
++    resolved_pin = pinned_rank0_node_id or os.environ.get("EXO_PIN_RANK0_NODE_ID")
++    if not resolved_pin:
++        return cycle
++
++    try:
++        pin_index = cycle.node_ids.index(NodeId(resolved_pin))
++    except ValueError:
++        return cycle
++
++    return Cycle(cycle.node_ids[pin_index:] + cycle.node_ids[:pin_index])
++
++
+ def place_instance(
+     command: PlaceInstance,
+     topology: Topology,
+@@ -110,6 +126,7 @@ def place_instance(
+     node_network: Mapping[NodeId, NodeNetworkInfo],
+     required_nodes: set[NodeId] | None = None,
+     download_status: Mapping[NodeId, Sequence[DownloadProgress]] | None = None,
++    pinned_rank0_node_id: NodeId | None = None,
+ ) -> dict[InstanceId, Instance]:
+     cycles = topology.get_cycles()
+     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
+@@ -191,6 +208,10 @@ def place_instance(
+         ),
+     )
+ 
++    selected_cycle = _rotate_cycle_to_rank0_pin(
++        selected_cycle, pinned_rank0_node_id=pinned_rank0_node_id
++    )
++
+     # Single-node: force Pipeline/Ring (Tensor and Jaccl require multi-node)
+     if len(selected_cycle) == 1:
+         command.instance_meta = InstanceMeta.MlxRing
+diff --git a/src/exo/master/placement_utils.py b/src/exo/master/placement_utils.py
+index dc689376..3599c10b 100644
+--- a/src/exo/master/placement_utils.py
++++ b/src/exo/master/placement_utils.py
+@@ -320,11 +320,13 @@ def get_mlx_jaccl_devices_matrix(
+                     matrix[i][j] = conn.source_rdma_iface
+                     break
+             else:
+-                for reverse_conn in cycle_digraph.get_all_connections_between(
+-                    node_j, node_i
+-                ):
+-                    if isinstance(reverse_conn, RDMAConnection):
+-                        matrix[i][j] = reverse_conn.sink_rdma_iface
++                # Some platforms report RDMA reachability as a single directed
++                # topology edge even though the underlying device/interface is
++                # usable for both ranks. Mirror the reverse edge rather than
++                # rejecting an otherwise valid two-node JACCL placement.
++                for conn in cycle_digraph.get_all_connections_between(node_j, node_i):
++                    if isinstance(conn, RDMAConnection):
++                        matrix[i][j] = conn.sink_rdma_iface
+                         break
+                 else:
+                     raise ValueError(
+@@ -357,18 +359,21 @@ def _find_ip_prioritised(
+     Priority: ethernet > wifi > unknown > thunderbolt
+     """
+     ips = list(_find_connection_ip(node_id, other_node_id, cycle_digraph))
++    using_explicit_connection_ips = bool(ips)
+ 
+     def _is_usable_ip(ip: str) -> bool:
+         try:
+             parsed = ipaddress.ip_address(ip)
+         except ValueError:
+             return False
+-        return not (
+-            parsed.is_unspecified
+-            or parsed.is_loopback
+-            or parsed.is_link_local
+-            or parsed.is_multicast
+-        )
++        if parsed.is_unspecified or parsed.is_loopback or parsed.is_multicast:
++            return False
++        # Explicit socket edges may legitimately advertise 169.254/16 link-local
++        # addresses for directly connected Thunderbolt interfaces. Do not reject
++        # those, or placement cannot build MLX/JACCL host lists for the local
++        # Studio cluster. When falling back to an arbitrary interface list with
++        # no topology edge, keep the conservative link-local filter.
++        return using_explicit_connection_ips or not parsed.is_link_local
+ 
+     other_network = node_network.get(other_node_id, NodeNetworkInfo())
+     known_ips = {iface.ip_address for iface in other_network.interfaces}
+@@ -416,7 +421,7 @@ def _find_ip_prioritised(
+     return min(
+         ips,
+         key=lambda ip: (
+-            1 if _is_tailscale_ip(ip) else 0,
++            0 if _is_tailscale_ip(ip) else 1,
+             priority.get(ip_to_type.get(ip, "unknown"), 2),
+         ),
+     )
+diff --git a/src/exo/shared/constants.py b/src/exo/shared/constants.py
+index e6870a73..4968691d 100644
+--- a/src/exo/shared/constants.py
++++ b/src/exo/shared/constants.py
+@@ -86,6 +86,7 @@ EXO_CUSTOM_MODEL_CARDS_DIR = EXO_DATA_HOME / "custom_model_cards"
+ 
+ EXO_EVENT_LOG_DIR = EXO_DATA_HOME / "event_log"
+ EXO_IMAGE_CACHE_DIR = EXO_CACHE_HOME / "images"
++EXO_VIDEO_CACHE_DIR = EXO_CACHE_HOME / "videos"
+ EXO_TRACING_CACHE_DIR = EXO_CACHE_HOME / "traces"
+ 
+ EXO_ENABLE_IMAGE_MODELS = (
+@@ -97,3 +98,34 @@ EXO_OFFLINE = os.getenv("EXO_OFFLINE", "false").lower() == "true"
+ EXO_TRACING_ENABLED = os.getenv("EXO_TRACING_ENABLED", "false").lower() == "true"
+ 
+ EXO_MAX_CONCURRENT_REQUESTS = int(os.getenv("EXO_MAX_CONCURRENT_REQUESTS", "8"))
++
++EXO_KIMI_VIDEO_ENABLED_ENV = "EXO_KIMI_VIDEO_ENABLED"
++EXO_KIMI_VIDEO_ENABLED_DEFAULT = False
++EXO_KIMI_VIDEO_ALLOW_DATA_URLS_ENV = "EXO_KIMI_VIDEO_ALLOW_DATA_URLS"
++EXO_KIMI_VIDEO_ALLOW_DATA_URLS_DEFAULT = False
++_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
++
++
++def allow_kimi_video() -> bool:
++    """Return whether Kimi video_url chat completions are enabled.
++
++    This v1 gate is intentionally disabled by default so live text traffic and
++    Kimi image paths are not exposed to video preprocessing until an operator
++    opts in and smoke checks pass.
++    """
++    raw = os.getenv(EXO_KIMI_VIDEO_ENABLED_ENV)
++    if raw is None:
++        return EXO_KIMI_VIDEO_ENABLED_DEFAULT
++    return raw.lower() in _TRUTHY_ENV_VALUES
++
++
++def allow_kimi_video_data_urls() -> bool:
++    """Return whether inline base64 video data: URLs are enabled for Kimi video.
++
++    This flag is intentionally disabled by default so base64 video payloads do
++    not enter live cluster traffic until an operator opts in for bounded smokes.
++    """
++    raw = os.getenv(EXO_KIMI_VIDEO_ALLOW_DATA_URLS_ENV)
++    if raw is None:
++        return EXO_KIMI_VIDEO_ALLOW_DATA_URLS_DEFAULT
++    return raw.lower() in _TRUTHY_ENV_VALUES
+diff --git a/src/exo/shared/types/text_generation.py b/src/exo/shared/types/text_generation.py
+index 08cc4303..8fb29fc3 100644
+--- a/src/exo/shared/types/text_generation.py
++++ b/src/exo/shared/types/text_generation.py
+@@ -43,6 +43,24 @@ class InputMessage(BaseModel, frozen=True):
+     content: str
+ 
+ 
++class VideoSource(BaseModel, frozen=True):
++    """Normalized internal representation for one validated video payload.
++
++    V1 only supports bounded base64-encoded MP4 payloads from validated
++    data:video/mp4;base64 URLs. The worker-side Kimi video pipeline still
++    consumes raw base64 strings, so this type keeps source metadata at the API
++    boundary and exposes the exact payload via as_pipeline_payload().
++    """
++
++    type: Literal["base64"] = "base64"
++    media_type: Literal["video/mp4"] = "video/mp4"
++    data: str
++    byte_count: int = Field(ge=0)
++
++    def as_pipeline_payload(self) -> str:
++        return self.data
++
++
+ class TextGenerationTaskParams(BaseModel, frozen=True):
+     """Canonical internal task params for text generation.
+ 
+@@ -72,6 +90,8 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
+     repetition_context_size: int | None = None
+     images: list[str] = Field(default_factory=list)
+     videos: list[str] = Field(default_factory=list)
++    video_sources: list[VideoSource] = Field(default_factory=list)
++    video_urls: list[str] = Field(default_factory=list)
+     image_hashes: dict[int, str] = Field(default_factory=dict)
+     total_input_chunks: int = 0
+     image_count: int = 0
+diff --git a/src/exo/worker/engines/mlx/generator/batch_generate.py b/src/exo/worker/engines/mlx/generator/batch_generate.py
+index 3c2339b2..9a4878fd 100644
+--- a/src/exo/worker/engines/mlx/generator/batch_generate.py
++++ b/src/exo/worker/engines/mlx/generator/batch_generate.py
+@@ -1,8 +1,7 @@
+ import contextlib
+-import os
+ import time
+ from dataclasses import dataclass, field
+-from typing import Callable, Protocol, cast
++from typing import Callable, cast
+ 
+ import mlx.core as mx
+ from mlx_lm.generate import (
+@@ -11,7 +10,7 @@ from mlx_lm.generate import (
+ from mlx_lm.generate import (
+     generation_stream,
+ )
+-from mlx_lm.models.cache import CacheList, RotatingKVCache
++from mlx_lm.models.cache import RotatingKVCache
+ from mlx_lm.sample_utils import make_logits_processors, make_sampler
+ from mlx_lm.tokenizer_utils import StreamingDetokenizer, TokenizerWrapper
+ 
+@@ -26,6 +25,7 @@ from exo.api.types import (
+ from exo.shared.types.memory import Memory
+ from exo.shared.types.mlx import KVCacheType, Model
+ from exo.shared.types.text_generation import TextGenerationTaskParams
++from exo.shared.types.video_errors import VisionPreprocessingError
+ from exo.shared.types.worker.runner_response import GenerationResponse
+ from exo.worker.engines.mlx.cache import (
+     CacheSnapshot,
+@@ -56,34 +56,6 @@ from exo.worker.runner.bootstrap import logger
+ _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
+ 
+ 
+-class _NativeCacheCarrier(Protocol):
+-    _native_cache: object | None
+-
+-
+-def _batch_compatible_cache(layer_cache: object) -> object:
+-    if os.environ.get("EXO_TURBOQUANT_NATIVE_BATCH_FALLBACK", "0") != "1":
+-        return layer_cache
+-    native_cache = cast(
+-        object | None,
+-        getattr(cast(_NativeCacheCarrier, layer_cache), "_native_cache", None),
+-    )
+-    if native_cache is not None:
+-        return native_cache
+-    if isinstance(layer_cache, CacheList):
+-        sub_caches = cast(
+-            tuple[object, ...],
+-            layer_cache.caches,  # pyright: ignore[reportAttributeAccessIssue]
+-        )
+-        return CacheList(
+-            *(_batch_compatible_cache(sub_cache) for sub_cache in sub_caches)
+-        )
+-    return layer_cache
+-
+-
+-def _cache_for_batch_engine(cache: KVCacheType) -> list[object]:
+-    return [_batch_compatible_cache(layer_cache) for layer_cache in cache]
+-
+-
+ def _stop_sequences(task_params: TextGenerationTaskParams) -> list[str]:
+     if task_params.stop is None:
+         return []
+@@ -178,6 +150,8 @@ class ExoBatchGenerator:
+                     model_id=task_params.model,
+                     task_params=task_params,
+                     videos=task_params.videos,
++                    video_sources=task_params.video_sources,
++                    video_urls=task_params.video_urls,
+                 )
+                 if vision is not None:
+                     logger.info(
+@@ -186,6 +160,11 @@ class ExoBatchGenerator:
+                         vision.embeddings.shape,
+                         len(vision.media_regions),
+                     )
++            except VisionPreprocessingError:
++                logger.opt(exception=True).error(
++                    "Vision processing failed; surfacing structured error"
++                )
++                raise
+             except Exception:
+                 logger.opt(exception=True).warning(
+                     "Vision processing failed, falling back to text-only"
+@@ -286,7 +265,7 @@ class ExoBatchGenerator:
+                 media_regions,
+             )
+ 
+-        last_tokens = prompt_tokens[-1:]
++        last_tokens = prompt_tokens[-2:]
+ 
+         logits_processors: list[Callable[[mx.array, mx.array], mx.array]] = (
+             make_logits_processors(
+@@ -304,7 +283,7 @@ class ExoBatchGenerator:
+         uids = self._mlx_gen.insert(
+             prompts=[last_tokens.tolist()],
+             max_tokens=[max_tokens],
+-            caches=[_cache_for_batch_engine(list(cache))],
++            caches=[list(cache)],
+             samplers=[sampler],
+             logits_processors=[logits_processors],
+         )
+diff --git a/src/exo/worker/engines/mlx/generator/generate.py b/src/exo/worker/engines/mlx/generator/generate.py
+index e783d2fb..2a6e23ed 100644
+--- a/src/exo/worker/engines/mlx/generator/generate.py
++++ b/src/exo/worker/engines/mlx/generator/generate.py
+@@ -26,6 +26,10 @@ from exo.shared.types.common import ModelId
+ from exo.shared.types.memory import Memory
+ from exo.shared.types.mlx import KVCacheType, Model
+ from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
++from exo.shared.types.video_errors import (
++    VIDEO_ERROR_CODE_DECODE_FAILED,
++    VisionPreprocessingError,
++)
+ from exo.shared.types.worker.runner_response import (
+     GenerationResponse,
+ )
+@@ -82,14 +86,27 @@ def patch_embed_tokens(
+ 
+     def _inject(input_ids: mx.array) -> mx.array:
+         start = offset[0]
+-        if start >= end_offset:
+-            return original_embed(input_ids)  # type: ignore
+         chunk_len = input_ids.shape[-1]
+-        end = min(start + chunk_len, end_offset)
++        end = start + chunk_len
+         offset[0] = end
+-        if end - start < chunk_len:
++
++        overlap_start = max(start, start_offset)
++        overlap_end = min(end, end_offset)
++        if overlap_start >= overlap_end:
+             return original_embed(input_ids)  # type: ignore
+-        return embeddings[:, start:end, :]
++
++        original = cast(mx.array, original_embed(input_ids))
++        local_start = overlap_start - start
++        local_end = overlap_end - start
++        patched = embeddings[:, overlap_start:overlap_end, :]
++
++        parts: list[mx.array] = []
++        if local_start > 0:
++            parts.append(original[:, :local_start, :])
++        parts.append(patched)
++        if local_end < chunk_len:
++            parts.append(original[:, local_end:, :])
++        return mx.concatenate(parts, axis=1)
+ 
+     for attr in dir(original_embed):  # type: ignore
+         if not attr.startswith("_") and not hasattr(_inject, attr):
+@@ -513,6 +530,8 @@ def mlx_generate(
+                 model_id=task.model,
+                 task_params=task,
+                 videos=task.videos,
++                video_sources=task.video_sources,
++                video_urls=task.video_urls,
+             )
+             if vision is not None:
+                 logger.info(
+@@ -521,10 +540,26 @@ def mlx_generate(
+                     vision.embeddings.shape,
+                     len(vision.media_regions),
+                 )
+-        except Exception:
+-            logger.opt(exception=True).warning(
+-                "Vision processing failed, falling back to text-only"
++        except VisionPreprocessingError:
++            # Already-coded structured error — let it propagate so the
++            # API layer can map it onto an OpenAI-style envelope.
++            logger.opt(exception=True).error(
++                "Vision preprocessing failed with structured error code"
++            )
++            raise
++        except Exception as exc:
++            # Anything we didn't already classify is treated as a decode
++            # failure. Re-raise as VisionPreprocessingError so the worker
++            # error channel surfaces a stable code instead of silently
++            # falling back to text-only generation (which produces a
++            # plausible-looking but media-blind response).
++            logger.opt(exception=True).error(
++                "Vision preprocessing failed; surfacing structured error"
+             )
++            raise VisionPreprocessingError(
++                f"vision preprocessing failed: {exc}",
++                code=VIDEO_ERROR_CODE_DECODE_FAILED,
++            ) from exc
+     if vision is not None:
+         all_prompt_tokens = vision.prompt_tokens
+     media_regions: list[MediaRegion] = vision.media_regions if vision else []
+diff --git a/src/exo/worker/engines/mlx/utils_mlx.py b/src/exo/worker/engines/mlx/utils_mlx.py
+index 27339db3..dfab56d3 100644
+--- a/src/exo/worker/engines/mlx/utils_mlx.py
++++ b/src/exo/worker/engines/mlx/utils_mlx.py
+@@ -1,9 +1,12 @@
+ import json
+ import os
+ import re
++import resource
++import subprocess
+ import sys
+ import tempfile
+ import time
++from collections.abc import Callable
+ from pathlib import Path
+ from typing import TYPE_CHECKING, Any, cast
+ 
+@@ -88,6 +91,123 @@ class ModelLoadingTimeoutError(Exception):
+     pass
+ 
+ 
++def _short_env_value(value: str | None) -> str | None:
++    if value is None:
++        return None
++    if value.startswith("/"):
++        return f".../{Path(value).name}"
++    return value
++
++
++def _collect_process_memory() -> dict[str, Any]:
++    memory: dict[str, Any] = {"pid": os.getpid()}
++    try:
++        usage = resource.getrusage(resource.RUSAGE_SELF)
++        memory["ru_maxrss"] = usage.ru_maxrss
++    except Exception as exc:
++        memory["resource_error"] = repr(exc)
++
++    try:
++        ps_output = subprocess.check_output(
++            ["ps", "-o", "rss=,vsz=", "-p", str(os.getpid())],
++            text=True,
++            timeout=1,
++        ).strip()
++        if ps_output:
++            rss_kb, vsz_kb = ps_output.split()[:2]
++            memory["rss_kb"] = int(rss_kb)
++            memory["vsz_kb"] = int(vsz_kb)
++    except Exception as exc:
++        memory["ps_error"] = repr(exc)
++    return memory
++
++
++def _collect_mlx_memory() -> dict[str, Any]:
++    stats: dict[str, Any] = {}
++    for name in ("active", "cache", "peak"):
++        try:
++            stats[f"{name}_bytes"] = getattr(mx, f"get_{name}_memory")()
++        except Exception as exc:
++            stats[f"{name}_error"] = repr(exc)
++    return stats
++
++
++def collect_mlx_load_diagnostics(
++    *,
++    rank: int,
++    stage: str,
++    layer_loaded: int | None = None,
++    total_layers: int | None = None,
++) -> dict[str, Any]:
++    """Collect low-cardinality diagnostics for MLX/JACCL model-load failures."""
++    try:
++        mlx_device = dict(mx.device_info())
++    except Exception as exc:
++        mlx_device = {"error": repr(exc)}
++
++    memory = _collect_process_memory()
++    memory.update(
++        {
++            "resource_limit": mlx_device.get("resource_limit"),
++            "memory_size": mlx_device.get("memory_size"),
++            "max_recommended_working_set_size": mlx_device.get(
++                "max_recommended_working_set_size"
++            ),
++        }
++    )
++
++    diagnostics: dict[str, Any] = {
++        "rank": rank,
++        "stage": stage,
++        "env": {
++            "MLX_RANK": _short_env_value(os.environ.get("MLX_RANK")),
++            "MLX_JACCL_COORDINATOR": _short_env_value(
++                os.environ.get("MLX_JACCL_COORDINATOR")
++            ),
++            "MLX_IBV_DEVICES": _short_env_value(os.environ.get("MLX_IBV_DEVICES")),
++            "MLX_HOSTFILE": _short_env_value(os.environ.get("MLX_HOSTFILE")),
++        },
++        "memory": memory,
++        "mlx_memory": _collect_mlx_memory(),
++        "mlx_device": mlx_device,
++    }
++    if layer_loaded is not None:
++        diagnostics["layer_loaded"] = layer_loaded
++    if total_layers is not None:
++        diagnostics["total_layers"] = total_layers
++    return diagnostics
++
++
++def log_mlx_load_diagnostics(diagnostics: dict[str, Any]) -> None:
++    logger.info(f"MLX load diagnostics: {json.dumps(diagnostics, sort_keys=True)}")
++
++
++def make_diagnostic_layer_callback(
++    *,
++    rank: int,
++    on_layer_loaded: LayerLoadedCallback | None,
++    every_n_layers: int = 10,
++) -> Callable[[int, int], None]:
++    def callback(layer_loaded: int, total_layers: int) -> None:
++        if on_layer_loaded is not None:
++            on_layer_loaded(layer_loaded, total_layers)
++        if (
++            layer_loaded == 0
++            or layer_loaded % every_n_layers == 0
++            or layer_loaded >= total_layers - 1
++        ):
++            log_mlx_load_diagnostics(
++                collect_mlx_load_diagnostics(
++                    rank=rank,
++                    stage="layer-load",
++                    layer_loaded=layer_loaded,
++                    total_layers=total_layers,
++                )
++            )
++
++    return callback
++
++
+ class HostList(RootModel[list[str]]):
+     @classmethod
+     def from_hosts(cls, hosts: list[Host]) -> "HostList":
+@@ -146,9 +266,15 @@ def mlx_distributed_init(
+                 os.environ["MLX_IBV_DEVICES"] = coordination_file
+                 os.environ["MLX_RANK"] = str(rank)
+                 os.environ["MLX_JACCL_COORDINATOR"] = jaccl_coordinator
++                log_mlx_load_diagnostics(
++                    collect_mlx_load_diagnostics(rank=rank, stage="before-jaccl-init")
++                )
+                 group = mx.distributed.init(backend="jaccl", strict=True)
+ 
+         logger.info(f"Rank {rank} mlx distributed initialization complete")
++        log_mlx_load_diagnostics(
++            collect_mlx_load_diagnostics(rank=rank, stage="after-distributed-init")
++        )
+ 
+         return group
+ 
+@@ -172,6 +298,16 @@ def load_mlx_items(
+     on_timeout: TimeoutCallback | None,
+     on_layer_loaded: LayerLoadedCallback | None,
+ ) -> "tuple[Model, TokenizerWrapper, VisionProcessor | None]":
++    diagnostic_layer_callback = make_diagnostic_layer_callback(
++        rank=bound_instance.bound_shard.device_rank,
++        on_layer_loaded=on_layer_loaded,
++    )
++    log_mlx_load_diagnostics(
++        collect_mlx_load_diagnostics(
++            rank=bound_instance.bound_shard.device_rank,
++            stage="before-load-mlx-items",
++        )
++    )
+     if group is None:
+         logger.info(f"Single device used for {bound_instance.instance}")
+         model_path = build_model_path(bound_instance.bound_shard.model_card.model_id)
+@@ -184,8 +320,7 @@ def load_mlx_items(
+             total = len(layers)
+             for i, layer in enumerate(layers):
+                 mx.eval(layer)  # type: ignore
+-                if on_layer_loaded is not None:
+-                    on_layer_loaded(i, total)
++                diagnostic_layer_callback(i, total)
+         except ValueError as e:
+             logger.opt(exception=e).debug(
+                 "Model architecture doesn't support layer-by-layer progress tracking",
+@@ -202,7 +337,7 @@ def load_mlx_items(
+             bound_instance.bound_shard,
+             group=group,
+             on_timeout=on_timeout,
+-            on_layer_loaded=on_layer_loaded,
++            on_layer_loaded=diagnostic_layer_callback,
+         )
+         end_time = time.perf_counter()
+         logger.info(
+@@ -819,43 +954,35 @@ def _parse_kimi_tool_calls(text: str):
+         return [_parse_single_tool(text)]
+ 
+ 
+-def encode_task_id_bytes(task_id: TaskId) -> list[int]:
+-    return list(task_id.encode("utf-8"))
+-
+-
+-def decode_task_id_bytes(encoded_task_id: list[int]) -> TaskId:
+-    normalized_bytes = bytes((int(x) & 0xFF) for x in encoded_task_id)
+-    return TaskId(normalized_bytes.decode("utf-8"))
+-
+-
+ def mx_all_gather_tasks(
+     tasks: list[TextGeneration],
+     group: mx.distributed.Group | None,
+ ) -> tuple[list[TextGeneration], list[TextGeneration]]:
+-    if group is None:
+-        return tasks, []
++    def encode_task_id(task_id: TaskId) -> list[int]:
++        utf8_task_id = task_id.encode()
++        return [
++            int.from_bytes(utf8_task_id[i : i + 1]) for i in range(len(utf8_task_id))
++        ]
++
++    def decode_task_id(encoded_task_id: list[int]) -> TaskId:
++        return TaskId(
++            bytes.decode(b"".join((x).to_bytes(length=1) for x in encoded_task_id))
++        )
+ 
+     uuid_byte_length = 36
+ 
+     n_tasks = len(tasks)
+-    has_any_tasks = mx.distributed.all_sum(
+-        mx.array([1 if n_tasks > 0 else 0], dtype=mx.int32),
+-        group=group,
+-    )
+-    if int(has_any_tasks.item()) == 0:
+-        return [], []
+-
+     all_counts = cast(
+         list[int],
+         mx.distributed.all_gather(mx.array([n_tasks]), group=group).tolist(),
+     )
+     max_tasks = max(all_counts)
+-    world_size = group.size()
++    world_size: int = 1 if group is None else group.size()
+ 
+     if max_tasks == 0:
+         return [], []
+ 
+-    padded = [encode_task_id_bytes(task.task_id) for task in tasks] + [
++    padded = [encode_task_id(task.task_id) for task in tasks] + [
+         [0] * uuid_byte_length
+     ] * (max_tasks - n_tasks)
+ 
+@@ -863,15 +990,12 @@ def mx_all_gather_tasks(
+ 
+     gathered = cast(
+         list[list[list[int]]],
+-        mx.distributed.all_gather(mx.array(padded, dtype=mx.uint8), group=group)
++        mx.distributed.all_gather(mx.array(padded), group=group)
+         .reshape(world_size, max_tasks, -1)
+         .tolist(),
+     )
+     all_task_ids: list[list[TaskId]] = [
+-        [
+-            decode_task_id_bytes(encoded_task_id)
+-            for encoded_task_id in rank_tasks[:count]
+-        ]
++        [decode_task_id(encoded_task_id) for encoded_task_id in rank_tasks[:count]]
+         for rank_tasks, count in zip(gathered, all_counts, strict=True)
+     ]
+ 
+diff --git a/src/exo/worker/engines/mlx/vision.py b/src/exo/worker/engines/mlx/vision.py
+index 152205b9..f8162025 100644
+--- a/src/exo/worker/engines/mlx/vision.py
++++ b/src/exo/worker/engines/mlx/vision.py
+@@ -1,3 +1,4 @@
++# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportUnnecessaryTypeIgnoreComment=false
+ import base64
+ import contextlib
+ import hashlib
+@@ -5,17 +6,22 @@ import importlib
+ import inspect
+ import io
+ import json
++import os
+ import re
++import time
+ from dataclasses import dataclass
+-from typing import TYPE_CHECKING, Any
++from typing import TYPE_CHECKING, Any, cast
++from urllib.parse import urlsplit
++
++import httpx
+ 
+ if TYPE_CHECKING:
+     from mlx_vlm.utils import ImageProcessor
+ import mlx.core as mx
+ import mlx.nn as nn
+ import numpy as np
+-from mlx_lm.tokenizer_utils import TokenizerWrapper
+ from mlx.utils import tree_flatten
++from mlx_lm.tokenizer_utils import TokenizerWrapper
+ from mlx_vlm.prompt_utils import get_message_json
+ from mlx_vlm.utils import load_image_processor
+ from PIL import Image
+@@ -26,7 +32,16 @@ from exo.download.download_utils import build_model_path
+ from exo.shared.models.model_cards import VisionCardConfig
+ from exo.shared.types.common import ModelId
+ from exo.shared.types.mlx import Model
+-from exo.shared.types.text_generation import TextGenerationTaskParams
++from exo.shared.types.text_generation import TextGenerationTaskParams, VideoSource
++from exo.shared.types.video_errors import (
++    VIDEO_ERROR_CODE_DECODE_FAILED,
++    VIDEO_ERROR_CODE_DURATION_UNSUPPORTED,
++    VIDEO_ERROR_CODE_FETCH_FAILED,
++    VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++    VIDEO_ERROR_CODE_TOO_LARGE,
++    VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
++    VisionPreprocessingError,
++)
+ from exo.worker.engines.mlx.cache import encode_prompt
+ from exo.worker.engines.mlx.utils_mlx import (
+     fix_unmatched_think_end_tokens,
+@@ -40,6 +55,249 @@ def _filter_config(cls: type, d: dict[str, Any]) -> dict[str, Any]:
+     return {k: v for k, v in d.items() if k in valid}  # type: ignore
+ 
+ 
++DEFAULT_MAX_VIDEO_PAYLOAD_BYTES = 4 * 1024 * 1024
++DEFAULT_MAX_VIDEO_DURATION_SECONDS = 10.0
++DEFAULT_KIMI_VIDEO_FETCH_CONNECT_TIMEOUT_SECONDS = 5.0
++DEFAULT_KIMI_VIDEO_FETCH_READ_TIMEOUT_SECONDS = 15.0
++DEFAULT_KIMI_VIDEO_FETCH_TOTAL_TIMEOUT_SECONDS = 30.0
++KIMI_VIDEO_FETCH_CHUNK_BYTES = 64 * 1024
++DEFAULT_KIMI_VIDEO_ALLOWED_CODECS = ("h264",)
++# PyAV/ffprobe report ISO BMFF MP4 as this comma-separated format family.
++DEFAULT_KIMI_VIDEO_ALLOWED_CONTAINERS = ("mov", "mp4", "m4a", "3gp", "3g2", "mj2")
++
++
++def _get_float_env(name: str, default: float) -> float:
++    raw = os.getenv(name)
++    if raw is None or raw == "":
++        return default
++    return float(raw)
++
++
++def _get_max_video_payload_bytes() -> int:
++    raw = os.getenv("EXO_KIMI_VIDEO_MAX_BYTES")
++    if raw is None or raw == "":
++        raw = os.getenv("EXO_MAX_VIDEO_PAYLOAD_BYTES")
++    if raw is None or raw == "":
++        return DEFAULT_MAX_VIDEO_PAYLOAD_BYTES
++    return int(raw)
++
++
++def _get_max_video_duration_seconds() -> float:
++    raw = os.getenv("EXO_KIMI_VIDEO_MAX_DURATION_SECONDS")
++    if raw is None or raw == "":
++        return DEFAULT_MAX_VIDEO_DURATION_SECONDS
++    return float(raw)
++
++
++def _get_csv_env_values(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
++    raw = os.getenv(name)
++    if raw is None or raw == "":
++        return default
++    values = tuple(value.strip().lower() for value in raw.split(",") if value.strip())
++    return values or default
++
++
++def _split_container_names(format_name: str) -> tuple[str, ...]:
++    return tuple(
++        part.strip().lower() for part in format_name.split(",") if part.strip()
++    )
++
++
++def _probe_stream_codec_name(stream: object) -> str | None:
++    codec_context = getattr(stream, "codec_context", None)
++    codec_context_name = getattr(codec_context, "name", None)
++    if isinstance(codec_context_name, str) and codec_context_name.strip():
++        return codec_context_name.strip().lower()
++
++    codec = getattr(stream, "codec", None)
++    codec_name = getattr(codec, "name", None)
++    if isinstance(codec_name, str) and codec_name.strip():
++        return codec_name.strip().lower()
++
++    direct_codec_name = getattr(stream, "codec_name", None)
++    if isinstance(direct_codec_name, str) and direct_codec_name.strip():
++        return direct_codec_name.strip().lower()
++
++    return None
++
++
++def _probe_container_names(container: object) -> tuple[str, ...]:
++    container_format = getattr(container, "format", None)
++    format_name = getattr(container_format, "name", None)
++    if not isinstance(format_name, str):
++        return ()
++    return _split_container_names(format_name)
++
++
++def _validate_video_metadata_before_decode(container: object, stream: object) -> None:
++    """Fail closed on unsupported/unprobeable metadata before frame decode.
++
++    V1 intentionally keeps support narrow to MP4/H.264 because broad codec and
++    container coverage is out of scope and risky for the live MLX cluster. This
++    inspection uses only demuxer metadata already available after `av.open()`;
++    it does not decode frames or place large frame tensors into process state.
++    """
++
++    codec_name = _probe_stream_codec_name(stream)
++    if codec_name is None:
++        raise VisionPreprocessingError(
++            "unprobeable video codec: the selected runner could not safely "
++            "identify the video stream codec before decode. Kimi video_url v1 "
++            "supports only bounded MP4/H.264 inputs.",
++            code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
++        )
++
++    allowed_codecs = _get_csv_env_values(
++        "EXO_KIMI_VIDEO_ALLOWED_CODECS", DEFAULT_KIMI_VIDEO_ALLOWED_CODECS
++    )
++    if codec_name not in allowed_codecs:
++        raise VisionPreprocessingError(
++            f"unsupported video codec '{codec_name}' for Kimi video_url v1. "
++            f"Supported codecs: {sorted(allowed_codecs)}.",
++            code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
++        )
++
++    container_names = _probe_container_names(container)
++    if not container_names:
++        raise VisionPreprocessingError(
++            "unprobeable video container: the selected runner could not safely "
++            "identify the video container before decode. Kimi video_url v1 "
++            "supports only bounded MP4/H.264 inputs.",
++            code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
++        )
++
++    allowed_containers = _get_csv_env_values(
++        "EXO_KIMI_VIDEO_ALLOWED_CONTAINERS", DEFAULT_KIMI_VIDEO_ALLOWED_CONTAINERS
++    )
++    if not any(container_name in allowed_containers for container_name in container_names):
++        raise VisionPreprocessingError(
++            f"unsupported video container '{','.join(container_names)}' for Kimi "
++            f"video_url v1. Supported containers: {sorted(allowed_containers)}.",
++            code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
++        )
++
++
++def _validate_video_duration_seconds(
++    duration_seconds: float, max_seconds: float | None = None
++) -> None:
++    resolved_max_seconds = (
++        _get_max_video_duration_seconds() if max_seconds is None else max_seconds
++    )
++    if duration_seconds <= resolved_max_seconds:
++        return
++    raise VisionPreprocessingError(
++        "Long videos are out of scope for v1: "
++        f"{duration_seconds:.2f}s exceeds the configured limit of "
++        f"{resolved_max_seconds:.2f}s. Use a short video fixture or raise "
++        "EXO_KIMI_VIDEO_MAX_DURATION_SECONDS after throughput smokes pass.",
++        code=VIDEO_ERROR_CODE_DURATION_UNSUPPORTED,
++    )
++
++
++def _validate_video_payload_size(byte_count: int, max_bytes: int | None = None) -> None:
++    resolved_max_bytes = _get_max_video_payload_bytes() if max_bytes is None else max_bytes
++    if byte_count <= resolved_max_bytes:
++        return
++    actual_mib = byte_count / 1024 / 1024
++    max_mib = resolved_max_bytes / 1024 / 1024
++    # Kept as ValueError for backward-compat with existing tests; callers
++    # that need a structured code wrap this in VisionPreprocessingError.
++    raise ValueError(
++        f"video payload is too large: {actual_mib:.2f} MiB exceeds "
++        f"the configured limit of {max_mib:.2f} MiB"
++    )
++
++
++def _fetch_video_url_as_base64(url: str, max_bytes: int | None = None) -> str:
++    resolved_max_bytes = _get_max_video_payload_bytes() if max_bytes is None else max_bytes
++    parsed_url = urlsplit(url)
++    if parsed_url.scheme not in {"http", "https"}:
++        raise VisionPreprocessingError(
++            "unsupported video URL scheme: only http and https video URLs "
++            f"can be fetched by the worker, got {parsed_url.scheme!r}",
++            code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++        )
++    if parsed_url.netloc == "":
++        raise VisionPreprocessingError(
++            f"invalid video URL {url!r}: missing network location",
++            code=VIDEO_ERROR_CODE_INVALID_VIDEO_URL,
++        )
++
++    connect_timeout_seconds = _get_float_env(
++        "EXO_KIMI_VIDEO_FETCH_CONNECT_TIMEOUT_SECONDS",
++        DEFAULT_KIMI_VIDEO_FETCH_CONNECT_TIMEOUT_SECONDS,
++    )
++    read_timeout_seconds = _get_float_env(
++        "EXO_KIMI_VIDEO_FETCH_READ_TIMEOUT_SECONDS",
++        DEFAULT_KIMI_VIDEO_FETCH_READ_TIMEOUT_SECONDS,
++    )
++    total_timeout_seconds = _get_float_env(
++        "EXO_KIMI_VIDEO_FETCH_TIMEOUT_SECONDS",
++        DEFAULT_KIMI_VIDEO_FETCH_TOTAL_TIMEOUT_SECONDS,
++    )
++    http_timeout = httpx.Timeout(
++        timeout=total_timeout_seconds,
++        connect=connect_timeout_seconds,
++        read=read_timeout_seconds,
++        write=connect_timeout_seconds,
++        pool=connect_timeout_seconds,
++    )
++    started_at = time.monotonic()
++    data = bytearray()
++
++    try:
++        with (
++            httpx.Client(timeout=http_timeout, follow_redirects=False) as client,
++            client.stream("GET", url, headers={"User-Agent": "exo/1.0"}) as response,
++        ):
++            response.raise_for_status()
++            content_length = cast(str | None, response.headers.get("Content-Length"))
++            if content_length is not None:
++                _validate_video_payload_size(
++                    int(content_length), max_bytes=resolved_max_bytes
++                )
++            for chunk in response.iter_bytes(chunk_size=KIMI_VIDEO_FETCH_CHUNK_BYTES):
++                if time.monotonic() - started_at > total_timeout_seconds:
++                    raise VisionPreprocessingError(
++                        f"timed out while fetching video URL {url!r} after "
++                        f"{total_timeout_seconds:.2f}s",
++                        code=VIDEO_ERROR_CODE_FETCH_FAILED,
++                    )
++                data.extend(chunk)
++                _validate_video_payload_size(len(data), max_bytes=resolved_max_bytes)
++    except VisionPreprocessingError:
++        raise
++    except httpx.HTTPError as exc:
++        raise VisionPreprocessingError(
++            f"failed to fetch video URL {url!r}: {exc}",
++            code=VIDEO_ERROR_CODE_FETCH_FAILED,
++        ) from exc
++
++    return base64.b64encode(bytes(data)).decode("ascii")
++
++
++def _wrap_fetch_video_url_for_structured_errors(url: str) -> str:
++    """Call _fetch_video_url_as_base64 but translate raw exceptions into
++    VisionPreprocessingError with stable codes. Network/IO failures map to
++    video_fetch_failed; size-limit ValueErrors map to video_too_large.
++    Anything else maps to video_fetch_failed as a safe default.
++    """
++    try:
++        return _fetch_video_url_as_base64(url)
++    except ValueError as exc:
++        # _validate_video_payload_size raises ValueError when the response
++        # exceeds the configured size limit.
++        raise VisionPreprocessingError(
++            f"video at {url} exceeds the configured size limit: {exc}",
++            code=VIDEO_ERROR_CODE_TOO_LARGE,
++        ) from exc
++    except (httpx.HTTPError, OSError) as exc:
++        raise VisionPreprocessingError(
++            f"failed to fetch video URL {url!r}: {exc}",
++            code=VIDEO_ERROR_CODE_FETCH_FAILED,
++        ) from exc
++
++
+ _video_processor_patched = False
+ 
+ 
+@@ -73,25 +331,52 @@ def extract_video_frames(
+     import av
+ 
+     raw = base64.b64decode(video_data)
+-    container = av.open(io.BytesIO(raw))
+-    stream = container.streams.video[0]
+-    total_frames = stream.frames or 0
+-    video_fps = float(stream.average_rate or 30)
+-
+-    effective_fps = min(sample_fps, video_fps)
+-    sampled_count = max(round(total_frames * effective_fps / video_fps), 1)
+-    indices = (
+-        np.linspace(0, total_frames - 1, sampled_count).round().astype(int).tolist()
+-    )
+-    index_set = set(indices)
+-
+-    all_frames: list[Image.Image] = []
+-    for i, frame in enumerate(container.decode(video=0)):
+-        if i in index_set:
+-            all_frames.append(frame.to_image().convert("RGB"))
+-        if len(all_frames) >= len(indices):
+-            break
+-    container.close()
++    try:
++        container = av.open(io.BytesIO(raw))
++    except Exception as exc:
++        raise VisionPreprocessingError(
++            "unprobeable video container: the selected runner could not safely "
++            "inspect video metadata before decode. Kimi video_url v1 supports "
++            "only bounded MP4/H.264 inputs.",
++            code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
++        ) from exc
++    try:
++        video_streams = list(getattr(container.streams, "video", []))
++        if not video_streams:
++            raise VisionPreprocessingError(
++                "unprobeable video stream: no video stream was found during "
++                "safe metadata inspection before decode. Kimi video_url v1 "
++                "supports only bounded MP4/H.264 inputs.",
++                code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
++            )
++        stream = video_streams[0]
++        _validate_video_metadata_before_decode(container, stream)
++        duration_seconds: float | None = None
++        if stream.duration is not None and stream.time_base is not None:
++            duration_seconds = float(stream.duration * stream.time_base)
++        elif container.duration is not None:
++            duration_seconds = float(container.duration) / 1_000_000.0
++        if duration_seconds is not None:
++            _validate_video_duration_seconds(duration_seconds)
++        total_frames = stream.frames or 0
++        video_fps = float(stream.average_rate or 30)
++
++        effective_fps = min(sample_fps, video_fps)
++        sampled_count = max(round(total_frames * effective_fps / video_fps), 1)
++        indices = (
++            np.linspace(0, total_frames - 1, sampled_count).round().astype(int).tolist()
++        )
++        index_set = set(indices)
++
++        all_frames: list[Image.Image] = []
++        for i, frame in enumerate(container.decode(video=0)):
++            if i in index_set:
++                all_frames.append(frame.to_image().convert("RGB"))
++            if len(all_frames) >= len(indices):
++                break
++    finally:
++        with contextlib.suppress(Exception):
++            container.close()
+ 
+     chunks: list[list[Image.Image]] = []
+     for start in range(0, len(all_frames), temporal_chunk_size):
+@@ -111,7 +396,7 @@ def preprocess_video_chunk(
+ ) -> dict[str, np.ndarray]:
+     import math
+ 
+-    T = len(frames)
++    frame_count = len(frames)
+     w, h = frames[0].size
+ 
+     factor = merge_kernel_size * patch_size
+@@ -142,13 +427,18 @@ def preprocess_video_chunk(
+ 
+     pixel_values = np.stack(pixel_arrays, axis=0)
+ 
+-    _, H, W, C = pixel_values.shape
++    _, height, width, channels = pixel_values.shape
+     patches = pixel_values.reshape(
+-        T, H // patch_size, patch_size, W // patch_size, patch_size, C
++        frame_count,
++        height // patch_size,
++        patch_size,
++        width // patch_size,
++        patch_size,
++        channels,
+     )
+     patches = patches.transpose(0, 1, 3, 5, 2, 4)
+-    patches = patches.reshape(-1, C, patch_size, patch_size)
+-    grid_thw = np.array([T, H // patch_size, W // patch_size])
++    patches = patches.reshape(-1, channels, patch_size, patch_size)
++    grid_thw = np.array([frame_count, height // patch_size, width // patch_size])
+ 
+     return {"pixel_values": patches, "grid_thw": grid_thw}
+ 
+@@ -197,11 +487,28 @@ def make_video_chunk_prompts(
+     return prompts
+ 
+ 
+-def expand_video_placeholder(text: str, chunk_prompts: list[str]) -> str:
++def expand_video_placeholder(
++    text: str,
++    chunk_prompts: list[str],
++    image_token: str | None = None,
++    n_tokens_per_chunk: list[int] | None = None,
++) -> str:
+     placeholder = "<|kimi_k25_video_placeholder|>"
+     if placeholder not in text:
+         return text
+-    replacement = "".join(chunk_prompts)
++
++    expanded_chunks: list[str] = []
++    for i, chunk_prompt in enumerate(chunk_prompts):
++        n_tokens = (
++            n_tokens_per_chunk[i]
++            if n_tokens_per_chunk is not None and i < len(n_tokens_per_chunk)
++            else 1
++        )
++        if image_token is not None and n_tokens > 1:
++            chunk_prompt = chunk_prompt.replace(image_token, image_token * n_tokens, 1)
++        expanded_chunks.append(chunk_prompt)
++
++    replacement = "".join(expanded_chunks)
+     return text.replace(placeholder, replacement, 1)
+ 
+ 
+@@ -603,10 +910,7 @@ class VisionEncoder:
+                 grid_thw=grid_hw,
+             )
+             logger.info("encode_images: vision tower forward done")
+-            if isinstance(result, tuple):
+-                hidden_states = result[0]
+-            else:
+-                hidden_states = result
++            hidden_states = result[0] if isinstance(result, tuple) else result
+         else:
+             logger.info(
+                 "encode_images: vision tower forward start needs_nhwc=False pixel_values_shape={} grid_thw_shape={}",
+@@ -725,6 +1029,25 @@ def create_vision_embeddings(
+     return input_embeddings
+ 
+ 
++def _build_media_region_payloads(
++    images: list[str],
++    videos: list[str],
++    video_chunk_counts: list[int],
++) -> list[str]:
++    """Return payloads aligned to contiguous image-token regions in the prompt.
++
++    Image inputs produce one media-token region each. Kimi video inputs expand one
++    logical video placeholder into one timestamped media-token region per
++    extracted chunk, so the same video payload must be repeated once per chunk
++    for prefix-cache content hashing.
++    """
++    payloads = list(images)
++    for index, video_payload in enumerate(videos):
++        chunk_count = video_chunk_counts[index] if index < len(video_chunk_counts) else 1
++        payloads.extend([video_payload] * chunk_count)
++    return payloads
++
++
+ def _find_media_regions(
+     prompt_tokens: mx.array,
+     images: list[str],
+@@ -764,6 +1087,28 @@ def _find_media_regions(
+     return regions
+ 
+ 
++def _resolve_video_payloads_for_preprocessing(
++    videos: list[str],
++    video_sources: list[VideoSource],
++    video_urls: list[str],
++) -> list[str]:
++    """Resolve local base64 sources and remote URLs into Kimi video payloads.
++
++    Normalized base64 VideoSource payloads are already validated by the API
++    adapter and should flow directly into local Kimi frame extraction. HTTP(S)
++    video_url values intentionally keep the existing worker-side fetch wrapper
++    so the remote URL path remains unchanged.
++    """
++    resolved_videos = [source.as_pipeline_payload() for source in video_sources]
++    resolved_videos.extend(videos)
++    for video_url in video_urls:
++        logger.debug("Fetching Kimi video URL on worker")
++        resolved_videos.append(
++            _wrap_fetch_video_url_for_structured_errors(video_url)
++        )
++    return resolved_videos
++
++
+ class VisionProcessor:
+     """
+     Pipeline for vision models:
+@@ -796,9 +1141,17 @@ class VisionProcessor:
+         model: Model,
+         task_params: TextGenerationTaskParams,
+         videos: list[str] | None = None,
++        video_sources: list[VideoSource] | None = None,
++        video_urls: list[str] | None = None,
+     ) -> VisionResult:
+         videos = videos or []
+-        logger.info(f"Vision pipeline: {len(images)} image(s), {len(videos)} video(s)")
++        video_sources = video_sources or []
++        video_urls = video_urls or []
++        logger.info(
++            f"Vision pipeline: {len(images)} image(s), "
++            f"{len(videos)} inline video(s), {len(video_sources)} normalized video source(s), "
++            f"{len(video_urls)} video URL(s)"
++        )
+ 
+         all_features_parts: list[mx.array] = []
+         all_n_tokens: list[int] = []
+@@ -822,13 +1175,31 @@ class VisionProcessor:
+             )
+ 
+         video_chunk_prompts: list[str] = []
+-        if videos:
++        video_chunk_token_counts: list[int] = []
++        video_chunk_counts: list[int] = []
++        resolved_videos = _resolve_video_payloads_for_preprocessing(
++            videos=videos,
++            video_sources=video_sources,
++            video_urls=video_urls,
++        )
++        if resolved_videos:
+             sample_fps = self.vision_config.sample_fps
+             chunk_size = self.vision_config.temporal_merge_kernel_size
+-            for video_b64 in videos:
+-                chunks = extract_video_frames(
+-                    video_b64, sample_fps=sample_fps, temporal_chunk_size=chunk_size
+-                )
++            for video_b64 in resolved_videos:
++                try:
++                    chunks = extract_video_frames(
++                        video_b64,
++                        sample_fps=sample_fps,
++                        temporal_chunk_size=chunk_size,
++                    )
++                except VisionPreprocessingError:
++                    raise
++                except Exception as exc:
++                    raise VisionPreprocessingError(
++                        f"failed to decode video: {exc}",
++                        code=VIDEO_ERROR_CODE_DECODE_FAILED,
++                    ) from exc
++                video_chunk_counts.append(len(chunks))
+                 logger.info(
+                     f"Video extracted: {len(chunks)} chunks of {chunk_size} frames"
+                 )
+@@ -846,6 +1217,7 @@ class VisionProcessor:
+                     )
+                     all_features_parts.append(chunk_features)
+                     all_n_tokens.extend(chunk_n_tokens)
++                    video_chunk_token_counts.extend(chunk_n_tokens)
+ 
+         if all_features_parts:
+             combined_features = mx.concatenate(all_features_parts, axis=0)
+@@ -869,7 +1241,12 @@ class VisionProcessor:
+         )
+ 
+         if video_chunk_prompts:
+-            prompt = expand_video_placeholder(prompt, video_chunk_prompts)
++            prompt = expand_video_placeholder(
++                prompt,
++                video_chunk_prompts,
++                image_token=image_token,
++                n_tokens_per_chunk=video_chunk_token_counts,
++            )
+ 
+         logger.info(
+             f"Expanded prompt has {prompt.count(image_token)} media_token occurrences, total len={len(prompt)}"
+@@ -892,10 +1269,14 @@ class VisionProcessor:
+         )
+         mx.eval(embeddings)
+ 
+-        all_media = images + videos
++        media_payloads = _build_media_region_payloads(
++            images,
++            resolved_videos,
++            video_chunk_counts,
++        )
+         media_regions = _find_media_regions(
+             prompt_tokens,
+-            all_media,
++            media_payloads,
+             self.vision_config.image_token_id,
+         )
+ 
+@@ -916,8 +1297,10 @@ def prepare_vision(
+     model_id: ModelId,
+     task_params: TextGenerationTaskParams,
+     videos: list[str] | None = None,
++    video_sources: list[VideoSource] | None = None,
++    video_urls: list[str] | None = None,
+ ) -> VisionResult | None:
+-    if not images and not videos:
++    if not images and not videos and not video_sources and not video_urls:
+         return None
+     if chat_template_messages is None:
+         logger.warning("Vision request missing chat_template_messages — ignoring media")
+@@ -930,4 +1313,6 @@ def prepare_vision(
+         model=model,
+         task_params=task_params,
+         videos=videos or [],
++        video_sources=video_sources or [],
++        video_urls=video_urls or [],
+     )
+diff --git a/src/exo/worker/runner/llm_inference/batch_generator.py b/src/exo/worker/runner/llm_inference/batch_generator.py
+index fc5c821f..5df31284 100644
+--- a/src/exo/worker/runner/llm_inference/batch_generator.py
++++ b/src/exo/worker/runner/llm_inference/batch_generator.py
+@@ -1,5 +1,4 @@
+ import itertools
+-import os
+ import time
+ from abc import ABC, abstractmethod
+ from collections import deque
+@@ -16,6 +15,7 @@ from exo.shared.types.events import ChunkGenerated, Event
+ from exo.shared.types.mlx import Model
+ from exo.shared.types.tasks import CANCEL_ALL_TASKS, TaskId, TextGeneration
+ from exo.shared.types.text_generation import TextGenerationTaskParams
++from exo.shared.types.video_errors import VisionPreprocessingError
+ from exo.shared.types.worker.runner_response import GenerationResponse, ToolCallResponse
+ from exo.utils.channels import MpReceiver, MpSender
+ from exo.worker.engines.mlx.cache import KVPrefixCache
+@@ -89,16 +89,6 @@ class InferenceGenerator(ABC):
+     def close(self) -> None: ...
+ 
+ 
+-def advance_coordination_counter(
+-    tokens_since_last_check: int, check_for_cancel_every: int
+-) -> tuple[int, bool]:
+-    threshold = max(check_for_cancel_every, 1)
+-    updated_tokens = tokens_since_last_check + 1
+-    if updated_tokens >= threshold:
+-        return 0, True
+-    return updated_tokens, False
+-
+-
+ EXO_RUNNER_MUST_FAIL = "EXO RUNNER MUST FAIL"
+ EXO_RUNNER_MUST_OOM = "EXO RUNNER MUST OOM"
+ EXO_RUNNER_MUST_TIMEOUT = "EXO RUNNER MUST TIMEOUT"
+@@ -205,6 +195,9 @@ class SequentialGenerator(InferenceGenerator):
+             else:
+                 return map(lambda task: (task, Cancelled()), self._cancelled_tasks)
+ 
++            if self._active is None:
++                return map(lambda task: (task, Cancelled()), self._cancelled_tasks)
++
+         assert self._active is not None
+ 
+         task, mlx_gen, queue, output_generator = self._active
+@@ -224,6 +217,9 @@ class SequentialGenerator(InferenceGenerator):
+             if self._queue:
+                 self._start_next()
+ 
++        except VisionPreprocessingError as e:
++            self._send_error(task, e)
++            self._active = None
+         except Exception as e:
+             self._send_error(task, e)
+             self._active = None
+@@ -238,6 +234,10 @@ class SequentialGenerator(InferenceGenerator):
+         task = self._queue.popleft()
+         try:
+             mlx_gen = self._build_generator(task)
++        except VisionPreprocessingError as e:
++            self._send_error(task, e)
++            self._active = None
++            return
+         except Exception as e:
+             self._send_error(task, e)
+             raise
+@@ -259,6 +259,7 @@ class SequentialGenerator(InferenceGenerator):
+ 
+     def _send_error(self, task: TextGeneration, e: Exception) -> None:
+         if self.device_rank == 0:
++            error_code = e.code if isinstance(e, VisionPreprocessingError) else None
+             self.event_sender.send(
+                 ChunkGenerated(
+                     command_id=task.command_id,
+@@ -266,6 +267,7 @@ class SequentialGenerator(InferenceGenerator):
+                         model=self.model_id,
+                         finish_reason="error",
+                         error_message=str(e),
++                        error_code=error_code,
+                     ),
+                 )
+             )
+@@ -287,15 +289,20 @@ class SequentialGenerator(InferenceGenerator):
+                     )
+                 )
+ 
+-        tokens_since_cancel_check = 0
++        def distributed_prompt_progress_callback() -> None:
++            self.agree_on_cancellations()
++            if self.should_cancel(task.task_id):
++                raise PrefillCancelled()
++
++            self.agree_on_tasks()
++
++        tokens_since_cancel_check = self.check_for_cancel_every
+ 
+         def on_generation_token() -> None:
+             nonlocal tokens_since_cancel_check
+-            tokens_since_cancel_check, should_check = advance_coordination_counter(
+-                tokens_since_cancel_check,
+-                self.check_for_cancel_every,
+-            )
+-            if should_check:
++            tokens_since_cancel_check += 1
++            if tokens_since_cancel_check >= self.check_for_cancel_every:
++                tokens_since_cancel_check = 0
+                 self.agree_on_cancellations()
+                 if self.should_cancel(task.task_id):
+                     raise PrefillCancelled()
+@@ -309,7 +316,7 @@ class SequentialGenerator(InferenceGenerator):
+             prompt=prompt,
+             kv_prefix_cache=self.kv_prefix_cache,
+             on_prefill_progress=on_prefill_progress,
+-            distributed_prompt_progress_callback=None,
++            distributed_prompt_progress_callback=distributed_prompt_progress_callback,
+             on_generation_token=on_generation_token,
+             group=self.group,
+             vision_processor=self.vision_processor,
+@@ -411,6 +418,9 @@ class BatchGenerator(InferenceGenerator):
+                 uid = self._start_task(task)
+             except PrefillCancelled:
+                 continue
++            except VisionPreprocessingError as e:
++                self._send_error(task, e)
++                continue
+             except Exception as e:
+                 self._send_error(task, e)
+                 raise
+@@ -435,9 +445,6 @@ class BatchGenerator(InferenceGenerator):
+ 
+         results = self._mlx_gen.step()
+ 
+-        if self.device_rank == 0 and os.environ.get("EXO_TURBOQUANT_TRACE", "0") == "1":
+-            logger.info("rank0 batch step returned {} raw responses", len(results))
+-
+         output: list[
+             tuple[TaskId, GenerationResponse | ToolCallResponse | Cancelled | Finished]
+         ] = []
+@@ -451,17 +458,6 @@ class BatchGenerator(InferenceGenerator):
+             queue.push(response)
+             # If a generator fails to parse for some reason and returns early, we should not crash
+             while (parsed := next(output_generator, None)) is not None:
+-                if (
+-                    self.device_rank == 0
+-                    and os.environ.get("EXO_TURBOQUANT_TRACE", "0") == "1"
+-                ):
+-                    logger.info(
+-                        "rank0 parsed response: uid={} task_id={} parsed_type={} finish_reason={}",
+-                        uid,
+-                        task.task_id,
+-                        type(parsed).__name__,
+-                        getattr(parsed, "finish_reason", None),
+-                    )
+                 output.append((task.task_id, parsed))
+ 
+             # check if original response was terminal and append a Finished()
+@@ -501,6 +497,7 @@ class BatchGenerator(InferenceGenerator):
+ 
+     def _send_error(self, task: TextGeneration, e: Exception) -> None:
+         if self.device_rank == 0:
++            error_code = e.code if isinstance(e, VisionPreprocessingError) else None
+             self.event_sender.send(
+                 ChunkGenerated(
+                     command_id=task.command_id,
+@@ -508,6 +505,7 @@ class BatchGenerator(InferenceGenerator):
+                         model=self.model_id,
+                         finish_reason="error",
+                         error_message=str(e),
++                        error_code=error_code,
+                     ),
+                 )
+             )
+@@ -540,15 +538,20 @@ class BatchGenerator(InferenceGenerator):
+                     )
+                 )
+ 
+-        tokens_since_cancel_check = 0
++        def distributed_prompt_progress_callback() -> None:
++            self.agree_on_cancellations()
++            if self.should_cancel(task.task_id):
++                raise PrefillCancelled()
++
++            self.agree_on_tasks()
++
++        tokens_since_cancel_check = self.check_for_cancel_every
+ 
+         def on_generation_token() -> None:
+             nonlocal tokens_since_cancel_check
+-            tokens_since_cancel_check, should_check = advance_coordination_counter(
+-                tokens_since_cancel_check,
+-                self.check_for_cancel_every,
+-            )
+-            if should_check:
++            tokens_since_cancel_check += 1
++            if tokens_since_cancel_check >= self.check_for_cancel_every:
++                tokens_since_cancel_check = 0
+                 self.agree_on_cancellations()
+                 if self.should_cancel(task.task_id):
+                     self._cancelled_tasks.add(task.task_id)
+@@ -562,7 +565,7 @@ class BatchGenerator(InferenceGenerator):
+             task_params=task.task_params,
+             prompt=prompt,
+             on_prefill_progress=on_prefill_progress,
+-            distributed_prompt_progress_callback=None,
++            distributed_prompt_progress_callback=distributed_prompt_progress_callback,
+             on_generation_token=on_generation_token,
+         )
+         logger.info(

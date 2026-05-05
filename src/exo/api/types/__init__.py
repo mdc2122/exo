@@ -57,4 +57,7 @@ from .api import TraceRankStats as TraceRankStats
 from .api import TraceResponse as TraceResponse
 from .api import TraceStatsResponse as TraceStatsResponse
 from .api import Usage as Usage
+from .api import VideoErrorInfo as VideoErrorInfo
+from .api import VideoErrorResponse as VideoErrorResponse
+from .api import VideoUploadResponse as VideoUploadResponse
 from .api import normalize_image_size as normalize_image_size

@@ -1,9 +1,12 @@
 import json
 import os
 import re
+import resource
+import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -88,6 +91,123 @@ class ModelLoadingTimeoutError(Exception):
     pass
 
 
+def _short_env_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if value.startswith("/"):
+        return f".../{Path(value).name}"
+    return value
+
+
+def _collect_process_memory() -> dict[str, Any]:
+    memory: dict[str, Any] = {"pid": os.getpid()}
+    try:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        memory["ru_maxrss"] = usage.ru_maxrss
+    except Exception as exc:
+        memory["resource_error"] = repr(exc)
+
+    try:
+        ps_output = subprocess.check_output(
+            ["ps", "-o", "rss=,vsz=", "-p", str(os.getpid())],
+            text=True,
+            timeout=1,
+        ).strip()
+        if ps_output:
+            rss_kb, vsz_kb = ps_output.split()[:2]
+            memory["rss_kb"] = int(rss_kb)
+            memory["vsz_kb"] = int(vsz_kb)
+    except Exception as exc:
+        memory["ps_error"] = repr(exc)
+    return memory
+
+
+def _collect_mlx_memory() -> dict[str, Any]:
+    stats: dict[str, Any] = {}
+    for name in ("active", "cache", "peak"):
+        try:
+            stats[f"{name}_bytes"] = getattr(mx, f"get_{name}_memory")()
+        except Exception as exc:
+            stats[f"{name}_error"] = repr(exc)
+    return stats
+
+
+def collect_mlx_load_diagnostics(
+    *,
+    rank: int,
+    stage: str,
+    layer_loaded: int | None = None,
+    total_layers: int | None = None,
+) -> dict[str, Any]:
+    """Collect low-cardinality diagnostics for MLX/JACCL model-load failures."""
+    try:
+        mlx_device = dict(mx.device_info())
+    except Exception as exc:
+        mlx_device = {"error": repr(exc)}
+
+    memory = _collect_process_memory()
+    memory.update(
+        {
+            "resource_limit": mlx_device.get("resource_limit"),
+            "memory_size": mlx_device.get("memory_size"),
+            "max_recommended_working_set_size": mlx_device.get(
+                "max_recommended_working_set_size"
+            ),
+        }
+    )
+
+    diagnostics: dict[str, Any] = {
+        "rank": rank,
+        "stage": stage,
+        "env": {
+            "MLX_RANK": _short_env_value(os.environ.get("MLX_RANK")),
+            "MLX_JACCL_COORDINATOR": _short_env_value(
+                os.environ.get("MLX_JACCL_COORDINATOR")
+            ),
+            "MLX_IBV_DEVICES": _short_env_value(os.environ.get("MLX_IBV_DEVICES")),
+            "MLX_HOSTFILE": _short_env_value(os.environ.get("MLX_HOSTFILE")),
+        },
+        "memory": memory,
+        "mlx_memory": _collect_mlx_memory(),
+        "mlx_device": mlx_device,
+    }
+    if layer_loaded is not None:
+        diagnostics["layer_loaded"] = layer_loaded
+    if total_layers is not None:
+        diagnostics["total_layers"] = total_layers
+    return diagnostics
+
+
+def log_mlx_load_diagnostics(diagnostics: dict[str, Any]) -> None:
+    logger.info(f"MLX load diagnostics: {json.dumps(diagnostics, sort_keys=True)}")
+
+
+def make_diagnostic_layer_callback(
+    *,
+    rank: int,
+    on_layer_loaded: LayerLoadedCallback | None,
+    every_n_layers: int = 10,
+) -> Callable[[int, int], None]:
+    def callback(layer_loaded: int, total_layers: int) -> None:
+        if on_layer_loaded is not None:
+            on_layer_loaded(layer_loaded, total_layers)
+        if (
+            layer_loaded == 0
+            or layer_loaded % every_n_layers == 0
+            or layer_loaded >= total_layers - 1
+        ):
+            log_mlx_load_diagnostics(
+                collect_mlx_load_diagnostics(
+                    rank=rank,
+                    stage="layer-load",
+                    layer_loaded=layer_loaded,
+                    total_layers=total_layers,
+                )
+            )
+
+    return callback
+
+
 class HostList(RootModel[list[str]]):
     @classmethod
     def from_hosts(cls, hosts: list[Host]) -> "HostList":
@@ -146,9 +266,15 @@ def mlx_distributed_init(
                 os.environ["MLX_IBV_DEVICES"] = coordination_file
                 os.environ["MLX_RANK"] = str(rank)
                 os.environ["MLX_JACCL_COORDINATOR"] = jaccl_coordinator
+                log_mlx_load_diagnostics(
+                    collect_mlx_load_diagnostics(rank=rank, stage="before-jaccl-init")
+                )
                 group = mx.distributed.init(backend="jaccl", strict=True)
 
         logger.info(f"Rank {rank} mlx distributed initialization complete")
+        log_mlx_load_diagnostics(
+            collect_mlx_load_diagnostics(rank=rank, stage="after-distributed-init")
+        )
 
         return group
 
@@ -172,6 +298,16 @@ def load_mlx_items(
     on_timeout: TimeoutCallback | None,
     on_layer_loaded: LayerLoadedCallback | None,
 ) -> "tuple[Model, TokenizerWrapper, VisionProcessor | None]":
+    diagnostic_layer_callback = make_diagnostic_layer_callback(
+        rank=bound_instance.bound_shard.device_rank,
+        on_layer_loaded=on_layer_loaded,
+    )
+    log_mlx_load_diagnostics(
+        collect_mlx_load_diagnostics(
+            rank=bound_instance.bound_shard.device_rank,
+            stage="before-load-mlx-items",
+        )
+    )
     if group is None:
         logger.info(f"Single device used for {bound_instance.instance}")
         model_path = build_model_path(bound_instance.bound_shard.model_card.model_id)
@@ -184,8 +320,7 @@ def load_mlx_items(
             total = len(layers)
             for i, layer in enumerate(layers):
                 mx.eval(layer)  # type: ignore
-                if on_layer_loaded is not None:
-                    on_layer_loaded(i, total)
+                diagnostic_layer_callback(i, total)
         except ValueError as e:
             logger.opt(exception=e).debug(
                 "Model architecture doesn't support layer-by-layer progress tracking",
@@ -202,7 +337,7 @@ def load_mlx_items(
             bound_instance.bound_shard,
             group=group,
             on_timeout=on_timeout,
-            on_layer_loaded=on_layer_loaded,
+            on_layer_loaded=diagnostic_layer_callback,
         )
         end_time = time.perf_counter()
         logger.info(
@@ -819,43 +954,35 @@ def _parse_kimi_tool_calls(text: str):
         return [_parse_single_tool(text)]
 
 
-def encode_task_id_bytes(task_id: TaskId) -> list[int]:
-    return list(task_id.encode("utf-8"))
-
-
-def decode_task_id_bytes(encoded_task_id: list[int]) -> TaskId:
-    normalized_bytes = bytes((int(x) & 0xFF) for x in encoded_task_id)
-    return TaskId(normalized_bytes.decode("utf-8"))
-
-
 def mx_all_gather_tasks(
     tasks: list[TextGeneration],
     group: mx.distributed.Group | None,
 ) -> tuple[list[TextGeneration], list[TextGeneration]]:
-    if group is None:
-        return tasks, []
+    def encode_task_id(task_id: TaskId) -> list[int]:
+        utf8_task_id = task_id.encode()
+        return [
+            int.from_bytes(utf8_task_id[i : i + 1]) for i in range(len(utf8_task_id))
+        ]
+
+    def decode_task_id(encoded_task_id: list[int]) -> TaskId:
+        return TaskId(
+            bytes.decode(b"".join((x).to_bytes(length=1) for x in encoded_task_id))
+        )
 
     uuid_byte_length = 36
 
     n_tasks = len(tasks)
-    has_any_tasks = mx.distributed.all_sum(
-        mx.array([1 if n_tasks > 0 else 0], dtype=mx.int32),
-        group=group,
-    )
-    if int(has_any_tasks.item()) == 0:
-        return [], []
-
     all_counts = cast(
         list[int],
         mx.distributed.all_gather(mx.array([n_tasks]), group=group).tolist(),
     )
     max_tasks = max(all_counts)
-    world_size = group.size()
+    world_size: int = 1 if group is None else group.size()
 
     if max_tasks == 0:
         return [], []
 
-    padded = [encode_task_id_bytes(task.task_id) for task in tasks] + [
+    padded = [encode_task_id(task.task_id) for task in tasks] + [
         [0] * uuid_byte_length
     ] * (max_tasks - n_tasks)
 
@@ -863,15 +990,12 @@ def mx_all_gather_tasks(
 
     gathered = cast(
         list[list[list[int]]],
-        mx.distributed.all_gather(mx.array(padded, dtype=mx.uint8), group=group)
+        mx.distributed.all_gather(mx.array(padded), group=group)
         .reshape(world_size, max_tasks, -1)
         .tolist(),
     )
     all_task_ids: list[list[TaskId]] = [
-        [
-            decode_task_id_bytes(encoded_task_id)
-            for encoded_task_id in rank_tasks[:count]
-        ]
+        [decode_task_id(encoded_task_id) for encoded_task_id in rank_tasks[:count]]
         for rank_tasks, count in zip(gathered, all_counts, strict=True)
     ]
 

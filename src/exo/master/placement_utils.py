@@ -320,11 +320,13 @@ def get_mlx_jaccl_devices_matrix(
                     matrix[i][j] = conn.source_rdma_iface
                     break
             else:
-                for reverse_conn in cycle_digraph.get_all_connections_between(
-                    node_j, node_i
-                ):
-                    if isinstance(reverse_conn, RDMAConnection):
-                        matrix[i][j] = reverse_conn.sink_rdma_iface
+                # Some platforms report RDMA reachability as a single directed
+                # topology edge even though the underlying device/interface is
+                # usable for both ranks. Mirror the reverse edge rather than
+                # rejecting an otherwise valid two-node JACCL placement.
+                for conn in cycle_digraph.get_all_connections_between(node_j, node_i):
+                    if isinstance(conn, RDMAConnection):
+                        matrix[i][j] = conn.sink_rdma_iface
                         break
                 else:
                     raise ValueError(
@@ -357,18 +359,21 @@ def _find_ip_prioritised(
     Priority: ethernet > wifi > unknown > thunderbolt
     """
     ips = list(_find_connection_ip(node_id, other_node_id, cycle_digraph))
+    using_explicit_connection_ips = bool(ips)
 
     def _is_usable_ip(ip: str) -> bool:
         try:
             parsed = ipaddress.ip_address(ip)
         except ValueError:
             return False
-        return not (
-            parsed.is_unspecified
-            or parsed.is_loopback
-            or parsed.is_link_local
-            or parsed.is_multicast
-        )
+        if parsed.is_unspecified or parsed.is_loopback or parsed.is_multicast:
+            return False
+        # Explicit socket edges may legitimately advertise 169.254/16 link-local
+        # addresses for directly connected Thunderbolt interfaces. Do not reject
+        # those, or placement cannot build MLX/JACCL host lists for the local
+        # Studio cluster. When falling back to an arbitrary interface list with
+        # no topology edge, keep the conservative link-local filter.
+        return using_explicit_connection_ips or not parsed.is_link_local
 
     other_network = node_network.get(other_node_id, NodeNetworkInfo())
     known_ips = {iface.ip_address for iface in other_network.interfaces}
@@ -416,7 +421,7 @@ def _find_ip_prioritised(
     return min(
         ips,
         key=lambda ip: (
-            1 if _is_tailscale_ip(ip) else 0,
+            0 if _is_tailscale_ip(ip) else 1,
             priority.get(ip_to_type.get(ip, "unknown"), 2),
         ),
     )

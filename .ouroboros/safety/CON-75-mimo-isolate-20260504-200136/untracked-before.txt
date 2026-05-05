@@ -1,0 +1,16 @@
+.ouroboros/safety/CON-75-mimo-isolate-20260504-200136/diffstat-before.txt
+.ouroboros/safety/CON-75-mimo-isolate-20260504-200136/full-before.patch
+.ouroboros/safety/CON-75-mimo-isolate-20260504-200136/status-before.txt
+.ouroboros/safety/CON-75-mimo-isolate-20260504-200136/untracked-before.txt
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/branch.txt
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/diffstat.txt
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/full.patch
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/git-apply-check.stderr
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/git-apply-check.stdout
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/recent-commits.txt
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/status.txt
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/track-a-selected-files.patch
+.ouroboros/safety/CON-75-mimo-live-20260504-194502/untracked-manifest.txt
+src/exo/api/tests/test_video_uploads.py
+src/exo/master/video_store.py
+src/exo/shared/types/video_errors.py

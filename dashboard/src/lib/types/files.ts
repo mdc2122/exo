@@ -20,7 +20,7 @@ export interface ChatAttachment {
   mimeType?: string;
 }
 
-export type FileCategory = "image" | "text" | "pdf" | "audio" | "unknown";
+export type FileCategory = "image" | "text" | "pdf" | "audio" | "video" | "unknown";
 
 export const IMAGE_EXTENSIONS = [
   ".jpg",
@@ -99,6 +99,9 @@ export const AUDIO_MIME_TYPES = [
   "audio/mp4",
 ];
 
+export const VIDEO_EXTENSIONS = [".mp4"];
+export const VIDEO_MIME_TYPES = ["video/mp4"];
+
 /**
  * Get file category based on MIME type and extension
  */
@@ -122,6 +125,12 @@ export function getFileCategory(
     AUDIO_EXTENSIONS.includes(extension)
   ) {
     return "audio";
+  }
+  if (
+    VIDEO_MIME_TYPES.includes(mimeType) ||
+    VIDEO_EXTENSIONS.includes(extension)
+  ) {
+    return "video";
   }
   if (
     TEXT_MIME_TYPES.includes(mimeType) ||
@@ -152,6 +161,9 @@ export function getAcceptString(categories: FileCategory[]): string {
         break;
       case "audio":
         accepts.push(...AUDIO_EXTENSIONS, ...AUDIO_MIME_TYPES);
+        break;
+      case "video":
+        accepts.push(...VIDEO_EXTENSIONS, ...VIDEO_MIME_TYPES);
         break;
     }
   }
@@ -226,6 +238,9 @@ export async function processUploadedFiles(
         results.push(base);
       } else if (category === "audio") {
         const preview = await readFileAsDataURL(file);
+        results.push({ ...base, preview });
+      } else if (category === "video") {
+        const preview = URL.createObjectURL(file);
         results.push({ ...base, preview });
       } else {
         results.push(base);

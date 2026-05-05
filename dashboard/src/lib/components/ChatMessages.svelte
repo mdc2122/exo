@@ -139,6 +139,8 @@
         return "🖼";
       case "text":
         return "📄";
+      case "video":
+        return "🎬";
       default:
         return "📎";
     }
@@ -408,6 +410,13 @@
                                 expandedImageSrc = attachment.preview;
                             }}
                           />
+                        {:else if attachment.type === "video" && attachment.preview}
+                          <video
+                            src={attachment.preview}
+                            class="w-16 h-10 object-cover rounded border border-exo-yellow/20"
+                            muted
+                            controls
+                          ></video>
                         {:else}
                           <span>{getAttachmentIcon(attachment)}</span>
                         {/if}

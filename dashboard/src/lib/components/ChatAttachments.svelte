@@ -21,6 +21,8 @@
         return "📑";
       case "audio":
         return "🎵";
+      case "video":
+        return "🎬";
       default:
         return "📎";
     }
@@ -48,6 +50,12 @@
             alt={file.name}
             class="w-8 h-8 object-cover rounded border border-exo-yellow/20"
           />
+        {:else if file.preview && getFileCategory(file.type, file.name) === "video"}
+          <video
+            src={file.preview}
+            class="w-12 h-8 object-cover rounded border border-exo-yellow/20"
+            muted
+          ></video>
         {:else}
           <span class="text-base">{getFileIcon(file)}</span>
         {/if}
