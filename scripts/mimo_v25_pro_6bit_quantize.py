@@ -350,6 +350,23 @@ def check_free_space(output_dir: Path, expected_output_size: int, *, require_hea
         )
 
 
+def estimate_remaining_output_bytes(manifest: RunManifest) -> int:
+    """Return estimated bytes still to be written for incomplete shards.
+
+    The total model estimate includes already completed/resumable shards. A
+    resumed conversion should require free space for the remaining shards plus
+    headroom, not the full model plus headroom again.
+    """
+
+    remaining = 0
+    for shard in manifest.get("shards", {}).values():
+        if shard.get("status") == "complete":
+            continue
+        for tensor_entry in shard.get("tensors", {}).values():
+            remaining += int(tensor_entry.get("estimated_output_nbytes", 0))
+    return remaining
+
+
 def write_config(source_dir: Path, output_dir: Path, manifest: RunManifest) -> None:
     config = json.loads((source_dir / "config.json").read_text())
     config.pop("_name_or_path", None)
@@ -535,7 +552,7 @@ def run_dry_run(plan: QuantizationPlan) -> RunManifest:
     manifest = build_dry_run_manifest(plan)
     check_free_space(
         plan.output_dir,
-        manifest.get("expected_output_size_bytes", 0),
+        estimate_remaining_output_bytes(manifest),
         require_headroom=True,
     )
     plan.output_dir.mkdir(parents=True, exist_ok=True)
