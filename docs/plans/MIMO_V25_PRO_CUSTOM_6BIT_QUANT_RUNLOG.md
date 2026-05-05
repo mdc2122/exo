@@ -11,7 +11,8 @@ This run intentionally avoids Kimi deployment scripts, Kimi processes, Kimi-spec
 - Worktree: `/Users/studio2/.ouroboros/worktrees/exo/orch_goose_42e7de630503`
 - Branch: `ooo/orch_goose_42e7de630503`
 - Starting HEAD observed during finalization: `b357af110bfeb9951ddc4b81f77277d30b668ac9`
-- Commit created by this run: `e2f5cbf0ada2154e87addc881712ea86d3d67039` (`CON-75 prepare MiMo Pro MLX 6bit quantization`).
+- Code/config/docs commit created by this run: `93a8a01633b3d3e5f7acfca449ddaab918343124` (`CON-75 prepare MiMo Pro MLX 6bit quantization`).
+- Runlog hash finalization commit: this document is finalized by the subsequent `CON-75 finalize MiMo Pro 6bit quantization runlog` commit.
 
 ## Source and Output Paths
 
