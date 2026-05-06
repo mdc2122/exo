@@ -1,0 +1,55 @@
+goal: "Build a narrow follow-up diagnostic artifact for MiMo Track A that can bisect the Studio1 rank-1 layer-load signal-9 threshold without live exo/JACCL/placement/generation."
+
+constraints:
+  - "Active target is MiMo Track A only: XiaomiMiMo/MiMo-V2.5-Pro / MiMoV2ForCausalLM custom 6-bit MLX."
+  - "Do not touch Kimi scripts, Kimi runtimes, GLM runtimes, or unrelated model projects."
+  - "Do not start, stop, or restart local/remote exo services."
+  - "Do not call /place_instance or any exo HTTP placement/generation endpoint."
+  - "Do not download model files; all behavior must be offline/read-only."
+  - "Do not run the heavy no-dry-run model load as part of this sidecar task; Hermes/operator will run it later."
+  - "Keep the change focused to scripts and focused tests only."
+  - "The artifact must be safe to copy/run on Studio1 from /Users/studio1/exo-mimo-track-a-candidate."
+  - "Preserve the existing rank1 load probe and add a wrapper/bisect harness rather than rewriting the main loader."
+  - "Hermes owns live execution and durable Linear/Obsidian updates after the artifact is produced."
+
+acceptance_criteria:
+  - "A script exists at scripts/mimo_track_a_rank1_bisect_probe.py or equivalently named narrow wrapper, runnable with uv/python from the exo repo root."
+  - "The script runs the existing scripts/mimo_track_a_rank1_load_probe.py as a subprocess for selected layer ranges and records each attempt's start_layer, end_layer, command, exit code, signal if inferable, elapsed seconds, stdout/stderr log path, JSONL path, and last parsed diagnostic record."
+  - "The script defaults to a dry-run/simulation-safe mode for tests; real execution must require an explicit flag such as --execute or --no-dry-run."
+  - "The script supports a bounded linear or binary-style range plan around the observed failure: start_layer=36, min_end_layer near 60, max_end_layer=70, device_rank=1, world_size=2."
+  - "The script writes a summary JSON/JSONL manifest under /Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/ by default, creating directories as needed."
+  - "The script never initializes mx.distributed/JACCL/libp2p/API/generation itself; it only shells out to the existing standalone probe."
+  - "Focused tests exist for argument parsing, planned ranges, fake subprocess result parsing, manifest writing, and no-heavy-load default behavior."
+  - "Focused tests/checks pass locally, including py_compile and pytest for the new test file."
+  - "Final summary identifies exact files changed, exact safe dry-run command, exact real Studio1 command, and explicitly states that no live exo restart/placement/generation was performed by the sidecar."
+
+ontology_schema:
+  name: "MiMoTrackARank1BisectProbe"
+  description: "Narrow diagnostic wrapper for MiMo V2.5 Pro custom 6-bit MLX rank-1 layer-load threshold isolation."
+  fields:
+    - name: "model_id"
+      field_type: "string"
+      description: "Target model identifier; must remain XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX / Pro base."
+    - name: "artifact"
+      field_type: "string"
+      description: "Probe wrapper script path or diagnostics output path."
+    - name: "safety_boundary"
+      field_type: "string"
+      description: "Operations explicitly forbidden from the probe and workflow."
+    - name: "verification"
+      field_type: "string"
+      description: "Focused command/test evidence."
+    - name: "observed_failure"
+      field_type: "string"
+      description: "Standalone Studio1 probe evidence the wrapper is designed to bisect."
+
+metadata:
+  seed_id: "mimo-track-a-rank1-bisect-probe-20260506"
+  project: "Agent Workflow"
+  linear_issue: "CON-75"
+  repo: "/Users/studio2/exo"
+  active_model: "XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX"
+  base_model: "XiaomiMiMo/MiMo-V2.5-Pro"
+  observed_probe_artifact: "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/20260506T170118Z"
+  observed_probe_result: "Studio1 standalone rank1 [36,70) probe exited 137 after last recorded global layer 66, MLX active 344134219016 bytes, cache 10871645228 bytes, peak 355005854984 bytes, memorystatus_level fell to 64."
+  ambiguity_score: 0.1
