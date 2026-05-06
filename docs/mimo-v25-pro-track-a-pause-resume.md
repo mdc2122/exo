@@ -4,7 +4,7 @@ Paused: 2026-05-06T17:30:54Z
 
 ## Status
 
-Track A for `XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX` is intentionally paused due to memory pressure during Studio1 rank-1 shard loading. Do not restart live Track A placement/generation until a bounded memory-safe resume plan is selected.
+Track A for `XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX` was resumed after Studio2 reboot using the bounded Studio1 standalone rank-1 probe plan. The safe per-rank split is now narrowed: `[36,68)` completes, while `[36,69)` and `[36,70)` SIGKILL after evaluating global layer `67` and before recording layer `68`. Do not restart live Track A placement/generation with the old rank-1 `[36,70)` split; use a safer split such as rank-1 ending at `68` or implement a different placement/load strategy first.
 
 ## What is preserved in git
 
@@ -64,14 +64,32 @@ ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null studio1@Studio1s
 
 ## Blocker evidence
 
-Main blocker: Studio1 rank-1 shard `[36,70)` hard-kills during load/eval from memory pressure.
+Main blocker: Studio1 rank-1 shard `[36,69)` / `[36,70)` hard-kills during layer evaluation from memory pressure. After the Studio2 reboot and bounded resume probes, `[36,68)` completes; the failure threshold is the next layer interval.
 
 Evidence roots:
 
 - `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/signal9-20260506T162535Z/summary.md`
 - `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/20260506T170118Z/remote-copy/probe.jsonl`
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/mimo-track-a-rank1-bisect-manifest-20260506T223409Z.jsonl` — `[36,60)` passed
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/mimo-track-a-rank1-bisect-manifest-20260506T223521Z.jsonl` — `[36,62)` passed
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/mimo-track-a-rank1-bisect-manifest-20260506T223613Z.jsonl` — `[36,65)` passed
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/mimo-track-a-rank1-bisect-manifest-20260506T223730Z.jsonl` — `[36,67)` passed
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/mimo-track-a-rank1-bisect-manifest-20260506T224047Z.jsonl` — `[36,68)` passed
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/mimo-track-a-rank1-bisect-manifest-20260506T224217Z.jsonl` — `[36,69)` SIGKILL
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/mimo-track-a-rank1-bisect-manifest-20260506T223851Z.jsonl` — `[36,70)` SIGKILL
 
-Key observed values from standalone rank-1 probe:
+Key observed values from the post-reboot bounded Studio1 probes:
+
+- `[36,60)`: exit `0`, active `248.13 GiB`, peak `258.25 GiB`, cache `10.13 GiB`.
+- `[36,62)`: exit `0`, active `268.81 GiB`, peak `278.93 GiB`, cache `10.13 GiB`.
+- `[36,65)`: exit `0`, active `299.82 GiB`, peak `309.95 GiB`, cache `10.13 GiB`.
+- `[36,67)`: exit `0`, active `320.50 GiB`, peak `330.62 GiB`, cache `10.13 GiB`.
+- `[36,68)`: exit `0`, active `330.84 GiB`, peak `340.96 GiB`, cache `10.13 GiB`.
+- `[36,69)`: exit `-9` (`SIGKILL`) after recording `after-layer-eval` for global layer `67`; last active `330.84 GiB`, peak `340.96 GiB`, cache `10.13 GiB`.
+- `[36,70)`: exit `-9` (`SIGKILL`) after recording `after-layer-eval` for global layer `67`; last active `330.84 GiB`, peak `340.96 GiB`, cache `10.13 GiB`.
+- Post-probe Studio1 state recovered to `kern.memorystatus_level: 98`, swap used about `44.94 MiB`, and no rank-1 probe processes remained.
+
+Earlier key observed values from standalone rank-1 probe:
 
 - Exit code: `137` (`SIGKILL`)
 - Last recorded global layer: `66`
@@ -99,29 +117,18 @@ Working hypothesis: the fatal memory pressure is not simply total model size. It
 
 ## Safe resume plan
 
-1. Keep Track A stopped unless explicitly resuming.
-2. Do not immediately restart 2-node live exo placement.
-3. First run only the dry-run bisect manifest:
+1. Keep old Track A `[36,70)` live placement stopped.
+2. Do not restart 2-node live exo placement with the old rank split.
+3. Verified post-reboot bounded standalone probes on Studio1:
+   - `[36,60)`, `[36,62)`, `[36,65)`, `[36,67)`, `[36,68)` passed.
+   - `[36,69)` and `[36,70)` SIGKILL after global layer `67`.
+4. Next implementation step: adjust placement/rank split so Studio1 rank-1 ends at `68` or below, then run live Track A only after verifying the new split does not assign layer `68+` to the same rank-1 shard.
+5. If full model quality requires layers `68..69` on Studio1, implement a different load strategy first (for example more granular/pipeline split, layer-local re-sharding/conversion, or allocator/cache cleanup between layer materializations) before retrying live.
+6. After any live retry, capture `vm_stat`, `sysctl vm.swapusage kern.memorystatus_level`, process state, probe/placement logs, API health, and generation evidence.
+7. If reduced live split still SIGKILLs, treat as broader MLX/Metal allocator or artifact-layout issue; consider re-sharding/converting MiMo artifact into more layer-local files before another live Track A attempt.
 
-```bash
-cd /Users/studio2/exo
-uv run python scripts/mimo_track_a_rank1_bisect_probe.py \
-  --dry-run \
-  --model-path /Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/XiaomiMiMo--MiMo-V2.5-Pro-6bit-MLX
-```
-
-4. If the user accepts risk, execute bounded Studio1 ranges from smallest to largest, not `[36,70)` first:
-   - `[36,60)`
-   - `[36,62)`
-   - `[36,65)`
-   - `[36,67)`
-   - `[36,70)` only if prior ranges pass with headroom
-5. After each range, capture `vm_stat`, `sysctl vm.swapusage kern.memorystatus_level`, process state, and probe JSONL.
-6. If reduced ranges pass, adjust placement/rank split or load strategy before live retry.
-7. If reduced ranges still SIGKILL, treat as broader MLX/Metal allocator or artifact-layout issue; consider re-sharding/converting MiMo artifact into more layer-local files before another live Track A attempt.
-
-## Do not touch during pause
+## Do not touch unless explicitly part of Track A resume
 
 - Do not restart Kimi as part of this handoff.
-- Do not run MiMo live cluster/generation until explicitly requested.
+- Do not run MiMo live cluster/generation with the old `[36,70)` rank-1 split.
 - Do not delete the evidence bundles; they are resume-critical.
