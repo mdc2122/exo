@@ -1,0 +1,116 @@
+goal: "CON-75 Track B: implement and validate regular XiaomiMiMo/MiMo-V2.5 full omnimodal exo rollout with text, image, video, and audio support on the Studio2/Studio1 MLX/exo cluster."
+
+constraints:
+  - "Use exactly one Ouroboros execution for this rollout; decompose internally into ACs and Sub-ACs rather than asking the operator to launch many follow-up runs."
+  - "Use git worktrees for implementation isolation. The launcher will use --worktree-mode always; inside the run, confirm and report the worktree path and branch before making changes."
+  - "Primary repo is /Users/studio2/exo. Do not modify /Users/studio2/kimi-k26-exo-deployment and do not start/stop Kimi unless a port conflict proves it is an exo runtime and the operator explicitly approves."
+  - "Track B target is regular XiaomiMiMo/MiMo-V2.5, not MiMo-V2.5-Pro and not XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX. Preserve Track A pause state and Pro text-only/fail-closed semantics."
+  - "Use the existing local Studio2 artifact at /Volumes/GLM5-NVMe/exo/mimo-v25-pro/hf/XiaomiMiMo--MiMo-V2.5. Do not re-download model weights from Hugging Face unless only lightweight metadata is needed."
+  - "The public regular V2.5 artifact is official FP8 E4M3 with BF16 ignored layers and FP32 scale metadata; do not call it BF16 and do not silently coerce FP8 to BF16/int8. Preserve upstream quantization_config."
+  - "Treat image, video, and audio as first-class Track B capabilities. Include both vision encoder and audio encoder support in code, model-card metadata, adapters, validation, and smoke fixtures."
+  - "Fail closed for unsupported or oversized media inputs with structured errors. Keep video/audio smokes tiny and bounded to avoid memory pressure."
+  - "Avoid live two-node cluster generation until static tests, dry-run probes, model-card inspection, media request adapter tests, and local no-download smoke gates pass."
+  - "If live cluster smoke is attempted, first verify no Track A/Pro runtime is active, keep both Studios caffeinated, use EXO_OFFLINE=true and --offline --no-downloads, and use a Track-B-specific namespace."
+  - "Do not copy or rsync the 294 GiB artifact unnecessarily. If Studio1 lacks it, implement an explicit resumable sync/checksum plan and perform only the minimal safe sync required for the smoke gate."
+  - "Keep progress reports compact in the form requested by the operator: AC x/n completed, Sub-AC y/m completed, plus current work hint."
+  - "Every code change must have targeted tests. Commit coherent work with CON-75-prefixed commit subjects in the worktree branch."
+  - "If a gate is unsafe or blocked by memory/storage/auth, stop at a documented safe checkpoint with exact next command rather than forcing a risky live run."
+
+acceptance_criteria:
+  - "AC1 Discovery and grounding: inspect local XiaomiMiMo/MiMo-V2.5 config/tokenizer/preprocessor/model index and Hugging Face metadata; record exact revision/path/size/quantization, and prove vision_config and audio_config are present."
+  - "AC2 Model-card correctness: verify or update resources/inference_model_cards/XiaomiMiMo--MiMo-V2.5.toml so it represents regular Track B with capabilities text/image/video/audio/agentic/long-context, FP8 quantization, 48 layers, hidden_size 4096, context_length 1048576, image/video token IDs, vision processor repo, sample_fps 2.0, temporal_merge_kernel_size 2, and audio metadata derived from config.json."
+  - "AC3 Track separation: add or update focused tests proving regular MiMo-V2.5 is multimodal while MiMo-V2.5-Pro and MiMo-V2.5-Pro-6bit remain Track A text-only/fail-closed for media requests."
+  - "AC4 Request adapter coverage: implement and test OpenAI-compatible chat-completions parsing for Track B image, video, video_url, audio, input_audio, and speech-style parts without regressing existing Kimi/vision paths."
+  - "AC5 Vision/video encoder path: verify or implement MLX preprocessing for Track B image and short video using the model processor/preprocessor, including media token insertion, temporal sampling, region bookkeeping, bounded video_url fetch/decode, and tiny image/video fixture tests."
+  - "AC6 Audio encoder path: implement and test Track B audio preprocessing from bounded inline/base64 or local fixture inputs into model-compatible audio tokens/embeddings/codes using the repo audio_config and tokenizer special tokens; include structured fail-closed errors for unsupported format/duration/size."
+  - "AC7 Loader/sharding compatibility: verify MiMo-V2.5 FP8 E4M3 load/shard path in exo/MLX without altering upstream FP8 scale semantics; add a safe dry-run or metadata probe that catches unsupported MLX-LM model/quantization issues before live cluster placement."
+  - "AC8 Cluster integration plan and guarded smoke: prepare Track-B-specific offline launch/smoke scripts for Studio2/Studio1 using ports 52415/9010/9011 and namespace mimo-track-b-omnimodal-20260506; include /v1/models, /instance/previews, text-only, image, short-video, and tiny-audio smoke payloads. Run live smokes only after prior gates pass and resource checks are safe."
+  - "AC9 Verification gates: run focused pytest for model-card, API adapter, media preprocessing, loader/probe, and smoke-script tests; run ruff on changed Python files; run py_compile for new scripts; record any intentionally skipped heavyweight live gate with exact reason."
+  - "AC10 Handoff and durability: produce a concise Track B rollout report in docs/ with worktree path, commits, tests, media capabilities, remaining blockers, exact resume/run commands, and evidence paths suitable for Hermes to mirror into Linear and Obsidian."
+
+ontology_schema:
+  name: "MiMoTrackBOmnimodalRollout"
+  description: "Schema for a single Ouroboros worktree implementation run that makes regular MiMo V2.5 full text/image/video/audio support usable and testable in exo."
+  fields:
+    - name: "repo_path"
+      field_type: "string"
+      description: "Source repository path, expected /Users/studio2/exo."
+    - name: "worktree_path"
+      field_type: "string"
+      description: "Ouroboros-created git worktree used for implementation."
+    - name: "model_id"
+      field_type: "string"
+      description: "Hugging Face model id XiaomiMiMo/MiMo-V2.5."
+    - name: "local_model_path"
+      field_type: "string"
+      description: "Local Studio2 model artifact path."
+    - name: "capabilities"
+      field_type: "list[string]"
+      description: "Supported capabilities to expose and verify: text, image, video, audio, agentic, long-context."
+    - name: "acceptance_progress"
+      field_type: "string"
+      description: "Compact progress counters in AC x/n and Sub-AC y/m form."
+    - name: "test_evidence"
+      field_type: "list[string]"
+      description: "Commands and results for focused tests, lint, compile, and optional smoke gates."
+    - name: "cluster_evidence"
+      field_type: "list[string]"
+      description: "Offline launch, preview, placement, or smoke evidence paths if a live guarded smoke is safe."
+    - name: "handoff_doc"
+      field_type: "string"
+      description: "Path to the final rollout/handoff document under docs/."
+
+metadata:
+  seed_id: "con-75-mimo-track-b-full-omnimodal-rollout-20260506"
+  created_at_utc: "2026-05-06T17:38:39Z"
+  linear_issue: "CON-75"
+  project: "Agent Workflow"
+  repo_path: "/Users/studio2/exo"
+  requested_by: "M C"
+  model_id: "XiaomiMiMo/MiMo-V2.5"
+  hf_url: "https://huggingface.co/XiaomiMiMo/MiMo-V2.5"
+  local_model_path: "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/hf/XiaomiMiMo--MiMo-V2.5"
+  local_model_size: "294G"
+  observed_revision: "b095f786e640d4d5c68f2d46ac92ff6ddbe6f83e"
+  observed_file_count: 77
+  observed_index_total_size_bytes: 315031102208
+  observed_index_shards: 17
+  observed_index_weight_map_keys: 73081
+  model_type: "mimo_v2"
+  architecture: "MiMoV2ForCausalLM"
+  hidden_size: 4096
+  num_hidden_layers: 48
+  num_attention_heads: 64
+  num_key_value_heads: 4
+  context_length: 1048576
+  quantization: "official fp8 e4m3 with bf16 ignored layers and fp32 scale metadata"
+  vision_capabilities:
+    image_token_id: 151655
+    video_token_id: 151656
+    vision_start_token_id: 151652
+    vision_end_token_id: 151653
+    sample_fps: 2.0
+    temporal_patch_size: 2
+    temporal_merge_kernel_size: 2
+    out_hidden_size: 4096
+  audio_capabilities:
+    audio_config_present: true
+    out_hidden_size: 4096
+    speech_vocab_size: "derive from config.json"
+    audio_segment_size: "derive from config.json"
+    audio_channels: "derive from config.json"
+    audio_pad_token_observed: 151669
+  cluster:
+    studio2_repo: "/Users/studio2/exo"
+    studio1_candidate_repo: "/Users/studio1/exo-mimo-track-b-candidate"
+    api_port: 52415
+    studio2_libp2p_port: 9010
+    studio1_libp2p_port: 9011
+    namespace: "mimo-track-b-omnimodal-20260506"
+  sidecar:
+    use_goose: true
+    goose_provider: "chatgpt_codex"
+    goose_model: "gpt-5.5"
+    worktree_mode: "always"
+    single_ouroboros_run: true
+    preferred_progress_format: "AC x/n completed, Sub-AC y/m completed"
