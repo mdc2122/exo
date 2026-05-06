@@ -1,0 +1,71 @@
+goal: "CON-75: compare local custom MiMo-V2.5-Pro 6-bit MLX artifact against kernelpool/MiMo-V2.5-Pro-6bit without downloading the full kernelpool model, and recommend whether it is worth a bounded pilot download/probe."
+
+constraints:
+  - "Use a single Ouroboros+Goose sidecar execution for this comparison; do not split into many runs."
+  - "Use git worktrees for isolation. The launcher will use --worktree-mode always; confirm the worktree path and branch in the final report."
+  - "Do not start, stop, or modify any live exo/Kimi/MiMo runtime. This is metadata/static-analysis work only."
+  - "Do not download the full kernelpool/MiMo-V2.5-Pro-6bit repository. It is about 778 GiB and /Volumes/GLM5-NVMe has only about 363 GiB free at launch."
+  - "Hard cap downloaded comparison data to 2 GiB total, but aim for under 1 GiB. Prefer config.json, README.md, index/metadata files, Hugging Face tree metadata, and byte-range safetensors header samples."
+  - "It is acceptable to inspect local full custom 6-bit metadata at /Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/XiaomiMiMo--MiMo-V2.5-Pro-6bit-MLX, but do not copy that artifact."
+  - "Treat local custom 6-bit as the quality-preferred candidate unless evidence suggests kernelpool has materially better runtime layout with acceptable quality risk."
+  - "Compare artifact layout and loader compatibility, not benchmark quality. No generation quality claims without actual eval data."
+  - "If remote safetensors header sampling is blocked by Hub/CDN range behavior, document the blocker and fall back to Hugging Face index/tree/config metadata."
+  - "Preserve Track B sidecar work; do not edit its worktree. This comparison should create its own worktree and own report."
+  - "Every produced script must have focused tests and must default to metadata-only/no-full-download behavior."
+  - "Use CON-75-prefixed commit subjects for coherent output commits in the sidecar worktree."
+
+acceptance_criteria:
+  - "AC1 Preflight and disk-safety: record local free space, local custom 6-bit path/sha or file inventory, remote kernelpool repo revision, top-level file inventory, and explicit proof that full kernelpool download is not feasible/safe now."
+  - "AC2 Metadata collector: implement a script that compares local custom 6-bit metadata with kernelpool/MiMo-V2.5-Pro-6bit using Hugging Face API tree metadata, config.json, README.md, and model index/config files without full download."
+  - "AC3 Safetensors spot checks: implement bounded header-only sampling for selected local and remote shards to compare tensor key naming, dtype metadata, q/k/v vs qkv layout, scale/bias key conventions, layer coverage, and shard locality without reading tensor payloads."
+  - "AC4 Quantization comparison: compare quantization configs and practical implications: bits, group_size, affine mode, 8-bit overrides, explicit q/k/v projections, key count, shard count, typical shard size, per-layer file fanout, and expected exo/MLX sanitize overhead."
+  - "AC5 Runtime-risk assessment: produce a reasoned recommendation on whether kernelpool 6-bit is likely to reduce Track A memory/file-cache pressure relative to local custom 6-bit, and whether it is worth a partial pilot download of selected shards or a full download later after disk cleanup."
+  - "AC6 Artifacts and tests: add focused unit tests for the metadata collector/header sampler and run py_compile, pytest, and ruff on changed files."
+  - "AC7 Handoff: write a concise report under docs/ with findings, exact commands, download budget used, next safe experiments, and a clear answer to whether full download is required versus spot-checking."
+
+ontology_schema:
+  name: "MiMoProSixBitQuantComparison"
+  description: "Metadata-only comparison of local custom MiMo Pro 6-bit MLX artifact and public kernelpool MiMo Pro 6-bit quantization."
+  fields:
+    - name: "local_artifact_path"
+      field_type: "string"
+      description: "Local custom 6-bit symlink/path."
+    - name: "remote_repo_id"
+      field_type: "string"
+      description: "Hugging Face repository id for the comparison candidate."
+    - name: "download_budget_bytes"
+      field_type: "integer"
+      description: "Maximum allowed download bytes for comparison metadata."
+    - name: "downloaded_bytes"
+      field_type: "integer"
+      description: "Approximate bytes actually downloaded by the comparison script."
+    - name: "layout_findings"
+      field_type: "list[string]"
+      description: "Shard count, shard size, key naming, and layer locality differences."
+    - name: "runtime_risk_assessment"
+      field_type: "string"
+      description: "Expected impact on exo/MLX memory pressure and loader compatibility."
+    - name: "recommendation"
+      field_type: "string"
+      description: "Whether to spot-check, partial-pilot, full-download, or avoid the remote quant."
+    - name: "report_path"
+      field_type: "string"
+      description: "Final docs/ report path."
+
+metadata:
+  seed_id: "con-75-mimo-pro-6bit-quant-compare-20260506"
+  created_at_utc: "2026-05-06T21:44:27Z"
+  linear_issue: "CON-75"
+  repo_path: "/Users/studio2/exo"
+  local_artifact_path: "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/XiaomiMiMo--MiMo-V2.5-Pro-6bit-MLX"
+  local_artifact_resolves_to: "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/MiMo-V2.5-Pro-6bit"
+  remote_repo_id: "kernelpool/MiMo-V2.5-Pro-6bit"
+  remote_repo_sha_observed: "945a996fdca2a653ece2507398700e7a83b826c2"
+  remote_total_size_observed_gib: 777.94
+  remote_safetensors_count_observed: 208
+  remote_index_total_size_bytes_observed: 835299199488
+  local_free_space_at_launch: "about 363 GiB on /Volumes/GLM5-NVMe"
+  max_download_budget_gib: 2
+  preferred_download_budget_gib: 1
+  comparison_mode: "metadata-only plus bounded safetensors header range samples"
+  expected_answer: "Full download is not required for first-pass comparison; spot-check config/index/tree/headers first."
