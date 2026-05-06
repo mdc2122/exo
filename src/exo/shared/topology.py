@@ -182,13 +182,36 @@ class Topology:
                 self._graph.remove_edge_from_index(conn_idx)
 
     def get_cycles(self) -> list[Cycle]:
-        """Get simple cycles in the graph, including singleton cycles"""
+        """Get simple cycles in the graph, including singleton cycles.
+
+        Some Apple Silicon Thunderbolt/RDMA topologies report the physical
+        two-node link as a single directed edge even though the underlying
+        interface is usable by both ranks. Preserve the directed graph for
+        connection metadata, but expose that two-node weak cycle to placement so
+        the existing reverse-edge RDMA/socket fallbacks can decide whether it is
+        usable.
+        """
 
         cycle_idxs = rx.simple_cycles(self._graph)
         cycles: list[Cycle] = []
+        seen_cycle_keys: set[frozenset[NodeId]] = set()
         for cycle_idx in cycle_idxs:
             cycle = Cycle(node_ids=[self._graph[idx] for idx in cycle_idx])
             cycles.append(cycle)
+            seen_cycle_keys.add(frozenset(cycle.node_ids))
+
+        if len(self._graph.nodes()) == 2:
+            for source_idx, sink_idx, _connection in self._graph.weighted_edge_list():
+                source = self._graph[source_idx]
+                sink = self._graph[sink_idx]
+                if source == sink:
+                    continue
+                cycle_key = frozenset((source, sink))
+                if cycle_key in seen_cycle_keys:
+                    continue
+                cycles.append(Cycle(node_ids=[source, sink]))
+                seen_cycle_keys.add(cycle_key)
+
         for node_id in self.list_nodes():
             cycles.append(Cycle(node_ids=[node_id]))
         return cycles

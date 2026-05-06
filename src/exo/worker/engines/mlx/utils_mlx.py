@@ -76,6 +76,51 @@ from exo.worker.runner.bootstrap import logger
 # the alias before load_model is called so both single-node and sharded load
 # paths can resolve the text-only MiMo V2 causal LM implementation.
 cast(dict[str, str], mlx_lm_utils.MODEL_REMAPPING).setdefault("mimo_v2", "mimo_v2_flash")
+
+try:
+    from mlx_lm.models import mimo_v2_flash as _mimo_v2_flash
+
+    _ORIGINAL_MIMO_V2_SANITIZE = _mimo_v2_flash.Model.sanitize
+
+    def _normalize_mimo_v2_weight_key(key: str) -> str:
+        if key.endswith(".weight.scales"):
+            return key.removesuffix(".weight.scales") + ".scales"
+        if key.endswith(".weight.biases"):
+            return key.removesuffix(".weight.biases") + ".biases"
+        return key
+
+    def _split_mimo_v2_fused_qkv_weights(model: Any, weights: dict[str, Any]) -> dict[str, Any]:
+        q_size = model.args.num_attention_heads * model.args.head_dim
+        k_size = model.args.num_key_value_heads * model.args.head_dim
+        v_size = model.args.num_key_value_heads * model.args.v_head_dim
+        split_sizes = (q_size, k_size, v_size)
+        split_names = ("q_proj", "k_proj", "v_proj")
+        normalized: dict[str, Any] = {}
+        for key, value in weights.items():
+            if ".self_attn.qkv_proj." not in key:
+                normalized[_normalize_mimo_v2_weight_key(key)] = value
+                continue
+            prefix, suffix = key.split(".self_attn.qkv_proj.", 1)
+            normalized_suffix = _normalize_mimo_v2_weight_key(f"x.{suffix}").removeprefix("x.")
+            if not hasattr(value, "shape") or value.shape[0] != sum(split_sizes):
+                normalized[_normalize_mimo_v2_weight_key(key)] = value
+                continue
+            start = 0
+            for name, size in zip(split_names, split_sizes, strict=True):
+                normalized[f"{prefix}.self_attn.{name}.{normalized_suffix}"] = value[
+                    start : start + size
+                ]
+                start += size
+        return normalized
+
+    def _mimo_v2_sanitize_for_exo_custom_quant(model: Any, weights: dict[str, Any]) -> dict[str, Any]:
+        sanitized = _ORIGINAL_MIMO_V2_SANITIZE(model, weights)
+        return _split_mimo_v2_fused_qkv_weights(model, sanitized)
+
+    _mimo_v2_flash.Model.sanitize = _mimo_v2_sanitize_for_exo_custom_quant
+except ImportError:
+    pass
+
 load_model = mlx_lm_utils.load_model
 
 Group = mx.distributed.Group
@@ -378,7 +423,7 @@ def shard_and_load(
     model_path = build_model_path(shard_metadata.model_card.model_id)
 
     model, _ = load_model(model_path, lazy=True, strict=False)
-    logger.debug(model)
+    logger.debug("loaded model class=%s path=%s", type(model).__name__, model_path)
     if hasattr(model, "model") and isinstance(model.model, DeepseekV3Model):  # type: ignore
         pass
         # TODO: See if we should quantize the model.
@@ -433,7 +478,7 @@ def shard_and_load(
     mx.eval(model)
 
     logger.debug("SHARDED")
-    logger.debug(model)
+    logger.debug("sharded model class=%s", type(model).__name__)
 
     # Synchronize processes before generation to avoid timeout
     mx_barrier(group)

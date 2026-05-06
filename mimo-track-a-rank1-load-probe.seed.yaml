@@ -1,0 +1,52 @@
+goal: "Build a narrow, offline MiMo Track A rank-1 shard-load probe artifact for isolating the Studio1 signal-9 failure without restarting exo, placing instances, entering JACCL/barrier, or attempting generation."
+
+constraints:
+  - "Active target is MiMo Track A only: XiaomiMiMo/MiMo-V2.5-Pro / MiMoV2ForCausalLM custom 6-bit MLX."
+  - "Do not touch Kimi scripts, Kimi runtimes, GLM runtimes, or unrelated model projects."
+  - "Do not start, stop, or restart local/remote exo services."
+  - "Do not call /place_instance or any exo HTTP placement/generation endpoint."
+  - "Do not download model files; all behavior must be offline/read-only."
+  - "Keep the change focused to a probe script plus optional focused test/docs if needed."
+  - "The probe must be safe to copy/run on Studio1 from /Users/studio1/exo-mimo-track-a-candidate."
+  - "The probe must default to no distributed/JACCL init and no mx_barrier."
+  - "Hermes owns live execution and durable Linear/Obsidian updates after the artifact is produced."
+
+acceptance_criteria:
+  - "A script exists at scripts/mimo_track_a_rank1_load_probe.py that can be run with uv/python from the exo repo root."
+  - "The script has clear CLI flags for model path, start layer, end layer, device rank, world size, output path, and dry-run/no-eval behavior."
+  - "Defaults target the rank-1 failing shard: start_layer=36, end_layer=70, device_rank=1, world_size=2, model path /Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/XiaomiMiMo--MiMo-V2.5-Pro-6bit-MLX."
+  - "The script imports/uses the existing patched MiMo MLX loader path so custom 6-bit qkv/quant key normalization is active."
+  - "The script exercises local PipelineShardMetadata-style layer slicing/evaluation without requiring a real mx.distributed group, JACCL coordinator, libp2p, exo API, or generation."
+  - "The script records per-layer diagnostics including timestamp, absolute/global layer index, local layer ordinal, MLX active/cache/peak bytes, process RSS/ru_maxrss, and basic device memory fields when available."
+  - "The script writes JSONL diagnostics to a timestamped artifact under /Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/ by default, creating directories as needed."
+  - "The script has a dry-run mode that validates config/model path/metadata and prints the planned layer range without evaluating model weights."
+  - "A lightweight test or import/syntax check verifies the script CLI/dry-run path without loading the full model."
+  - "Focused tests/checks pass locally and are reported in the final summary."
+  - "Final summary identifies exact files changed, exact command to run on Studio1, and explicitly states that no live exo restart/placement/generation was performed."
+
+ontology_schema:
+  name: "MiMoTrackARank1LoadProbe"
+  description: "Narrow diagnostic artifact for MiMo V2.5 Pro custom 6-bit MLX rank-1 shard load isolation."
+  fields:
+    - name: "model_id"
+      field_type: "string"
+      description: "Target model identifier; must remain XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX / Pro base."
+    - name: "artifact"
+      field_type: "string"
+      description: "Probe script path or diagnostics output path."
+    - name: "safety_boundary"
+      field_type: "string"
+      description: "Operations explicitly forbidden from the probe and workflow."
+    - name: "verification"
+      field_type: "string"
+      description: "Focused command/test evidence."
+
+metadata:
+  seed_id: "mimo-track-a-rank1-load-probe-20260506"
+  project: "Agent Workflow"
+  linear_issue: "CON-75"
+  repo: "/Users/studio2/exo"
+  active_model: "XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX"
+  base_model: "XiaomiMiMo/MiMo-V2.5-Pro"
+  signal9_evidence: "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/signal9-20260506T162535Z/summary.md"
+  ambiguity_score: 0.08

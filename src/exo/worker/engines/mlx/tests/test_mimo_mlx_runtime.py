@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from typing import cast
 
+import mlx.core as mx
 import mlx_lm.utils as mlx_lm_utils
 
 
@@ -97,3 +98,63 @@ def test_mimo_v25_pro_local_config_is_compatible_with_mlx_lm_mimo_v2_flash() -> 
     assert config["num_hidden_layers"] >= 1
     assert isinstance(config["hidden_size"], int)
     assert config["hidden_size"] > 0
+
+
+def test_mimo_v25_pro_sanitize_splits_fused_qkv_and_normalizes_quantized_keys() -> None:
+    importlib.import_module("exo.worker.engines.mlx.utils_mlx")
+    from mlx_lm.models.mimo_v2_flash import Model, ModelArgs
+
+    config = {
+        "model_type": "mimo_v2",
+        "num_experts_per_tok": 1,
+        "hybrid_layer_pattern": [0, 1],
+        "moe_layer_freq": [0, 1],
+        "add_swa_attention_sink_bias": False,
+        "add_full_attention_sink_bias": False,
+        "sliding_window_size": 16,
+        "vocab_size": 32,
+        "hidden_size": 4,
+        "intermediate_size": 8,
+        "moe_intermediate_size": 8,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "n_shared_experts": None,
+        "n_routed_experts": 2,
+        "routed_scaling_factor": 1.0,
+        "topk_method": "noaux_tc",
+        "scoring_func": "sigmoid",
+        "norm_topk_prob": True,
+        "n_group": 1,
+        "topk_group": 1,
+        "max_position_embeddings": 128,
+        "layernorm_epsilon": 1e-6,
+        "rope_theta": 10000,
+        "swa_rope_theta": 10000,
+        "swa_num_attention_heads": 2,
+        "swa_num_key_value_heads": 1,
+        "head_dim": 2,
+        "v_head_dim": 2,
+        "swa_head_dim": 2,
+        "swa_v_head_dim": 2,
+        "partial_rotary_factor": 1,
+    }
+    model = Model(ModelArgs.from_dict(config))
+    weights = {
+        "model.layers.0.self_attn.qkv_proj.weight": mx.arange(32).reshape(8, 4),
+        "model.layers.0.self_attn.qkv_proj.weight.scales": mx.arange(16).reshape(8, 2),
+        "model.layers.0.self_attn.qkv_proj.weight.biases": mx.arange(16).reshape(8, 2),
+        "model.layers.0.self_attn.o_proj.weight": mx.arange(16).reshape(4, 4),
+        "model.layers.0.self_attn.o_proj.weight.scales": mx.arange(8).reshape(4, 2),
+        "model.layers.0.self_attn.o_proj.weight.biases": mx.arange(8).reshape(4, 2),
+    }
+
+    sanitized = model.sanitize(weights)
+
+    assert "model.layers.0.self_attn.qkv_proj.weight" not in sanitized
+    assert sanitized["model.layers.0.self_attn.q_proj.weight"].shape == (4, 4)
+    assert sanitized["model.layers.0.self_attn.k_proj.weight"].shape == (2, 4)
+    assert sanitized["model.layers.0.self_attn.v_proj.weight"].shape == (2, 4)
+    assert "model.layers.0.self_attn.o_proj.weight.scales" not in sanitized
+    assert sanitized["model.layers.0.self_attn.o_proj.scales"].shape == (4, 2)
+    assert sanitized["model.layers.0.self_attn.o_proj.biases"].shape == (4, 2)
