@@ -147,16 +147,42 @@ Observed live failure:
 
 Interpretation: the tail-cap patch fixed the known unsafe `[36,70)` tail placement, but live loading still fails with the larger 38-layer front shard. The next useful experiment is not another identical live retry; isolate the front-shard limit on Studio1 (for example bounded standalone `[0,N)` front probes or a 3-way/more granular split strategy) or pursue layer-local artifact reshaping / loader memory hygiene.
 
+## Front-shard isolation — 2026-05-07T02:50Z
+
+Scope: bounded standalone Studio1 probes only. No exo API/live cluster, JACCL, libp2p, distributed init, generation, or downloads were started. The existing `mimo_track_a_rank1_bisect_probe.py` / `mimo_track_a_rank1_load_probe.py` path already supports front ranges by setting `--start-layer 0`, `--device-rank 0`, and `--world-size 2`; no probe-code change was needed.
+
+Evidence root:
+
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/front-shard-probe-20260507T025025Z/`
+- Dry-run manifest: `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/front-shard-probe-20260507T025025Z/mimo-track-a-rank1-bisect-manifest-20260507T025058Z.jsonl`
+- Execute manifest: `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/front-shard-probe-20260507T025025Z/mimo-track-a-rank1-bisect-manifest-20260507T025108Z.jsonl`
+- Post-probe memory diagnostic: `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/front-shard-probe-20260507T025025Z/studio1-post-probe-memory.txt`
+
+Observed bounded front-shard results on Studio1:
+
+- `[0,30)`: exit `0`, completed; active `322.42 GB`, peak `333.30 GB`, process RSS `16,192,496 KiB`.
+- `[0,31)`: exit `0`, completed; active `333.53 GB`, peak `344.40 GB`, process RSS `16,200,096 KiB`.
+- `[0,32)`: exit `0`, completed; active `344.63 GB`, peak `355.50 GB`, process RSS `15,995,440 KiB`.
+- `[0,33)`: exit `0`, completed; active `355.73 GB`, peak `366.60 GB`, process RSS `15,761,392 KiB`.
+- `[0,34)`: exit `-9` (`SIGKILL`) after recording `after-layer-eval` for global layer `32`; last active `355.73 GB`, peak `366.60 GB`, process RSS `15,746,848 KiB`.
+- `[0,35)`: exit `-9` (`SIGKILL`) after global layer `32`; last active `355.73 GB`, peak `366.60 GB`, process RSS `15,531,536 KiB`.
+- `[0,36)`: exit `-9` (`SIGKILL`) after global layer `32`; last active `355.73 GB`, peak `366.60 GB`, process RSS `15,528,144 KiB`.
+- `[0,37)`: exit `-9` (`SIGKILL`) after global layer `31`; last active `344.63 GB`, peak `355.50 GB`, process RSS `15,760,304 KiB`.
+- `[0,38)`: exit `-9` (`SIGKILL`) after global layer `32`; last active `355.73 GB`, peak `366.60 GB`, process RSS `15,547,616 KiB`.
+
+Post-probe Studio1 recovered to `kern.memorystatus_level: 98`, swap used `125.75 MiB`, and no probe processes remained.
+
+Conclusion: the standalone front-shard limit on Studio1 is `[0,33)` for this probe style; `[0,34)` and larger front shards SIGKILL. Combined with the already observed safe tail limit of 32 layers (`[38,70)` passes, `[36,69)` / `[36,70)` fail), there is no safe two-node pure-pipeline split for the 70-layer MiMo V2.5-Pro 6bit artifact under the current loader/artifact behavior: max safe front `33` + max safe tail `32` covers only `65` layers. The previous two-node placement patch that yields `[0,38)` + `[38,70)` remains necessary for the tail but is not sufficient and must not be retried unchanged. Track A needs a more granular/multi-node placement strategy or loader/artifact memory reduction before any true live launch.
+
 ## Safe resume plan
 
-1. Keep live Track A stopped after the failed `[0,38)` + `[38,70)` retry.
+1. Keep live Track A stopped after the failed `[0,38)` + `[38,70)` retry and the standalone front-probe failures for `[0,34)` and larger.
 2. Do not retry the same two-node live placement unchanged; it already failed on the 38-layer front shard.
 3. Verified post-reboot bounded standalone probes on Studio1:
    - `[36,60)`, `[36,62)`, `[36,65)`, `[36,67)`, `[36,68)`, and `[38,70)` passed.
    - `[36,69)` and `[36,70)` SIGKILL after global layer `67`.
 4. Patched pure pipeline placement for `XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX` on two nodes to cap the tail shard at 32 layers, yielding `[0,38)` + `[38,70)` instead of the old unsafe `[0,36)` + `[36,70)`. This patch is necessary but not sufficient for live readiness.
-5. Before another live retry, add one isolating change:
-   - bounded front-shard standalone probes on Studio1 to find `[0,N)` limit,
+5. Before another live retry, do not pursue a two-node pure-pipeline launch. The front-shard isolation found `[0,33)` as the largest passing standalone front range, so the next isolating change must be one of:
    - a more granular/multi-node split strategy,
    - layer-local re-sharding/conversion,
    - or loader allocator/cache cleanup between layer materializations.
