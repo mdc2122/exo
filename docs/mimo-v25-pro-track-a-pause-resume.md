@@ -4,7 +4,7 @@ Paused: 2026-05-06T17:30:54Z
 
 ## Status
 
-Track A for `XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX` was resumed after Studio2 reboot using the bounded Studio1 standalone rank-1 probe plan. The unsafe condition is tail shard size, not the absolute ending layer: `[36,68)` completes as a 32-layer tail shard, while `[36,69)` and `[36,70)` SIGKILL after evaluating global layer `67`. A follow-up probe verified the full tail `[38,70)` also completes as 32 layers. Do not restart live Track A placement/generation with the old rank-1 `[36,70)` split; use the patched 2-node split `[0,38)` + `[38,70)` or implement a different placement/load strategy first.
+Track A for `XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX` was resumed after Studio2 reboot using the bounded Studio1 standalone rank-1 probe plan. The unsafe condition is tail shard size, not the absolute ending layer: `[36,68)` completes as a 32-layer tail shard, while `[36,69)` and `[36,70)` SIGKILL after evaluating global layer `67`. A follow-up probe verified the full tail `[38,70)` also completes as 32 layers. A guarded live two-node retry with patched placement did produce the intended split `[0,38)` + `[38,70)`, but rank 0 on Studio1 was SIGKILLed while loading the 38-layer front shard after `layer_loaded=30`. Track A therefore remains blocked at live model load; do not retry the same live split without a new isolating change.
 
 ## What is preserved in git
 
@@ -16,6 +16,8 @@ Key commits:
 - `f59b9bb9` — `CON-75: add MiMo rank1 load probe artifact`
 - `425c334b` — `CON-75: add MiMo rank1 bisect probe seed`
 - `9c079b10` — `CON-75: add MiMo rank1 bisect probe artifact`
+- `9b9e47fd` — `CON-75: record MiMo Track A bisect threshold`
+- `9f74b4fe` — `CON-75: cap MiMo Pro tail shard placement`
 
 Tracked resume artifacts:
 
@@ -117,20 +119,53 @@ GLM 5.1 did not hit the same file-cache/compressed-memory cliff as severely desp
 
 Working hypothesis: the fatal memory pressure is not simply total model size. It is the combination of MiMo's global expert-shard file layout, high per-layer key/file fanout, generic/sanitize load path, and the current rank split `[36,70)` causing many large mapped files plus MLX/Metal materialization/compressor pressure to accumulate.
 
+## Live two-node retry result
+
+A guarded live Track A retry was run after syncing the patched placement code to Studio1 candidate repo. Preflight showed the cluster formed, `/instance/previews` returned the intended two-node pure-pipeline placement, and `/instance` accepted the create command.
+
+Evidence root:
+
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/track-a-live-smoke-20260507T010755Z/summary.txt`
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/track-a-live-smoke-20260507T010755Z/studio1.log`
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/track-a-live-smoke-20260507T010755Z/studio2.log`
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/track-a-live-smoke-20260507T010755Z/api-state-summary.json`
+
+Observed live placement:
+
+- Instance: `b2f96b73-ec48-48f6-a2a1-0c218bdef473`
+- Rank 0 / Studio1: `[0,38)`
+- Rank 1 / Studio2: `[38,70)`
+
+Observed live failure:
+
+- Studio1 rank 0 progressed through `layer_loaded=30` of `total_layers=38`.
+- Last Studio1 MLX diagnostic before death: active `333.53 GiB`, peak `344.40 GiB`, cache `10.13 GiB`, process pid `25808`.
+- Studio1 runner exited with code `-9`; log records `Runner terminated with signal=9 (Killed: 9)` and `RuntimeError: Runner found to be dead`.
+- Studio2 rank 1 progressed through `layer_loaded=31` of `total_layers=32`, with active `355.24 GiB`, peak `366.11 GiB`, then entered runner churn after the peer rank died.
+- No text-generation smoke was attempted because model load did not complete.
+- The live cluster was stopped after preserving evidence; re-check ports before any later resume.
+
+Interpretation: the tail-cap patch fixed the known unsafe `[36,70)` tail placement, but live loading still fails with the larger 38-layer front shard. The next useful experiment is not another identical live retry; isolate the front-shard limit on Studio1 (for example bounded standalone `[0,N)` front probes or a 3-way/more granular split strategy) or pursue layer-local artifact reshaping / loader memory hygiene.
+
 ## Safe resume plan
 
-1. Keep old Track A `[36,70)` live placement stopped.
-2. Do not restart 2-node live exo placement with the old rank split.
+1. Keep live Track A stopped after the failed `[0,38)` + `[38,70)` retry.
+2. Do not retry the same two-node live placement unchanged; it already failed on the 38-layer front shard.
 3. Verified post-reboot bounded standalone probes on Studio1:
    - `[36,60)`, `[36,62)`, `[36,65)`, `[36,67)`, `[36,68)`, and `[38,70)` passed.
    - `[36,69)` and `[36,70)` SIGKILL after global layer `67`.
-4. Patched pure pipeline placement for `XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX` on two nodes to cap the tail shard at 32 layers, yielding `[0,38)` + `[38,70)` instead of the old unsafe `[0,36)` + `[36,70)`.
-5. If full model quality requires a different split, implement a different load strategy first (for example more granular/pipeline split, layer-local re-sharding/conversion, or allocator/cache cleanup between layer materializations) before retrying live.
-6. After any live retry, capture `vm_stat`, `sysctl vm.swapusage kern.memorystatus_level`, process state, probe/placement logs, API health, and generation evidence.
-7. If reduced live split still SIGKILLs, treat as broader MLX/Metal allocator or artifact-layout issue; consider re-sharding/converting MiMo artifact into more layer-local files before another live Track A attempt.
+4. Patched pure pipeline placement for `XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX` on two nodes to cap the tail shard at 32 layers, yielding `[0,38)` + `[38,70)` instead of the old unsafe `[0,36)` + `[36,70)`. This patch is necessary but not sufficient for live readiness.
+5. Before another live retry, add one isolating change:
+   - bounded front-shard standalone probes on Studio1 to find `[0,N)` limit,
+   - a more granular/multi-node split strategy,
+   - layer-local re-sharding/conversion,
+   - or loader allocator/cache cleanup between layer materializations.
+6. After any future live retry, capture `vm_stat`, `sysctl vm.swapusage kern.memorystatus_level`, process state, placement logs, API health, and generation evidence if load completes.
+7. If any reduced live split still SIGKILLs, treat as broader MLX/Metal allocator or artifact-layout issue; consider re-sharding/converting MiMo artifact into more layer-local files before another live Track A attempt.
 
 ## Do not touch unless explicitly part of Track A resume
 
 - Do not restart Kimi as part of this handoff.
 - Do not run MiMo live cluster/generation with the old `[36,70)` rank-1 split.
+- Do not retry the patched live `[0,38)` + `[38,70)` split unchanged; it now has preserved failure evidence.
 - Do not delete the evidence bundles; they are resume-critical.
