@@ -169,3 +169,29 @@ Interpretation: the tail-cap patch fixed the known unsafe `[36,70)` tail placeme
 - Do not run MiMo live cluster/generation with the old `[36,70)` rank-1 split.
 - Do not retry the patched live `[0,38)` + `[38,70)` split unchanged; it now has preserved failure evidence.
 - Do not delete the evidence bundles; they are resume-critical.
+
+## Dashboard picker identity fix — 2026-05-06T21:45 local / 2026-05-07T04:45Z
+
+Scope: dashboard/API-only smoke on Studio2 at `http://localhost:52575`; no worker, no downloads, and no live MiMo two-node load was started.
+
+Finding: `/v1/models` correctly advertises `XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX` with `name = MiMo-V2.5-Pro-6bit-MLX`, `quantization = 6bit-mlx-affine`, and `base_model = XiaomiMiMo/MiMo-V2.5-Pro`. The picker grouped rows by `base_model` and used the group name as the visible label. Because this custom card's `base_model` is a full model id, the row label collapsed to the generic parent (`XiaomiMiMo/MiMo-V2.5-Pro` / `MiMo-V2.5-Pro`) while search matched the hidden variant id/quantization. The card was therefore searchable by `6bit` but not visibly distinguishable as the custom 6-bit MLX variant.
+
+Patch: preserve row identity for custom/full-id-base variants in the picker instead of folding them under the parent base model, and show a compact quantization badge for single-variant rows. Normal grouped variants with display-style base names (for example `Qwen3 Coder Next`, `GLM 4.7`, `MiniMax M2.5`) remain grouped.
+
+Verification:
+
+```bash
+cd dashboard && npm run build
+curl -sS http://localhost:52575/v1/models | python -m json.tool | rg -n "XiaomiMiMo|MiMo-V2.5-Pro|6bit" -C 2
+lsof -nP -iTCP:52575 -sTCP:LISTEN
+```
+
+Observed API/dashboard smoke process remained:
+
+```text
+/Users/studio2/exo/.venv/bin/exo --no-worker --no-downloads --api-port 52575 --libp2p-port 0
+```
+
+Playwright browser verification from `/tmp` searched both `6bit` and `MiMo-V2.5-Pro-6bit`; both displayed `MiMo-V2.5-Pro-6bit-MLX`, `6bit-mlx-affine`, and `834GB` in the picker. Screenshot artifact: `/tmp/mimo-pro-6bit-picker-search.png`.
+
+Readiness: dashboard/model-card visibility is ready for guarded operator testing from `http://localhost:52575`. Live MiMo Pro 6-bit inference is **not** ready: the preserved Track A live load still failed before generation with Studio1 rank 0 signal-9 killed after `layer_loaded=30/38` for the patched `[0,38)` + `[38,70)` placement. Do not retry that identical live split unchanged.

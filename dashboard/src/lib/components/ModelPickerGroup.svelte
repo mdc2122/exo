@@ -81,6 +81,10 @@
     return `${mb}MB`;
   }
 
+  function getSingleVariantBadge(model: ModelInfo | undefined): string {
+    return model?.quantization || "";
+  }
+
   function timeAgo(ts: number): string {
     const seconds = Math.floor((Date.now() - ts) / 1000);
     if (seconds < 60) return "just now";
@@ -213,6 +217,13 @@
         <span class="font-mono text-sm text-white truncate">
           {group.name}
         </span>
+        {#if !group.hasMultipleVariants && getSingleVariantBadge(group.smallestVariant)}
+          <span
+            class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-white/60 flex-shrink-0"
+          >
+            {getSingleVariantBadge(group.smallestVariant)}
+          </span>
+        {/if}
         <!-- Capability icons -->
         {#each group.capabilities.filter((c) => c !== "text") as cap}
           {#if cap === "thinking"}

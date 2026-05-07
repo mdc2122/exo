@@ -379,13 +379,38 @@
     return hfTrendingModels;
   });
 
-  // Group models by base_model
+  function getVariantSearchText(model: ModelInfo): string {
+    return [
+      model.id,
+      model.name || "",
+      model.base_model || "",
+      model.quantization || "",
+    ]
+      .join(" ")
+      .toLowerCase();
+  }
+
+  function isFullModelIdLabel(value: string | undefined): boolean {
+    return !!value && value.includes("/");
+  }
+
+  function shouldPreserveVariantIdentity(model: ModelInfo): boolean {
+    return model.is_custom === true || isFullModelIdLabel(model.base_model);
+  }
+
+  // Group models by base_model while preserving custom/full-id variants as
+  // distinct rows so their repo/quantization suffix remains visible.
   const groupedModels = $derived.by((): ModelGroup[] => {
     const groups = new Map<string, ModelGroup>();
 
     for (const model of models) {
-      const groupId = model.base_model || model.id;
-      const groupName = model.base_model || model.name || model.id;
+      const preserveVariantIdentity = shouldPreserveVariantIdentity(model);
+      const groupId = preserveVariantIdentity
+        ? model.id
+        : model.base_model || model.id;
+      const groupName = preserveVariantIdentity
+        ? model.name || model.id
+        : model.base_model || model.name || model.id;
 
       if (!groups.has(groupId)) {
         groups.set(groupId, {
@@ -492,11 +517,7 @@
       result = result.filter(
         (g) =>
           g.name.toLowerCase().includes(query) ||
-          g.variants.some(
-            (v) =>
-              v.id.toLowerCase().includes(query) ||
-              (v.name || "").toLowerCase().includes(query),
-          ),
+          g.variants.some((v) => getVariantSearchText(v).includes(query)),
       );
     }
 
@@ -599,12 +620,7 @@
     return recentGroups.filter(
       (g) =>
         g.name.toLowerCase().includes(query) ||
-        g.variants.some(
-          (v) =>
-            v.id.toLowerCase().includes(query) ||
-            (v.name || "").toLowerCase().includes(query) ||
-            (v.quantization || "").toLowerCase().includes(query),
-        ),
+        g.variants.some((v) => getVariantSearchText(v).includes(query)),
     );
   });
 
