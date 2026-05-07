@@ -4,7 +4,7 @@ from collections.abc import Generator, Mapping
 
 from loguru import logger
 
-from exo.shared.models.model_cards import ModelCard
+from exo.shared.models.model_cards import MIMO_V25_PRO_6BIT_MLX_MODEL_ID, ModelCard
 from exo.shared.topology import Topology
 from exo.shared.types.common import Host, NodeId
 from exo.shared.types.memory import Memory
@@ -18,6 +18,8 @@ from exo.shared.types.worker.shards import (
     ShardMetadata,
     TensorShardMetadata,
 )
+
+MIMO_V25_PRO_6BIT_TWO_NODE_TAIL_MAX_LAYERS = 32
 
 
 def filter_cycles_by_memory(
@@ -202,6 +204,33 @@ def _get_shard_assignments_for_cfg_parallel(
     )
 
 
+def _apply_mimo_v25_pro_6bit_tail_cap(
+    model_card: ModelCard,
+    cycle: Cycle,
+    layer_allocations: list[int],
+) -> list[int]:
+    """Keep the two-node MiMo Pro 6-bit tail shard within the probed safe size.
+
+    Studio1 standalone probes showed a 32-layer tail shard (`[38,70)`) completes,
+    while 33+ layer tail shards (`[36,69)`/`[36,70)`) SIGKILL under memory
+    pressure. The model still needs full layer coverage, so shift the split
+    earlier-stage-heavy instead of dropping tail layers.
+    """
+    if model_card.model_id != MIMO_V25_PRO_6BIT_MLX_MODEL_ID:
+        return layer_allocations
+    if model_card.n_layers != 70 or len(cycle) != 2 or len(layer_allocations) != 2:
+        return layer_allocations
+    tail_layers = layer_allocations[-1]
+    if tail_layers <= MIMO_V25_PRO_6BIT_TWO_NODE_TAIL_MAX_LAYERS:
+        return layer_allocations
+
+    adjusted = list(layer_allocations)
+    excess_layers = tail_layers - MIMO_V25_PRO_6BIT_TWO_NODE_TAIL_MAX_LAYERS
+    adjusted[-2] += excess_layers
+    adjusted[-1] = MIMO_V25_PRO_6BIT_TWO_NODE_TAIL_MAX_LAYERS
+    return adjusted
+
+
 def _get_shard_assignments_for_pure_pipeline(
     model_card: ModelCard,
     cycle: Cycle,
@@ -213,6 +242,9 @@ def _get_shard_assignments_for_pure_pipeline(
 
     layer_allocations = _allocate_and_validate_layers(
         cycle.node_ids, node_memory, total_memory, model_card
+    )
+    layer_allocations = _apply_mimo_v25_pro_6bit_tail_cap(
+        model_card, cycle, layer_allocations
     )
 
     runner_to_shard: dict[RunnerId, ShardMetadata] = {}

@@ -4,7 +4,7 @@ Paused: 2026-05-06T17:30:54Z
 
 ## Status
 
-Track A for `XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX` was resumed after Studio2 reboot using the bounded Studio1 standalone rank-1 probe plan. The safe per-rank split is now narrowed: `[36,68)` completes, while `[36,69)` and `[36,70)` SIGKILL after evaluating global layer `67` and before recording layer `68`. Do not restart live Track A placement/generation with the old rank-1 `[36,70)` split; use a safer split such as rank-1 ending at `68` or implement a different placement/load strategy first.
+Track A for `XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX` was resumed after Studio2 reboot using the bounded Studio1 standalone rank-1 probe plan. The unsafe condition is tail shard size, not the absolute ending layer: `[36,68)` completes as a 32-layer tail shard, while `[36,69)` and `[36,70)` SIGKILL after evaluating global layer `67`. A follow-up probe verified the full tail `[38,70)` also completes as 32 layers. Do not restart live Track A placement/generation with the old rank-1 `[36,70)` split; use the patched 2-node split `[0,38)` + `[38,70)` or implement a different placement/load strategy first.
 
 ## What is preserved in git
 
@@ -64,7 +64,7 @@ ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null studio1@Studio1s
 
 ## Blocker evidence
 
-Main blocker: Studio1 rank-1 shard `[36,69)` / `[36,70)` hard-kills during layer evaluation from memory pressure. After the Studio2 reboot and bounded resume probes, `[36,68)` completes; the failure threshold is the next layer interval.
+Main blocker: Studio1 rank-1 shard `[36,69)` / `[36,70)` hard-kills during layer evaluation from memory pressure. After the Studio2 reboot and bounded resume probes, 32-layer tail shards complete (`[36,68)` and `[38,70)`), while 33+ layer tail shards fail.
 
 Evidence roots:
 
@@ -77,6 +77,7 @@ Evidence roots:
 - `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/mimo-track-a-rank1-bisect-manifest-20260506T224047Z.jsonl` — `[36,68)` passed
 - `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/mimo-track-a-rank1-bisect-manifest-20260506T224217Z.jsonl` — `[36,69)` SIGKILL
 - `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/mimo-track-a-rank1-bisect-manifest-20260506T223851Z.jsonl` — `[36,70)` SIGKILL
+- `/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe/mimo-track-a-rank1-load-probe-20260507Ttail-38-70.jsonl` — `[38,70)` passed
 
 Key observed values from the post-reboot bounded Studio1 probes:
 
@@ -87,6 +88,7 @@ Key observed values from the post-reboot bounded Studio1 probes:
 - `[36,68)`: exit `0`, active `330.84 GiB`, peak `340.96 GiB`, cache `10.13 GiB`.
 - `[36,69)`: exit `-9` (`SIGKILL`) after recording `after-layer-eval` for global layer `67`; last active `330.84 GiB`, peak `340.96 GiB`, cache `10.13 GiB`.
 - `[36,70)`: exit `-9` (`SIGKILL`) after recording `after-layer-eval` for global layer `67`; last active `330.84 GiB`, peak `340.96 GiB`, cache `10.13 GiB`.
+- `[38,70)`: exit `0`, active `330.84 GiB`, peak `340.96 GiB`, cache `10.13 GiB`; records `complete` after global layer `69`.
 - Post-probe Studio1 state recovered to `kern.memorystatus_level: 98`, swap used about `44.94 MiB`, and no rank-1 probe processes remained.
 
 Earlier key observed values from standalone rank-1 probe:
@@ -120,10 +122,10 @@ Working hypothesis: the fatal memory pressure is not simply total model size. It
 1. Keep old Track A `[36,70)` live placement stopped.
 2. Do not restart 2-node live exo placement with the old rank split.
 3. Verified post-reboot bounded standalone probes on Studio1:
-   - `[36,60)`, `[36,62)`, `[36,65)`, `[36,67)`, `[36,68)` passed.
+   - `[36,60)`, `[36,62)`, `[36,65)`, `[36,67)`, `[36,68)`, and `[38,70)` passed.
    - `[36,69)` and `[36,70)` SIGKILL after global layer `67`.
-4. Next implementation step: adjust placement/rank split so Studio1 rank-1 ends at `68` or below, then run live Track A only after verifying the new split does not assign layer `68+` to the same rank-1 shard.
-5. If full model quality requires layers `68..69` on Studio1, implement a different load strategy first (for example more granular/pipeline split, layer-local re-sharding/conversion, or allocator/cache cleanup between layer materializations) before retrying live.
+4. Patched pure pipeline placement for `XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX` on two nodes to cap the tail shard at 32 layers, yielding `[0,38)` + `[38,70)` instead of the old unsafe `[0,36)` + `[36,70)`.
+5. If full model quality requires a different split, implement a different load strategy first (for example more granular/pipeline split, layer-local re-sharding/conversion, or allocator/cache cleanup between layer materializations) before retrying live.
 6. After any live retry, capture `vm_stat`, `sysctl vm.swapusage kern.memorystatus_level`, process state, probe/placement logs, API health, and generation evidence.
 7. If reduced live split still SIGKILLs, treat as broader MLX/Metal allocator or artifact-layout issue; consider re-sharding/converting MiMo artifact into more layer-local files before another live Track A attempt.
 

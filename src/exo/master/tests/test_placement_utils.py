@@ -12,7 +12,12 @@ from exo.master.tests.conftest import (
     create_node_memory,
     create_socket_connection,
 )
-from exo.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from exo.shared.models.model_cards import (
+    MIMO_V25_PRO_6BIT_MLX_MODEL_ID,
+    ModelCard,
+    ModelId,
+    ModelTask,
+)
 from exo.shared.topology import Topology
 from exo.shared.types.common import NodeId
 from exo.shared.types.memory import Memory
@@ -276,6 +281,60 @@ def test_get_shard_assignments(
         - shard_assignments.runner_to_shard[runner_id_c].start_layer
         == expected_layers[2]
     )
+
+
+def test_mimo_v25_pro_6bit_two_node_pipeline_caps_tail_shard_at_32_layers():
+    node_a_id = NodeId()
+    node_b_id = NodeId()
+    topology = Topology()
+    topology.add_node(node_a_id)
+    topology.add_node(node_b_id)
+    topology.add_connection(
+        Connection(
+            source=node_a_id,
+            sink=node_b_id,
+            edge=create_socket_connection(1),
+        )
+    )
+    topology.add_connection(
+        Connection(
+            source=node_b_id,
+            sink=node_a_id,
+            edge=create_socket_connection(2),
+        )
+    )
+    cycle = next(cycle for cycle in topology.get_cycles() if len(cycle) == 2)
+
+    model_card = ModelCard(
+        model_id=MIMO_V25_PRO_6BIT_MLX_MODEL_ID,
+        n_layers=70,
+        storage_size=Memory.from_gb(896),
+        hidden_size=1,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        architecture="MiMoV2ForCausalLM",
+        family="mimo",
+        quantization="6bit-mlx-affine",
+        base_model="XiaomiMiMo/MiMo-V2.5-Pro",
+    )
+    node_memory = {
+        node_a_id: create_node_memory(512 * 1024**3),
+        node_b_id: create_node_memory(480 * 1024**3),
+    }
+
+    assignments = get_shard_assignments_for_pipeline_parallel(
+        model_card, cycle, node_memory
+    )
+    shard_a = assignments.runner_to_shard[assignments.node_to_runner[node_a_id]]
+    shard_b = assignments.runner_to_shard[assignments.node_to_runner[node_b_id]]
+
+    assert isinstance(shard_a, PipelineShardMetadata)
+    assert isinstance(shard_b, PipelineShardMetadata)
+    shard_ranges = sorted(
+        (shard.start_layer, shard.end_layer)
+        for shard in (shard_a, shard_b)
+    )
+    assert shard_ranges == [(0, 38), (38, 70)]
 
 
 def test_get_mlx_jaccl_coordinators():
