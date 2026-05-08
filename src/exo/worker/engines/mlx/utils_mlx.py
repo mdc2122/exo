@@ -41,6 +41,7 @@ import contextlib
 import mlx.core as mx
 import mlx.nn as nn
 import mlx_lm.utils as mlx_lm_utils
+from mlx.nn import QuantizedLinear
 from pydantic import RootModel
 
 from exo.download.download_utils import build_model_path
@@ -122,6 +123,55 @@ except ImportError:
     pass
 
 load_model = mlx_lm_utils.load_model
+
+
+def _mimo_exo_quant_metadata_dtype() -> mx.Dtype | None:
+    value = os.environ.get("EXO_MIMO_QUANT_METADATA_DTYPE", "float16").lower()
+    if value in {"", "none", "f32", "float32"}:
+        return None
+    if value in {"f16", "float16"}:
+        return mx.float16
+    if value in {"bf16", "bfloat16"}:
+        return mx.bfloat16
+    raise ValueError(
+        "EXO_MIMO_QUANT_METADATA_DTYPE must be one of float16, bfloat16, float32, none"
+    )
+
+
+def _downcast_mimo_quant_metadata(model: nn.Module) -> None:
+    """Reduce MiMo 6-bit scale/bias metadata overhead after lazy load.
+
+    Our custom 6-bit artifact stores every QuantizedLinear scale and affine bias
+    as float32. Those two metadata arrays account for roughly 127 GB on disk and
+    at runtime. The inferencerlabs 4.3bpw artifact fits because it uses a much
+    denser INF format; for our MLX-affine format, downcasting metadata is the
+    smallest fast-path optimization that preserves 6-bit packed weights while
+    reclaiming about 64 GB per full model, or about 32 GB per 2-way tensor rank.
+    """
+    dtype = _mimo_exo_quant_metadata_dtype()
+    if dtype is None:
+        return
+
+    converted = 0
+    for _, module in model.named_modules():
+        if not isinstance(module, QuantizedLinear):
+            continue
+        updates: dict[str, mx.array] = {}
+        scales = module.get("scales")
+        if isinstance(scales, mx.array) and scales.dtype == mx.float32:
+            updates["scales"] = scales.astype(dtype)
+        biases = module.get("biases")
+        if isinstance(biases, mx.array) and biases.dtype == mx.float32:
+            updates["biases"] = biases.astype(dtype)
+        if updates:
+            module.update(updates)
+            converted += len(updates)
+    logger.info(
+        "MiMo quant metadata downcast complete: converted {} arrays to {}",
+        converted,
+        dtype,
+    )
+
 
 Group = mx.distributed.Group
 
@@ -423,6 +473,8 @@ def shard_and_load(
     model_path = build_model_path(shard_metadata.model_card.model_id)
 
     model, _ = load_model(model_path, lazy=True, strict=False)
+    if shard_metadata.model_card.family == "mimo" and shard_metadata.model_card.quantization == "6bit-mlx-affine":
+        _downcast_mimo_quant_metadata(model)
     logger.debug("loaded model class=%s path=%s", type(model).__name__, model_path)
     if hasattr(model, "model") and isinstance(model.model, DeepseekV3Model):  # type: ignore
         pass

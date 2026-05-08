@@ -4,7 +4,7 @@ from collections.abc import Generator, Mapping
 
 from loguru import logger
 
-from exo.shared.models.model_cards import MIMO_V25_PRO_6BIT_MLX_MODEL_ID, ModelCard
+from exo.shared.models.model_cards import MIMO_V25_PRO_MODEL_IDS, ModelCard
 from exo.shared.topology import Topology
 from exo.shared.types.common import Host, NodeId
 from exo.shared.types.memory import Memory
@@ -18,8 +18,6 @@ from exo.shared.types.worker.shards import (
     ShardMetadata,
     TensorShardMetadata,
 )
-
-MIMO_V25_PRO_6BIT_TWO_NODE_TAIL_MAX_LAYERS = 32
 
 
 def filter_cycles_by_memory(
@@ -204,31 +202,55 @@ def _get_shard_assignments_for_cfg_parallel(
     )
 
 
-def _apply_mimo_v25_pro_6bit_tail_cap(
+def _is_mimo_v25_pro_6bit_card(model_card: ModelCard) -> bool:
+    return model_card.model_id in MIMO_V25_PRO_MODEL_IDS and model_card.n_layers == 70
+
+
+def _validate_mimo_v25_pro_6bit_text_only_card(model_card: ModelCard) -> None:
+    """Reject Pro 6-bit placement if model metadata regresses into media support."""
+    if not _is_mimo_v25_pro_6bit_card(model_card):
+        return
+
+    declared_capabilities = {capability.lower() for capability in model_card.capabilities}
+    if declared_capabilities != {"text", "agentic", "long-context"}:
+        raise ValueError(
+            "MiMo V2.5-Pro 6bit MLX placement requires capabilities exactly "
+            "text, agentic, long-context"
+        )
+    if model_card.quantization != "6bit-mlx-affine":
+        raise ValueError(
+            "MiMo V2.5-Pro 6bit MLX placement requires quantization "
+            "6bit-mlx-affine"
+        )
+
+
+def _apply_mimo_v25_pro_6bit_live_safety_caps(
     model_card: ModelCard,
     cycle: Cycle,
     layer_allocations: list[int],
 ) -> list[int]:
-    """Keep the two-node MiMo Pro 6-bit tail shard within the probed safe size.
+    """Validate MiMo Pro 6-bit placement metadata without imposing stale node-count caps.
 
-    Studio1 standalone probes showed a 32-layer tail shard (`[38,70)`) completes,
-    while 33+ layer tail shards (`[36,69)`/`[36,70)`) SIGKILL under memory
-    pressure. The model still needs full layer coverage, so shift the split
-    earlier-stage-heavy instead of dropping tail layers.
+    The live target for MiMo Pro 6-bit is the corrected Studio1+Studio2 two-node
+    cluster. Previous front/tail probe caps came from an obsolete artifact path
+    and incorrectly forced two-node placements to fail before live selected-worker
+    memory could be checked. Keep the text-only/quantization fail-closed guard,
+    then let proportional memory placement produce a concrete full-70 candidate.
     """
-    if model_card.model_id != MIMO_V25_PRO_6BIT_MLX_MODEL_ID:
-        return layer_allocations
-    if model_card.n_layers != 70 or len(cycle) != 2 or len(layer_allocations) != 2:
-        return layer_allocations
-    tail_layers = layer_allocations[-1]
-    if tail_layers <= MIMO_V25_PRO_6BIT_TWO_NODE_TAIL_MAX_LAYERS:
+    if not _is_mimo_v25_pro_6bit_card(model_card):
         return layer_allocations
 
-    adjusted = list(layer_allocations)
-    excess_layers = tail_layers - MIMO_V25_PRO_6BIT_TWO_NODE_TAIL_MAX_LAYERS
-    adjusted[-2] += excess_layers
-    adjusted[-1] = MIMO_V25_PRO_6BIT_TWO_NODE_TAIL_MAX_LAYERS
-    return adjusted
+    _validate_mimo_v25_pro_6bit_text_only_card(model_card)
+    if len(layer_allocations) != len(cycle):
+        raise ValueError(
+            "MiMo V2.5-Pro 6bit MLX placement produced inconsistent layer "
+            "allocations for the selected cycle"
+        )
+    if sum(layer_allocations) != model_card.n_layers:
+        raise ValueError(
+            "MiMo V2.5-Pro 6bit MLX placement must cover all model layers"
+        )
+    return layer_allocations
 
 
 def _get_shard_assignments_for_pure_pipeline(
@@ -243,7 +265,7 @@ def _get_shard_assignments_for_pure_pipeline(
     layer_allocations = _allocate_and_validate_layers(
         cycle.node_ids, node_memory, total_memory, model_card
     )
-    layer_allocations = _apply_mimo_v25_pro_6bit_tail_cap(
+    layer_allocations = _apply_mimo_v25_pro_6bit_live_safety_caps(
         model_card, cycle, layer_allocations
     )
 
@@ -441,7 +463,10 @@ def _find_ip_prioritised(
             "unknown": 4,
         }
 
-    # RDMA prefers ethernet coordinator
+    # JACCL coordinator traffic is control-plane TCP. Prefer normal ethernet
+    # reachability here; the RDMA data-plane devices are still selected via
+    # jaccl_devices. Using link-local Thunderbolt for the coordinator has caused
+    # JACCL connection timeouts even when rdma_en* devices are present.
     else:
         priority = {
             "ethernet": 0,
@@ -450,11 +475,17 @@ def _find_ip_prioritised(
             "maybe_ethernet": 3,
             "thunderbolt": 4,
         }
+    def _ip_version_preference(ip: str) -> int:
+        with contextlib.suppress(ValueError):
+            return 0 if ipaddress.ip_address(ip).version == 4 else 1
+        return 2
+
     return min(
         ips,
         key=lambda ip: (
-            0 if _is_tailscale_ip(ip) else 1,
+            1 if _is_tailscale_ip(ip) else 0,
             priority.get(ip_to_type.get(ip, "unknown"), 2),
+            _ip_version_preference(ip),
         ),
     )
 

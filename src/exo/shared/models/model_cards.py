@@ -126,8 +126,13 @@ class VisionCardConfig(CamelCaseModel):
 
 MIMO_V25_PRO_MODEL_ID = ModelId("XiaomiMiMo/MiMo-V2.5-Pro")
 MIMO_V25_PRO_6BIT_MLX_MODEL_ID = ModelId("XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX")
+KERNELPOOL_MIMO_V25_PRO_6BIT_MODEL_ID = ModelId("kernelpool/MiMo-V2.5-Pro-6bit")
 MIMO_V25_PRO_MODEL_IDS = frozenset(
-    {MIMO_V25_PRO_MODEL_ID, MIMO_V25_PRO_6BIT_MLX_MODEL_ID}
+    {
+        MIMO_V25_PRO_MODEL_ID,
+        MIMO_V25_PRO_6BIT_MLX_MODEL_ID,
+        KERNELPOOL_MIMO_V25_PRO_6BIT_MODEL_ID,
+    }
 )
 MIMO_V25_PRO_ARCHITECTURE = "MiMoV2ForCausalLM"
 _MEDIA_CAPABILITY_MARKERS = frozenset(
