@@ -14,7 +14,7 @@ from exo.api.types import (
     ChatCompletionMessageVideoUrl,
     ChatCompletionRequest,
 )
-from exo.shared.models.model_cards import MIMO_V25_PRO_MODEL_ID
+from exo.shared.models.model_cards import MIMO_V25_PRO_MODEL_IDS
 from exo.shared.types.common import ModelId
 from exo.shared.types.video_errors import (
     VIDEO_ERROR_CODE_STREAMING_UNSUPPORTED,
@@ -23,9 +23,10 @@ from exo.shared.types.video_errors import (
 
 
 @pytest.mark.asyncio
-async def test_mimo_v25_pro_accepts_text_only_chat_request() -> None:
+@pytest.mark.parametrize("model_id", MIMO_V25_PRO_MODEL_IDS)
+async def test_mimo_v25_pro_accepts_text_only_chat_request(model_id: ModelId) -> None:
     request = ChatCompletionRequest(
-        model=MIMO_V25_PRO_MODEL_ID,
+        model=model_id,
         messages=[ChatCompletionMessage(role="user", content="Summarize MiMo Pro.")],
     )
 
@@ -40,13 +41,16 @@ async def test_mimo_v25_pro_accepts_text_only_chat_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mimo_v25_pro_rejects_image_before_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("model_id", MIMO_V25_PRO_MODEL_IDS)
+async def test_mimo_v25_pro_rejects_image_before_fetch(
+    monkeypatch: pytest.MonkeyPatch, model_id: ModelId
+) -> None:
     async def _fail_fetch_image_url(url: str) -> str:
         raise AssertionError(f"MiMo Pro guard must run before image fetch: {url}")
 
     monkeypatch.setattr(chat_completions, "fetch_image_url", _fail_fetch_image_url)
     request = ChatCompletionRequest(
-        model=MIMO_V25_PRO_MODEL_ID,
+        model=model_id,
         messages=[
             ChatCompletionMessage(
                 role="user",
@@ -70,9 +74,12 @@ async def test_mimo_v25_pro_rejects_image_before_fetch(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_mimo_v25_pro_rejects_video_before_url_validation() -> None:
+@pytest.mark.parametrize("model_id", MIMO_V25_PRO_MODEL_IDS)
+async def test_mimo_v25_pro_rejects_video_before_url_validation(
+    model_id: ModelId,
+) -> None:
     request = ChatCompletionRequest(
-        model=MIMO_V25_PRO_MODEL_ID,
+        model=model_id,
         messages=[
             ChatCompletionMessage(
                 role="user",
@@ -95,9 +102,12 @@ async def test_mimo_v25_pro_rejects_video_before_url_validation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mimo_v25_pro_rejects_dict_audio_media_part() -> None:
+@pytest.mark.parametrize("model_id", MIMO_V25_PRO_MODEL_IDS)
+async def test_mimo_v25_pro_rejects_dict_audio_media_part(
+    model_id: ModelId,
+) -> None:
     request = ChatCompletionRequest(
-        model=MIMO_V25_PRO_MODEL_ID,
+        model=model_id,
         messages=[
             ChatCompletionMessage(
                 role="user",

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import mlx.core as mx
 import mlx.nn as nn
+import mlx_lm.models.mimo_v2_flash as mimo_v2_flash
 from mlx.nn.layers.distributed import (
     shard_inplace,
     shard_linear,
@@ -637,6 +638,14 @@ def tensor_auto_parallel(
             all_to_sharded_linear_in_place,
             sharded_to_all_linear_in_place,
         )
+    elif isinstance(model, mimo_v2_flash.Model):
+        tensor_parallel_sharding_strategy = MimoV2ShardingStrategy(
+            group,
+            all_to_sharded_linear,
+            sharded_to_all_linear,
+            all_to_sharded_linear_in_place,
+            sharded_to_all_linear_in_place,
+        )
     else:
         raise ValueError(f"Unsupported model type: {type(model)}")
 
@@ -1001,6 +1010,67 @@ class MiniMaxShardingStrategy(TensorParallelShardingStrategy):
             mx.eval(layer)
             if on_layer_loaded is not None:
                 on_layer_loaded(i, total)
+        return model
+
+
+class MimoV2ShardingStrategy(TensorParallelShardingStrategy):
+    def shard_model(
+        self,
+        model: nn.Module,
+        timeout_seconds: float,
+        on_timeout: TimeoutCallback | None,
+        on_layer_loaded: LayerLoadedCallback | None,
+    ) -> nn.Module:
+        model = cast(mimo_v2_flash.Model, model)
+        _ = timeout_seconds
+        _ = on_timeout
+        total = len(model.layers)
+        for i, layer in enumerate(model.layers):
+            # MiMo-V2.5-Pro-6bit is too large to materialize each full layer on
+            # every rank before tensor slicing; that peaks near the unified
+            # memory limit. Apply tensor sharding to lazy weights first, then
+            # evaluate the already-sliced layer.
+            layer.self_attn.q_proj = self.all_to_sharded_linear(layer.self_attn.q_proj)
+            layer.self_attn.k_proj = self.all_to_sharded_linear(layer.self_attn.k_proj)
+            layer.self_attn.v_proj = self.all_to_sharded_linear(layer.self_attn.v_proj)
+            layer.self_attn.o_proj = self.sharded_to_all_linear(layer.self_attn.o_proj)
+            layer.self_attn.n_heads //= self.N
+            layer.self_attn.n_kv_heads //= self.N
+            if layer.self_attn.attention_sink_bias is not None:
+                rank = self.group.rank()
+                heads_per_rank = layer.self_attn.attention_sink_bias.shape[0] // self.N
+                start = rank * heads_per_rank
+                end = start + heads_per_rank
+                layer.self_attn.attention_sink_bias = (
+                    layer.self_attn.attention_sink_bias[start:end]
+                )
+
+            if isinstance(layer.mlp, mimo_v2_flash.MoE):
+                self.all_to_sharded_linear_in_place(layer.mlp.switch_mlp.gate_proj)
+                self.sharded_to_all_linear_in_place(layer.mlp.switch_mlp.down_proj)
+                self.all_to_sharded_linear_in_place(layer.mlp.switch_mlp.up_proj)
+                if getattr(layer.mlp, "shared_experts", None) is not None:
+                    self.all_to_sharded_linear_in_place(
+                        layer.mlp.shared_experts.gate_proj
+                    )
+                    self.sharded_to_all_linear_in_place(
+                        layer.mlp.shared_experts.down_proj
+                    )
+                    self.all_to_sharded_linear_in_place(
+                        layer.mlp.shared_experts.up_proj
+                    )
+                layer.mlp = ShardedMoE(layer.mlp)  # pyright: ignore[reportAttributeAccessIssue, reportArgumentType]
+                layer.mlp.sharding_group = self.group
+            else:
+                layer.mlp.gate_proj = self.all_to_sharded_linear(layer.mlp.gate_proj)
+                layer.mlp.down_proj = self.sharded_to_all_linear(layer.mlp.down_proj)
+                layer.mlp.up_proj = self.all_to_sharded_linear(layer.mlp.up_proj)
+
+            mx.eval(layer)
+            mx.clear_cache()
+            if on_layer_loaded is not None:
+                on_layer_loaded(i, total)
+        mx.clear_cache()
         return model
 
 

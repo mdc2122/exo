@@ -1,3 +1,4 @@
+import importlib
 import json
 import os
 import re
@@ -6,9 +7,9 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from exo.worker.engines.mlx.vision import VisionProcessor
@@ -41,6 +42,7 @@ import contextlib
 import mlx.core as mx
 import mlx.nn as nn
 import mlx_lm.utils as mlx_lm_utils
+from mlx.nn import QuantizedLinear
 from pydantic import RootModel
 
 from exo.download.download_utils import build_model_path
@@ -77,10 +79,38 @@ from exo.worker.runner.bootstrap import logger
 # paths can resolve the text-only MiMo V2 causal LM implementation.
 cast(dict[str, str], mlx_lm_utils.MODEL_REMAPPING).setdefault("mimo_v2", "mimo_v2_flash")
 
-try:
-    from mlx_lm.models import mimo_v2_flash as _mimo_v2_flash
+_MimoV2Weights = dict[str, mx.array]
 
-    _ORIGINAL_MIMO_V2_SANITIZE = _mimo_v2_flash.Model.sanitize
+
+class _MimoV2ModelArgs(Protocol):
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    v_head_dim: int
+
+
+class _MimoV2Model(Protocol):
+    args: _MimoV2ModelArgs
+
+
+class _MimoV2ModelClass(Protocol):
+    sanitize: Callable[[_MimoV2Model, _MimoV2Weights], _MimoV2Weights]
+
+
+class _MimoV2FlashModule(Protocol):
+    Model: _MimoV2ModelClass
+
+
+try:
+    _mimo_v2_flash = cast(
+        _MimoV2FlashModule,
+        cast(object, importlib.import_module("mlx_lm.models.mimo_v2_flash")),
+    )
+
+    _ORIGINAL_MIMO_V2_SANITIZE: Callable[
+        [_MimoV2Model, _MimoV2Weights],
+        _MimoV2Weights,
+    ] = _mimo_v2_flash.Model.sanitize
 
     def _normalize_mimo_v2_weight_key(key: str) -> str:
         if key.endswith(".weight.scales"):
@@ -89,20 +119,23 @@ try:
             return key.removesuffix(".weight.biases") + ".biases"
         return key
 
-    def _split_mimo_v2_fused_qkv_weights(model: Any, weights: dict[str, Any]) -> dict[str, Any]:
+    def _split_mimo_v2_fused_qkv_weights(
+        model: _MimoV2Model,
+        weights: _MimoV2Weights,
+    ) -> _MimoV2Weights:
         q_size = model.args.num_attention_heads * model.args.head_dim
         k_size = model.args.num_key_value_heads * model.args.head_dim
         v_size = model.args.num_key_value_heads * model.args.v_head_dim
         split_sizes = (q_size, k_size, v_size)
         split_names = ("q_proj", "k_proj", "v_proj")
-        normalized: dict[str, Any] = {}
+        normalized: _MimoV2Weights = {}
         for key, value in weights.items():
             if ".self_attn.qkv_proj." not in key:
                 normalized[_normalize_mimo_v2_weight_key(key)] = value
                 continue
             prefix, suffix = key.split(".self_attn.qkv_proj.", 1)
             normalized_suffix = _normalize_mimo_v2_weight_key(f"x.{suffix}").removeprefix("x.")
-            if not hasattr(value, "shape") or value.shape[0] != sum(split_sizes):
+            if value.shape[0] != sum(split_sizes):
                 normalized[_normalize_mimo_v2_weight_key(key)] = value
                 continue
             start = 0
@@ -113,15 +146,71 @@ try:
                 start += size
         return normalized
 
-    def _mimo_v2_sanitize_for_exo_custom_quant(model: Any, weights: dict[str, Any]) -> dict[str, Any]:
-        sanitized = _ORIGINAL_MIMO_V2_SANITIZE(model, weights)
-        return _split_mimo_v2_fused_qkv_weights(model, sanitized)
+    def _mimo_v2_sanitize_for_exo_custom_quant(
+        self: _MimoV2Model,
+        weights: _MimoV2Weights,
+    ) -> _MimoV2Weights:
+        sanitized = _ORIGINAL_MIMO_V2_SANITIZE(self, weights)
+        return _split_mimo_v2_fused_qkv_weights(self, sanitized)
 
     _mimo_v2_flash.Model.sanitize = _mimo_v2_sanitize_for_exo_custom_quant
 except ImportError:
     pass
 
 load_model = mlx_lm_utils.load_model
+
+
+class _QuantizedLinearState(Protocol):
+    def get(self, key: str) -> mx.array | None: ...
+    def update(self, values: dict[str, mx.array]) -> None: ...
+
+
+def _mimo_exo_quant_metadata_dtype() -> mx.Dtype | None:
+    value = os.environ.get("EXO_MIMO_QUANT_METADATA_DTYPE", "float16").lower()
+    if value in {"", "none", "f32", "float32"}:
+        return None
+    if value in {"f16", "float16"}:
+        return mx.float16
+    if value in {"bf16", "bfloat16"}:
+        return mx.bfloat16
+    raise ValueError(
+        "EXO_MIMO_QUANT_METADATA_DTYPE must be one of float16, bfloat16, "
+        "float32, none"
+    )
+
+
+def _downcast_mimo_quant_metadata(model: nn.Module) -> None:
+    """Reduce MiMo 6-bit scale/bias metadata overhead after lazy load."""
+    dtype = _mimo_exo_quant_metadata_dtype()
+    if dtype is None:
+        return
+
+    converted = 0
+    named_modules = cast(Callable[[], Iterable[tuple[str, nn.Module]]], model.named_modules)
+    for _, module in named_modules():
+        if not isinstance(module, QuantizedLinear):
+            continue
+
+        updates: dict[str, mx.array] = {}
+        quantized_linear = cast(_QuantizedLinearState, cast(object, module))
+        scales = quantized_linear.get("scales")
+        if isinstance(scales, mx.array) and scales.dtype == mx.float32:
+            updates["scales"] = scales.astype(dtype)
+
+        biases = quantized_linear.get("biases")
+        if isinstance(biases, mx.array) and biases.dtype == mx.float32:
+            updates["biases"] = biases.astype(dtype)
+
+        if updates:
+            quantized_linear.update(updates)
+            converted += len(updates)
+
+    logger.info(
+        "MiMo quant metadata downcast complete: converted {} arrays to {}",
+        converted,
+        dtype,
+    )
+
 
 Group = mx.distributed.Group
 
@@ -423,6 +512,11 @@ def shard_and_load(
     model_path = build_model_path(shard_metadata.model_card.model_id)
 
     model, _ = load_model(model_path, lazy=True, strict=False)
+    if (
+        shard_metadata.model_card.family == "mimo"
+        and shard_metadata.model_card.quantization == "6bit-mlx-affine"
+    ):
+        _downcast_mimo_quant_metadata(model)
     logger.debug("loaded model class=%s path=%s", type(model).__name__, model_path)
     if hasattr(model, "model") and isinstance(model.model, DeepseekV3Model):  # type: ignore
         pass

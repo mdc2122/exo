@@ -1,10 +1,34 @@
 import importlib
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 import mlx.core as mx
 import mlx_lm.utils as mlx_lm_utils
+
+_MimoV2Weights = dict[str, mx.array]
+
+
+class _MimoV2ModelArgs(Protocol):
+    pass
+
+
+class _MimoV2ModelArgsClass(Protocol):
+    from_dict: Callable[[dict[str, object]], _MimoV2ModelArgs]
+
+
+class _MimoV2Model(Protocol):
+    def sanitize(self, weights: _MimoV2Weights) -> _MimoV2Weights: ...
+
+
+class _MimoV2ModelClass(Protocol):
+    def __call__(self, args: _MimoV2ModelArgs) -> _MimoV2Model: ...
+
+
+class _MimoV2FlashModule(Protocol):
+    Model: _MimoV2ModelClass
+    ModelArgs: _MimoV2ModelArgsClass
 
 
 def test_mimo_v25_pro_registers_mlx_lm_mimo_v2_flash_alias() -> None:
@@ -102,9 +126,12 @@ def test_mimo_v25_pro_local_config_is_compatible_with_mlx_lm_mimo_v2_flash() -> 
 
 def test_mimo_v25_pro_sanitize_splits_fused_qkv_and_normalizes_quantized_keys() -> None:
     importlib.import_module("exo.worker.engines.mlx.utils_mlx")
-    from mlx_lm.models.mimo_v2_flash import Model, ModelArgs
 
-    config = {
+    mimo_v2_flash = cast(
+        _MimoV2FlashModule,
+        cast(object, importlib.import_module("mlx_lm.models.mimo_v2_flash")),
+    )
+    config: dict[str, object] = {
         "model_type": "mimo_v2",
         "num_experts_per_tok": 1,
         "hybrid_layer_pattern": [0, 1],
@@ -139,8 +166,8 @@ def test_mimo_v25_pro_sanitize_splits_fused_qkv_and_normalizes_quantized_keys() 
         "swa_v_head_dim": 2,
         "partial_rotary_factor": 1,
     }
-    model = Model(ModelArgs.from_dict(config))
-    weights = {
+    model = mimo_v2_flash.Model(mimo_v2_flash.ModelArgs.from_dict(config))
+    weights: _MimoV2Weights = {
         "model.layers.0.self_attn.qkv_proj.weight": mx.arange(32).reshape(8, 4),
         "model.layers.0.self_attn.qkv_proj.weight.scales": mx.arange(16).reshape(8, 2),
         "model.layers.0.self_attn.qkv_proj.weight.biases": mx.arange(16).reshape(8, 2),

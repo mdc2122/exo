@@ -21,7 +21,7 @@ from exo.shared.types.commands import (
 from exo.shared.types.common import NodeId, SystemId
 from exo.shared.types.events import Event, NodeDownloadProgress
 from exo.shared.types.memory import Memory
-from exo.shared.types.worker.downloads import DownloadCompleted
+from exo.shared.types.worker.downloads import DownloadCompleted, DownloadFailed
 from exo.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from exo.utils.channels import Receiver, Sender, channel
 
@@ -125,6 +125,29 @@ class FakeShardDownloader(ShardDownloader):
         )
 
 
+class NotStartedStatusShardDownloader(FakeShardDownloader):
+    async def get_shard_download_status(
+        self,
+    ) -> AsyncIterator[tuple[Path, RepoDownloadProgress]]:
+        shard = _make_shard()
+        yield (
+            Path("/fake/models") / shard.model_card.model_id.normalize(),
+            RepoDownloadProgress(
+                repo_id=str(shard.model_card.model_id),
+                repo_revision="main",
+                shard=shard,
+                completed_files=0,
+                total_files=1,
+                downloaded=Memory.from_bytes(0),
+                downloaded_this_session=Memory.from_bytes(0),
+                total=Memory.from_mb(100),
+                overall_speed=0,
+                overall_eta=timedelta(seconds=0),
+                status="not_started",
+            ),
+        )
+
+
 async def test_re_download_after_delete_completes() -> None:
     """A model that was downloaded, deleted, and then re-downloaded should
     reach DownloadCompleted status. This is an end-to-end test through
@@ -190,6 +213,53 @@ async def test_re_download_after_delete_completes() -> None:
             coordinator_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await coordinator_task
+
+
+async def test_existing_progress_scan_preserves_download_failures() -> None:
+    """Periodic status scans should not hide a real download error as pending."""
+    cmd_send: Sender[ForwarderDownloadCommand]
+    cmd_send, cmd_recv = channel[ForwarderDownloadCommand]()
+    event_send, event_recv = channel[Event]()
+
+    fake_downloader = NotStartedStatusShardDownloader()
+    wrapped_downloader = SingletonShardDownloader(fake_downloader)
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID,
+        shard_downloader=wrapped_downloader,
+        download_command_receiver=cmd_recv,
+        event_sender=event_send,
+    )
+
+    shard = _make_shard()
+    failed = DownloadFailed(
+        node_id=NODE_ID,
+        shard_metadata=shard,
+        error_message="No writable model directory has enough free space",
+        model_directory="/fake/models/test-org--test-model",
+    )
+    coordinator.download_status[MODEL_ID] = failed
+
+    coordinator_task = asyncio.create_task(coordinator.run())
+    try:
+        await asyncio.sleep(0.05)
+        matching_events = [
+            event
+            for event in event_recv.collect()
+            if (
+                isinstance(event, NodeDownloadProgress)
+                and event.download_progress.shard_metadata.model_card.model_id
+                == MODEL_ID
+            )
+        ]
+
+        assert matching_events == []
+        assert coordinator.download_status[MODEL_ID] == failed
+    finally:
+        await coordinator.shutdown()
+        coordinator_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await coordinator_task
+        cmd_send.close()
 
 
 async def _wait_for_download_completed(

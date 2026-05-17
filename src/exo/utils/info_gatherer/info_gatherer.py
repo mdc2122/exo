@@ -40,6 +40,26 @@ from .system_info import (
 )
 
 IS_DARWIN = sys.platform == "darwin"
+DEFAULT_MACMON_PATHS = (
+    "/opt/homebrew/bin/macmon",
+    "/usr/local/bin/macmon",
+)
+
+
+def find_macmon_path() -> str | None:
+    configured_path = os.getenv("EXO_MACMON_PATH")
+    if configured_path:
+        return configured_path
+
+    path_from_env = shutil.which("macmon")
+    if path_from_env:
+        return path_from_env
+
+    for path in DEFAULT_MACMON_PATHS:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+
+    return None
 
 
 async def _get_thunderbolt_devices() -> set[str] | None:
@@ -539,9 +559,7 @@ class InfoGatherer:
             await anyio.sleep(disk_poll_interval)
 
     async def _monitor_macmon(self, macmon_interval: float):
-        if (
-            macmon_path := os.getenv("EXO_MACMON_PATH") or shutil.which("macmon")
-        ) is None:
+        if (macmon_path := find_macmon_path()) is None:
             logger.warning(
                 "macmon not found, falling back to psutil for memory monitoring"
             )

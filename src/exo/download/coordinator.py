@@ -341,6 +341,12 @@ class DownloadCoordinator:
                     # Active downloads emit progress via the callback — don't overwrite
                     if model_id in self.active_downloads:
                         continue
+                    existing_status = self.download_status.get(model_id)
+                    if (
+                        isinstance(existing_status, DownloadFailed)
+                        and progress.status != "complete"
+                    ):
+                        continue
 
                     if progress.status == "complete":
                         found = await to_thread.run_sync(

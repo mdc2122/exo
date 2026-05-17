@@ -84,18 +84,26 @@ interface RawNodeIdentity {
 }
 
 interface RawMemoryUsage {
-  ramTotal?: { inBytes: number };
-  ramAvailable?: { inBytes: number };
-  swapTotal?: { inBytes: number };
-  swapAvailable?: { inBytes: number };
+  ramTotal?: { inBytes?: number; in_bytes?: number };
+  ram_total?: { inBytes?: number; in_bytes?: number };
+  ramAvailable?: { inBytes?: number; in_bytes?: number };
+  ram_available?: { inBytes?: number; in_bytes?: number };
+  swapTotal?: { inBytes?: number; in_bytes?: number };
+  swap_total?: { inBytes?: number; in_bytes?: number };
+  swapAvailable?: { inBytes?: number; in_bytes?: number };
+  swap_available?: { inBytes?: number; in_bytes?: number };
 }
 
 interface RawSystemPerformanceProfile {
   gpuUsage?: number;
+  gpu_usage?: number;
   temp?: number;
   sysPower?: number;
+  sys_power?: number;
   pcpuUsage?: number;
+  pcpu_usage?: number;
   ecpuUsage?: number;
+  ecpu_usage?: number;
 }
 
 interface RawNetworkInterfaceInfo {
@@ -405,6 +413,33 @@ function transformNetworkInterface(iface: RawNetworkInterfaceInfo): {
   };
 }
 
+function readMemoryBytes(
+  value:
+    | {
+        inBytes?: number;
+        in_bytes?: number;
+      }
+    | undefined,
+): number {
+  const bytes = value?.inBytes ?? value?.in_bytes;
+  return typeof bytes === "number" && Number.isFinite(bytes)
+    ? Math.max(bytes, 0)
+    : 0;
+}
+
+function readTelemetryNumber(
+  value: number | undefined,
+): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizeUtilizationFraction(value: number | undefined): number | undefined {
+  const raw = readTelemetryNumber(value);
+  if (raw === undefined) return undefined;
+  const percent = raw <= 1 ? raw * 100 : raw;
+  return Math.max(0, Math.min(percent, 100)) / 100;
+}
+
 function transformTopology(
   raw: RawTopology,
   granularState: GranularNodeState,
@@ -421,9 +456,16 @@ function transformTopology(
     const system = granularState.nodeSystem?.[nodeId];
     const network = granularState.nodeNetwork?.[nodeId];
 
-    const ramTotal = memory?.ramTotal?.inBytes ?? 0;
-    const ramAvailable = memory?.ramAvailable?.inBytes ?? 0;
+    const ramTotal = readMemoryBytes(memory?.ramTotal ?? memory?.ram_total);
+    const ramAvailable = readMemoryBytes(
+      memory?.ramAvailable ?? memory?.ram_available,
+    );
     const ramUsage = Math.max(ramTotal - ramAvailable, 0);
+    const gpuUsage = normalizeUtilizationFraction(
+      system?.gpuUsage ?? system?.gpu_usage,
+    );
+    const temp = readTelemetryNumber(system?.temp);
+    const sysPower = readTelemetryNumber(system?.sysPower ?? system?.sys_power);
 
     const rawInterfaces = network?.interfaces || [];
     const networkInterfaces = rawInterfaces.map(transformNetworkInterface);
@@ -449,12 +491,11 @@ function transformTopology(
           ram_total: ramTotal,
         },
         temp:
-          system?.temp !== undefined
-            ? { gpu_temp_avg: system.temp }
+          temp !== undefined
+            ? { gpu_temp_avg: temp }
             : undefined,
-        gpu_usage:
-          system?.gpuUsage !== undefined ? [0, system.gpuUsage] : undefined,
-        sys_power: system?.sysPower,
+        gpu_usage: gpuUsage !== undefined ? [0, gpuUsage] : undefined,
+        sys_power: sysPower,
       },
       last_macmon_update: Date.now() / 1000,
       friendly_name: identity?.friendlyName,
@@ -3426,7 +3467,9 @@ export const sendMessage = (
   files?: {
     id: string;
     name: string;
+    size: number;
     type: string;
+    file: File;
     textContent?: string;
     preview?: string;
   }[],

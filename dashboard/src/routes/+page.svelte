@@ -75,6 +75,7 @@
   import { tweened } from "svelte/motion";
   import { cubicInOut, cubicOut } from "svelte/easing";
   import { onMount } from "svelte";
+  import type { ChatUploadedFile } from "$lib/types/files";
 
   const chatStarted = $derived(hasStartedChat());
   const minimized = $derived(isTopologyMinimized());
@@ -277,6 +278,22 @@
 
   // ── Steps 1-5 animation state: cinematic SVG story ──
   const SIMULATED_STUDIO_GB = 256; // simulated Mac Studio memory
+
+  // User device info from topology — uses /node_id to find our own node
+  const userDeviceInfo = $derived.by(() => {
+    if (!data || Object.keys(data.nodes).length === 0) {
+      return { name: "MacBook Pro", memoryGB: 36, deviceType: "macbook pro" };
+    }
+    const ourNode = localNodeId ? data.nodes[localNodeId] : undefined;
+    const node = ourNode ?? Object.values(data.nodes)[0];
+    const totalMem =
+      node.macmon_info?.memory?.ram_total ?? node.system_info?.memory ?? 0;
+    const memGB = Math.round(totalMem / (1024 * 1024 * 1024));
+    const name = node.friendly_name || "Your Mac";
+    const modelId = (node.system_info?.model_id || "macbook pro").toLowerCase();
+    return { name, memoryGB: memGB || 36, deviceType: modelId };
+  });
+
   const onboardingCombinedGB = $derived(
     userDeviceInfo.memoryGB + SIMULATED_STUDIO_GB,
   );
@@ -302,21 +319,6 @@
       deduped.push(m);
     }
     return deduped.slice(0, 3);
-  });
-
-  // User device info from topology — uses /node_id to find our own node
-  const userDeviceInfo = $derived.by(() => {
-    if (!data || Object.keys(data.nodes).length === 0) {
-      return { name: "MacBook Pro", memoryGB: 36, deviceType: "macbook pro" };
-    }
-    const ourNode = localNodeId ? data.nodes[localNodeId] : undefined;
-    const node = ourNode ?? Object.values(data.nodes)[0];
-    const totalMem =
-      node.macmon_info?.memory?.ram_total ?? node.system_info?.memory ?? 0;
-    const memGB = Math.round(totalMem / (1024 * 1024 * 1024));
-    const name = node.friendly_name || "Your Mac";
-    const modelId = (node.system_info?.model_id || "macbook pro").toLowerCase();
-    return { name, memoryGB: memGB || 36, deviceType: modelId };
   });
 
   let showContinueButton = $state(false);
@@ -844,13 +846,7 @@
   // Image models go to generateImage/editImage; text models go to sendMessage.
   function routeMessage(
     content: string,
-    files?: {
-      id: string;
-      name: string;
-      type: string;
-      textContent?: string;
-      preview?: string;
-    }[],
+    files?: ChatUploadedFile[],
   ) {
     const model = selectedChatModel();
     if (!model) {
@@ -2696,8 +2692,8 @@
   }
 
   // Pick optimal placement from previews (frontend logic)
-  // Rules: 1-node → Pipeline/Ring, multi-node with RDMA → Tensor/Jaccl (most nodes),
-  //         multi-node without RDMA → 1-node Pipeline/Ring
+  // Rules: 1-node → Pipeline/Ring, multi-node with RDMA → Jaccl (Tensor when
+  // supported, otherwise Pipeline), multi-node without RDMA → 1-node Pipeline/Ring.
   function pickOptimalPlacement(
     previews: PlacementPreview[],
   ): PlacementPreview | null {
@@ -2714,6 +2710,13 @@
         )
         .sort((a, b) => getPreviewNodeCount(b) - getPreviewNodeCount(a));
       if (jacclTensor.length > 0) return jacclTensor[0];
+
+      const jacclPipeline = valid
+        .filter(
+          (p) => p.instance_meta === "MlxJaccl" && p.sharding === "Pipeline",
+        )
+        .sort((a, b) => getPreviewNodeCount(b) - getPreviewNodeCount(a));
+      if (jacclPipeline.length > 0) return jacclPipeline[0];
 
       // Multi-node without RDMA: fall back to single-node Pipeline/Ring
       const singlePipeline = valid.filter(
@@ -2825,13 +2828,7 @@
   // Handle auto-send: user typed without selecting a model
   async function handleAutoSend(
     content: string,
-    files?: {
-      id: string;
-      name: string;
-      type: string;
-      textContent?: string;
-      preview?: string;
-    }[],
+    files?: ChatUploadedFile[],
   ) {
     // Clear forced-idle so restore effect resumes normal operation
     userForcedIdle = false;
@@ -2964,13 +2961,7 @@
   // Pending message to send after auto-launch completes
   let pendingAutoMessage = $state<{
     content: string;
-    files?: {
-      id: string;
-      name: string;
-      type: string;
-      textContent?: string;
-      preview?: string;
-    }[];
+    files?: ChatUploadedFile[];
   } | null>(null);
 
   // Best running model by tier (for auto-pick display)
@@ -3108,13 +3099,7 @@
   // Unified send handler: sends if model running, auto-launches if not
   function handleChatSend(
     content: string,
-    files?: {
-      id: string;
-      name: string;
-      type: string;
-      textContent?: string;
-      preview?: string;
-    }[],
+    files?: ChatUploadedFile[],
   ) {
     const model = selectedChatModel();
 

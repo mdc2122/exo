@@ -43,6 +43,19 @@
     modelIdOverride = null,
   }: Props = $props();
 
+  type ConnectionInfo = {
+    ip: string;
+    iface: string | null;
+    from: string;
+    to: string;
+  };
+
+  type PositionedConnectionInfo = ConnectionInfo & {
+    midX: number;
+    midY: number;
+    arrow: string;
+  };
+
   // Estimate memory requirements from model name
   // Uses regex with word boundaries to avoid false matches like '4bit' matching '4b'
   function estimateMemoryGB(modelId: string, modelName?: string): number {
@@ -148,6 +161,7 @@
   }
 
   const perNode = $derived(downloadStatus?.perNode ?? []);
+  let expandedNodes = $state<Set<string>>(new Set());
 
   function toggleNodeDetails(nodeId: string): void {
     const next = new Set(expandedNodes);
@@ -413,7 +427,7 @@
   function getConnectionInfo(
     nodeId1: string,
     nodeId2: string,
-  ): Array<{ ip: string; iface: string | null; from: string; to: string }> {
+  ): ConnectionInfo[] {
     if (!topology?.edges) return [];
 
     // Collect candidates for each direction
@@ -447,12 +461,7 @@
       return candidates.find((c) => !c.ip.startsWith("127.")) || candidates[0];
     };
 
-    const result: Array<{
-      ip: string;
-      iface: string | null;
-      from: string;
-      to: string;
-    }> = [];
+    const result: ConnectionInfo[] = [];
 
     const bestAtoB = pickBest(aToBCandidates);
     if (bestAtoB) result.push({ ...bestAtoB, from: nodeId1, to: nodeId2 });
@@ -687,7 +696,7 @@
             {@const allConnections =
               isDebugMode && usedNodes.length > 1
                 ? (() => {
-                    const conns: Array = [];
+                    const conns: PositionedConnectionInfo[] = [];
                     for (let i = 0; i < usedNodes.length; i++) {
                       for (let j = i + 1; j < usedNodes.length; j++) {
                         const n1 = usedNodes[i];

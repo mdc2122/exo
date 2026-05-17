@@ -4,7 +4,14 @@ import json
 import os
 import random
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
+from collections.abc import (
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
@@ -136,12 +143,14 @@ from exo.shared.constants import (
 from exo.shared.election import ElectionMessage
 from exo.shared.logging import InterceptLogger
 from exo.shared.models.model_cards import (
+    MIMO_V25_PRO_MODEL_IDS,
     ModelCard,
     ModelId,
     add_to_card_cache,
     get_card,
     get_model_cards,
 )
+from exo.shared.topology import Topology
 from exo.shared.tracing import TraceEvent, compute_stats, export_trace, load_trace_file
 from exo.shared.types.chunks import (
     ErrorChunk,
@@ -178,11 +187,14 @@ from exo.shared.types.events import (
     TracesMerged,
 )
 from exo.shared.types.memory import Memory
+from exo.shared.types.multiaddr import Multiaddr
+from exo.shared.types.profiling import MemoryUsage
 from exo.shared.types.state import State
 from exo.shared.types.text_generation import TextGenerationTaskParams
-from exo.shared.types.worker.downloads import DownloadCompleted
+from exo.shared.types.topology import Connection, SocketConnection
+from exo.shared.types.worker.downloads import DownloadCompleted, DownloadProgress
 from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
-from exo.shared.types.worker.shards import Sharding
+from exo.shared.types.worker.shards import Sharding, TensorShardMetadata
 from exo.utils.banner import print_startup_banner
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.disk_event_log import DiskEventLog
@@ -191,6 +203,8 @@ from exo.utils.task_group import TaskGroup
 
 _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
 ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
+_MIMO_V25_PRO_6BIT_PREVIEW_NODE_MEMORY_GB = (512, 512)
+_SELECTED_WORKER_MEMORY_MAX_AGE_SECONDS = 120.0
 
 
 def _format_to_content_type(image_format: Literal["png", "jpeg", "webp"] | None) -> str:
@@ -220,6 +234,126 @@ def _ensure_seed(params: AdvancedImageParams | None) -> AdvancedImageParams:
     if params.seed is None:
         return params.model_copy(update={"seed": random.randint(0, 2**32 - 1)})
     return params
+
+
+def _mimo_preview_socket_connection(ip_index: int) -> SocketConnection:
+    return SocketConnection(
+        sink_multiaddr=Multiaddr(address=f"/ip4/169.254.20.{ip_index}/tcp/1234")
+    )
+
+
+def _memory_evidence_for_selected_workers(
+    instance: Instance,
+    model_card: ModelCard,
+    node_memory: Mapping[NodeId, MemoryUsage],
+    last_seen: Mapping[NodeId, datetime] | None = None,
+    *,
+    now: datetime | None = None,
+    max_age_seconds: float = _SELECTED_WORKER_MEMORY_MAX_AGE_SECONDS,
+) -> tuple[Memory, Memory, list[dict[str, Any]]]:
+    """Return selected-worker memory evidence and fail-closed diagnostics."""
+    total_required = Memory()
+    total_available = Memory()
+    evidence: list[dict[str, Any]] = []
+
+    resolved_now = now or datetime.now(timezone.utc)
+
+    for node_id, runner_id in instance.shard_assignments.node_to_runner.items():
+        shard = instance.shard_assignments.runner_to_shard[runner_id]
+        layer_count = max(shard.end_layer - shard.start_layer, 0)
+        if isinstance(shard, TensorShardMetadata):
+            required_memory = model_card.storage_size // max(shard.world_size, 1)
+        else:
+            required_memory = (model_card.storage_size * layer_count) // shard.n_layers
+        memory = node_memory.get(node_id)
+        available_memory = memory.ram_available if memory is not None else Memory()
+        total_required += required_memory
+        total_available += available_memory
+        last_seen_at = last_seen.get(node_id) if last_seen is not None else None
+        age_seconds = (
+            (resolved_now - last_seen_at).total_seconds()
+            if last_seen_at is not None
+            else None
+        )
+        status = "ok"
+        reason = "selected worker reported sufficient fresh ram_available"
+        if memory is None:
+            status = "missing"
+            reason = "selected worker is absent from state.node_memory"
+        elif available_memory.in_bytes <= 0:
+            status = "non_positive"
+            reason = "selected worker reported missing, zero, or negative ram_available"
+        elif age_seconds is None:
+            status = "missing_last_seen"
+            reason = "selected worker is absent from state.last_seen"
+        elif age_seconds > max_age_seconds:
+            status = "stale"
+            reason = "selected worker state.last_seen is older than max_age_seconds"
+        elif available_memory < required_memory:
+            status = "insufficient"
+            reason = "selected worker ram_available is below required shard bytes"
+
+        evidence.append(
+            {
+                "node_id": str(node_id),
+                "runner_id": str(runner_id),
+                "start_layer": shard.start_layer,
+                "end_layer": shard.end_layer,
+                "n_layers": shard.n_layers,
+                "required_bytes": required_memory.in_bytes,
+                "required_gb": required_memory.in_gb,
+                "ram_available_bytes": available_memory.in_bytes,
+                "ram_available_gb": available_memory.in_gb,
+                "ram_total_bytes": memory.ram_total.in_bytes if memory is not None else None,
+                "last_seen": last_seen_at.isoformat() if last_seen_at is not None else None,
+                "last_seen_age_seconds": age_seconds,
+                "max_age_seconds": max_age_seconds,
+                "status": status,
+                "reason": reason,
+            }
+        )
+
+    return total_required, total_available, evidence
+
+
+def _build_mimo_v25_pro_6bit_preview_state(
+    model_card: ModelCard,
+) -> tuple[Topology, dict[NodeId, MemoryUsage]]:
+    """Build the synthetic 2-node Studio1+Studio2 state used only for MiMo Pro preview."""
+    if model_card.model_id not in MIMO_V25_PRO_MODEL_IDS:
+        raise ValueError("MiMo two-node preview state is only for MiMo Pro cards")
+
+    node_ids = [NodeId("Studio1"), NodeId("Studio2")]
+    topology = Topology()
+    for node_id in node_ids:
+        topology.add_node(node_id)
+
+    port = 1
+    for source in node_ids:
+        for sink in node_ids:
+            if source == sink:
+                continue
+            topology.add_connection(
+                Connection(
+                    source=source,
+                    sink=sink,
+                    edge=_mimo_preview_socket_connection(port),
+                )
+            )
+            port += 1
+
+    node_memory = {
+        node_id: MemoryUsage.from_bytes(
+            ram_total=memory_gb * 1024**3,
+            ram_available=memory_gb * 1024**3,
+            swap_total=0,
+            swap_available=0,
+        )
+        for node_id, memory_gb in zip(
+            node_ids, _MIMO_V25_PRO_6BIT_PREVIEW_NODE_MEMORY_GB, strict=True
+        )
+    }
+    return topology, node_memory
 
 
 class API:
@@ -313,9 +447,15 @@ class API:
                 exc.to_response().model_dump(),
                 status_code=exc.status_code,
             )
+        structured_detail = cast(object, exc.detail)
+        if not isinstance(structured_detail, str):
+            return JSONResponse(
+                {"error": structured_detail},
+                status_code=exc.status_code,
+            )
         err = ErrorResponse(
             error=ErrorInfo(
-                message=exc.detail,
+                message=structured_detail,
                 type=HTTPStatus(exc.status_code).phrase,
                 code=exc.status_code,
             )
@@ -427,13 +567,32 @@ class API:
     ) -> CreateInstanceResponse:
         instance = payload.instance
         model_card = await ModelCard.load(instance.shard_assignments.model_id)
-        required_memory = model_card.storage_size
-        available_memory = self._calculate_total_available_memory()
+        required_memory, available_memory, memory_evidence = (
+            _memory_evidence_for_selected_workers(
+                instance,
+                model_card,
+                self.state.node_memory,
+                self.state.last_seen,
+            )
+        )
+        unsafe_workers = [
+            worker for worker in memory_evidence if worker["status"] != "ok"
+        ]
 
-        if required_memory > available_memory:
+        if unsafe_workers:
             raise HTTPException(
                 status_code=400,
-                detail=f"Insufficient memory to create instance. Required: {required_memory.in_gb:.1f}GB, Available: {available_memory.in_gb:.1f}GB",
+                detail={
+                    "error": "Insufficient live selected-worker memory to create instance",
+                    "required_bytes": required_memory.in_bytes,
+                    "required_gb": required_memory.in_gb,
+                    "available_bytes": available_memory.in_bytes,
+                    "available_gb": available_memory.in_gb,
+                    "selected_node_ids": [
+                        worker["node_id"] for worker in memory_evidence
+                    ],
+                    "selected_worker_memory": memory_evidence,
+                },
             )
 
         command = CreateInstance(
@@ -494,15 +653,28 @@ class API:
         previews: list[PlacementPreview] = []
         required_nodes = set(node_ids) if node_ids else None
 
-        if len(list(self.state.topology.list_nodes())) == 0:
-            return PlacementPreviewResponse(previews=[])
-
         try:
             model_card = await ModelCard.load(model_id)
         except Exception as exc:
             raise HTTPException(
                 status_code=400, detail=f"Failed to load model card: {exc}"
             ) from exc
+
+        preview_topology = self.state.topology
+        preview_node_memory = self.state.node_memory
+        preview_required_nodes = required_nodes
+        preview_downloads: Mapping[NodeId, Sequence[DownloadProgress]] = (
+            self.state.downloads
+        )
+        if len(list(preview_topology.list_nodes())) == 0:
+            if model_card.model_id not in MIMO_V25_PRO_MODEL_IDS:
+                return PlacementPreviewResponse(previews=[])
+            preview_topology, preview_node_memory = (
+                _build_mimo_v25_pro_6bit_preview_state(model_card)
+            )
+            preview_required_nodes = None
+            preview_downloads = {}
+
         instance_combinations: list[tuple[Sharding, InstanceMeta, int]] = []
         for sharding in (Sharding.Pipeline, Sharding.Tensor):
             for instance_meta in (InstanceMeta.MlxRing, InstanceMeta.MlxJaccl):
@@ -510,7 +682,7 @@ class API:
                     [
                         (sharding, instance_meta, i)
                         for i in range(
-                            1, len(list(self.state.topology.list_nodes())) + 1
+                            1, len(list(preview_topology.list_nodes())) + 1
                         )
                     ]
                 )
@@ -526,12 +698,12 @@ class API:
                         instance_meta=instance_meta,
                         min_nodes=min_nodes,
                     ),
-                    node_memory=self.state.node_memory,
+                    node_memory=preview_node_memory,
                     node_network=self.state.node_network,
-                    topology=self.state.topology,
+                    topology=preview_topology,
                     current_instances=self.state.instances,
-                    required_nodes=required_nodes,
-                    download_status=self.state.downloads,
+                    required_nodes=preview_required_nodes,
+                    download_status=preview_downloads,
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:

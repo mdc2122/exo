@@ -33,7 +33,7 @@ from exo.api.types import (
 )
 from exo.download.download_utils import create_http_session
 from exo.shared.constants import allow_kimi_video, allow_kimi_video_data_urls
-from exo.shared.models.model_cards import MIMO_V25_PRO_MODEL_ID
+from exo.shared.models.model_cards import MIMO_V25_PRO_MODEL_IDS
 from exo.shared.types.chunks import (
     ErrorChunk,
     PrefillProgressChunk,
@@ -745,7 +745,7 @@ def validate_kimi_video_feature_enabled(request: ChatCompletionRequest) -> None:
 
 
 def _is_mimo_v25_pro_request(request: ChatCompletionRequest) -> bool:
-    return request.model == MIMO_V25_PRO_MODEL_ID
+    return request.model in MIMO_V25_PRO_MODEL_IDS
 
 
 def _mapping_media_marker(content_part: Mapping[object, object]) -> str | None:
@@ -806,7 +806,7 @@ def validate_mimo_v25_pro_text_only_request(request: ChatCompletionRequest) -> N
             code=VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
             param=f"messages[{message_index}].content",
             message=(
-                f"{MIMO_V25_PRO_MODEL_ID} is text-only in Track A and does not "
+                f"{request.model} is text-only in Track A and does not "
                 f"support media content ({marker}). Submit a text-only request; "
                 "image, video, audio, speech, multimodal, and omnimodal inputs "
                 "are rejected before inference or media download."

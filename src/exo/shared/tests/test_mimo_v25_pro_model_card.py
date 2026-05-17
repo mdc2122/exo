@@ -14,12 +14,20 @@ async def test_mimo_v25_pro_builtin_model_card_is_text_only_agentic_long_context
 
     assert card.model_id == "XiaomiMiMo/MiMo-V2.5-Pro"
     assert card.tasks == [ModelTask.TextGeneration]
-    assert card.capabilities == ["text", "agentic", "long-context"]
+    assert card.capabilities == [
+        "text",
+        "thinking",
+        "thinking_toggle",
+        "agentic",
+        "long-context",
+        "code",
+    ]
     assert card.context_length == 1_048_576
     assert card.hidden_size == 6_144
     assert card.n_layers == 70
     assert card.num_key_value_heads == 8
     assert card.architecture == "MiMoV2ForCausalLM"
+    assert card.supports_tensor is True
     assert card.vision is None
 
     media_markers = {

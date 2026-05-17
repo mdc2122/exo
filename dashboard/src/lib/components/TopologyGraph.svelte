@@ -125,6 +125,23 @@
     return parseFloat((bytes / Math.pow(k, i)).toFixed(decimals)) + sizes[i];
   }
 
+  function clampPercent(value: number): number {
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(value, 100));
+  }
+
+  function normalizeUtilizationPercent(value: number | undefined): number {
+    if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+    return clampPercent(value <= 1 ? value * 100 : value);
+  }
+
+  function normalizePositiveNumber(value: number | undefined): number | null {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      return null;
+    }
+    return value;
+  }
+
   function getTemperatureColor(temp: number): string {
     // Default for N/A temp - light gray
     if (isNaN(temp) || temp === null) return "rgba(179, 179, 179, 0.8)";
@@ -533,19 +550,24 @@
 
       if (macmon) {
         if (macmon.memory && macmon.memory.ram_total > 0) {
-          ramUsagePercent =
-            (macmon.memory.ram_usage / macmon.memory.ram_total) * 100;
+          ramUsagePercent = clampPercent(
+            (macmon.memory.ram_usage / macmon.memory.ram_total) * 100,
+          );
           ramTotal = macmon.memory.ram_total;
-          ramUsed = macmon.memory.ram_usage;
+          ramUsed = Math.max(0, Math.min(macmon.memory.ram_usage, ramTotal));
         }
         if (macmon.temp && typeof macmon.temp.gpu_temp_avg === "number") {
-          gpuTemp = Math.max(30, macmon.temp.gpu_temp_avg);
+          const normalizedTemp = normalizePositiveNumber(
+            macmon.temp.gpu_temp_avg,
+          );
+          gpuTemp = normalizedTemp ?? NaN;
         }
         if (macmon.gpu_usage) {
-          gpuUsagePercent = macmon.gpu_usage[1] * 100;
+          gpuUsagePercent = normalizeUtilizationPercent(macmon.gpu_usage[1]);
         }
-        if (macmon.sys_power) {
-          sysPower = macmon.sys_power;
+        const normalizedPower = normalizePositiveNumber(macmon.sys_power);
+        if (normalizedPower !== null) {
+          sysPower = normalizedPower;
         }
       }
 
@@ -620,7 +642,7 @@
       nodeG
         .append("title")
         .text(
-          `${friendlyName}\nID: ${nodeInfo.id.slice(-8)}\nMemory: ${formatBytes(ramUsed)}/${formatBytes(ramTotal)}`,
+          `${friendlyName}\nID: ${nodeInfo.id.slice(-8)}\nMemory: ${formatBytes(ramUsed)}/${formatBytes(ramTotal)} (${ramUsagePercent.toFixed(0)}%)\nUtilization: ${gpuUsagePercent.toFixed(0)}%\nTemperature: ${!isNaN(gpuTemp) ? `${gpuTemp.toFixed(0)}°C` : "-"}\nPower: ${sysPower !== null ? `${sysPower.toFixed(0)}W` : "-"}`,
         );
 
       if (modelLower === "mac studio") {
