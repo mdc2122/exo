@@ -441,7 +441,9 @@ def _find_ip_prioritised(
             "unknown": 4,
         }
 
-    # RDMA prefers ethernet coordinator
+    # JACCL's coordinator socket is control-plane TCP. On the Studio1/Studio2
+    # MiMo Pro deployment, the known-good Tensor/RDMA path used Tailscale for
+    # this socket while keeping jaccl_devices on rdma_en4 for data transfer.
     else:
         priority = {
             "ethernet": 0,
@@ -453,7 +455,7 @@ def _find_ip_prioritised(
     return min(
         ips,
         key=lambda ip: (
-            1 if _is_tailscale_ip(ip) else 0,
+            0 if _is_tailscale_ip(ip) else 1,
             priority.get(ip_to_type.get(ip, "unknown"), 2),
         ),
     )

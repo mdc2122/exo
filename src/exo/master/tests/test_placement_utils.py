@@ -470,7 +470,7 @@ def test_get_mlx_jaccl_coordinators():
     ), "node_c should use the IP from conn_c_a"
 
 
-def test_get_mlx_jaccl_coordinators_prefers_ethernet_over_tailscale():
+def test_get_mlx_jaccl_coordinators_prefers_tailscale_control_plane():
     node_a_id = NodeId()
     node_b_id = NodeId()
 
@@ -520,7 +520,7 @@ def test_get_mlx_jaccl_coordinators_prefers_ethernet_over_tailscale():
         node_network=node_network,
     )
 
-    assert coordinators[node_b_id] == "192.168.68.55:5000"
+    assert coordinators[node_b_id] == "100.69.240.64:5000"
 
 
 class TestAllocateLayersProportionally:
