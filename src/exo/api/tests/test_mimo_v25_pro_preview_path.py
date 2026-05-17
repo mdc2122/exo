@@ -26,7 +26,9 @@ def _api_with_empty_topology() -> API:
     return api
 
 
-def _preview_ranges(preview_response: PlacementPreviewResponse) -> list[tuple[int, int]]:
+def _preview_ranges(
+    preview_response: PlacementPreviewResponse,
+) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
     for preview in preview_response.previews:
         if preview.instance is None:
@@ -46,8 +48,7 @@ def test_mimo_v25_pro_empty_live_topology_preview_exposes_two_node_candidate() -
 
     assert _preview_ranges(response) == [(0, 35), (35, 70)]
     assert any(
-        preview.instance is not None
-        and preview.sharding.value == "Tensor"
+        preview.instance is not None and preview.sharding.value == "Tensor"
         for preview in response.previews
     )
 
@@ -71,8 +72,7 @@ def test_tensor_create_memory_evidence_uses_per_rank_storage() -> None:
     preview = next(
         preview
         for preview in response.previews
-        if preview.instance is not None
-        and preview.sharding.value == "Tensor"
+        if preview.instance is not None and preview.sharding.value == "Tensor"
     )
     assert preview.instance is not None
     selected_nodes = list(preview.instance.shard_assignments.node_to_runner.keys())
@@ -157,8 +157,7 @@ def test_create_instance_failure_reports_selected_worker_memory_evidence() -> No
         list[dict[str, Any]], detail["selected_worker_memory"]
     )
     statuses = {
-        worker["node_id"]: worker["status"]
-        for worker in selected_worker_memory
+        worker["node_id"]: worker["status"] for worker in selected_worker_memory
     }
     assert statuses[str(selected_nodes[0])] == "non_positive"
     assert statuses[str(selected_nodes[1])] == "missing"
@@ -207,8 +206,7 @@ def test_create_instance_failure_reports_stale_selected_worker_memory() -> None:
         list[dict[str, Any]], detail["selected_worker_memory"]
     )
     statuses = {
-        worker["node_id"]: worker["status"]
-        for worker in selected_worker_memory
+        worker["node_id"]: worker["status"] for worker in selected_worker_memory
     }
     assert statuses == {str(node_id): "stale" for node_id in selected_nodes}
 

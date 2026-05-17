@@ -129,8 +129,13 @@ def guard_output_path(output_dir: Path) -> None:
     resolved = output_dir.resolve()
     root = OUTPUT_ROOT.resolve()
     if resolved != root and root not in resolved.parents:
-        raise ValueError(f"Refusing output path {output_dir}; must be {OUTPUT_ROOT} or child")
-    if resolved == SOURCE_CHECKPOINT.resolve() or SOURCE_CHECKPOINT.resolve() in resolved.parents:
+        raise ValueError(
+            f"Refusing output path {output_dir}; must be {OUTPUT_ROOT} or child"
+        )
+    if (
+        resolved == SOURCE_CHECKPOINT.resolve()
+        or SOURCE_CHECKPOINT.resolve() in resolved.parents
+    ):
         raise ValueError("Output path must not overlap the official source checkpoint")
 
 
@@ -176,7 +181,9 @@ def _matches_any(value: str, patterns: Sequence[str]) -> bool:
     return not patterns or any(fnmatch.fnmatch(value, pattern) for pattern in patterns)
 
 
-def selected_shards(index: SafetensorsIndex, include_shards: Sequence[str]) -> list[str]:
+def selected_shards(
+    index: SafetensorsIndex, include_shards: Sequence[str]
+) -> list[str]:
     return [name for name in source_shards(index) if _matches_any(name, include_shards)]
 
 
@@ -210,7 +217,10 @@ def should_quantize_tensor(
     group_size: int,
 ) -> tuple[bool, str]:
     if tensor_name.endswith(".weight_scale_inv"):
-        return False, "source fp8 scale tensor is consumed when quantizing its paired weight"
+        return (
+            False,
+            "source fp8 scale tensor is consumed when quantizing its paired weight",
+        )
     if len(shape) < 2:
         return False, "rank is below 2"
     if shape[-1] % group_size != 0:
@@ -338,7 +348,9 @@ def _source_nbytes(shape: Sequence[int], dtype: str) -> int:
     return element_count * bytes_per_element
 
 
-def check_free_space(output_dir: Path, expected_output_size: int, *, require_headroom: bool) -> None:
+def check_free_space(
+    output_dir: Path, expected_output_size: int, *, require_headroom: bool
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(output_dir).free
     required = expected_output_size + (HEADROOM_BYTES if require_headroom else 0)
@@ -370,7 +382,11 @@ def estimate_remaining_output_bytes(manifest: RunManifest) -> int:
 def write_config(source_dir: Path, output_dir: Path, manifest: RunManifest) -> None:
     config = json.loads((source_dir / "config.json").read_text())
     config.pop("_name_or_path", None)
-    config["quantization"] = {"group_size": DEFAULT_GROUP_SIZE, "bits": DEFAULT_BITS, "mode": "affine"}
+    config["quantization"] = {
+        "group_size": DEFAULT_GROUP_SIZE,
+        "bits": DEFAULT_BITS,
+        "mode": "affine",
+    }
     config["quantization_config"] = {
         "quant_method": "mlx-affine",
         "group_size": DEFAULT_GROUP_SIZE,
@@ -380,13 +396,19 @@ def write_config(source_dir: Path, output_dir: Path, manifest: RunManifest) -> N
         "custom_model_id": CUSTOM_MODEL_ID,
     }
     config["_custom_exo_quantization"] = manifest["quantization"]
-    (output_dir / "config.json").write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+    (output_dir / "config.json").write_text(
+        json.dumps(config, indent=2, sort_keys=True) + "\n"
+    )
 
 
 def copy_support_files(source_dir: Path, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     for path in source_dir.iterdir():
-        if path.is_file() and path.name in COPIED_FILE_NAMES and path.name != "config.json":
+        if (
+            path.is_file()
+            and path.name in COPIED_FILE_NAMES
+            and path.name != "config.json"
+        ):
             shutil.copy2(path, output_dir / path.name)
         elif path.is_dir() and path.name == "assets":
             target = output_dir / path.name
@@ -418,7 +440,10 @@ def write_output_index(output_dir: Path, manifest: RunManifest) -> None:
         if shard.get("status") not in {"complete", "dry-run"}:
             continue
         for tensor_name, tensor_entry in shard.get("tensors", {}).items():
-            if tensor_name.endswith(".weight_scale_inv") and tensor_entry.get("quantized") is False:
+            if (
+                tensor_name.endswith(".weight_scale_inv")
+                and tensor_entry.get("quantized") is False
+            ):
                 continue
             for output_key in tensor_entry.get("output_keys", [tensor_name]):
                 weight_map[output_key] = shard_name
@@ -445,7 +470,9 @@ def _ceil_div(numerator: int, denominator: int) -> int:
 
 def _broadcast_scale_inv(scale_inv: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
     if len(shape) != 2:
-        raise ValueError(f"FP8 dequantization currently expects rank-2 weights, got {shape}")
+        raise ValueError(
+            f"FP8 dequantization currently expects rank-2 weights, got {shape}"
+        )
     if scale_inv.ndim != 2:
         raise ValueError(f"FP8 scale_inv must be rank-2, got {tuple(scale_inv.shape)}")
     rows, cols = int(shape[0]), int(shape[1])
@@ -453,7 +480,9 @@ def _broadcast_scale_inv(scale_inv: torch.Tensor, shape: Sequence[int]) -> torch
     if rows <= 0 or cols <= 0:
         raise ValueError(f"FP8 target shape must be positive, got {shape}")
     if scale_rows <= 0 or scale_cols <= 0:
-        raise ValueError(f"FP8 scale_inv shape must be positive, got {tuple(scale_inv.shape)}")
+        raise ValueError(
+            f"FP8 scale_inv shape must be positive, got {tuple(scale_inv.shape)}"
+        )
 
     required_scale_rows = _ceil_div(rows, FP8_BLOCK_SIZE)
     required_scale_cols = _ceil_div(cols, FP8_BLOCK_SIZE)
@@ -486,16 +515,26 @@ def _quantize_tensor(
     if tensor.dtype is torch.float8_e4m3fn:
         if scale_inv is None:
             raise ValueError(f"Missing scale_inv for fp8 tensor {tensor_name}")
-        dequantized = tensor.float() * _broadcast_scale_inv(scale_inv.float(), tensor.shape)
+        dequantized = tensor.float() * _broadcast_scale_inv(
+            scale_inv.float(), tensor.shape
+        )
         source = mx.array(dequantized.numpy(), dtype=mx.float32)
     else:
         source = _torch_to_mx(tensor)
-    q_weight, q_scales, q_biases = mx.quantize(source, group_size=group_size, bits=bits, mode="affine")
+    q_weight, q_scales, q_biases = mx.quantize(
+        source, group_size=group_size, bits=bits, mode="affine"
+    )
     mx.eval(q_weight, q_scales, q_biases)
-    return {tensor_name: q_weight, f"{tensor_name}.scales": q_scales, f"{tensor_name}.biases": q_biases}
+    return {
+        tensor_name: q_weight,
+        f"{tensor_name}.scales": q_scales,
+        f"{tensor_name}.biases": q_biases,
+    }
 
 
-def convert_shard(plan: QuantizationPlan, shard_name: str, manifest: RunManifest) -> None:
+def convert_shard(
+    plan: QuantizationPlan, shard_name: str, manifest: RunManifest
+) -> None:
     source_file = plan.source_dir / shard_name
     output_file = plan.output_dir / shard_name
     tmp_file = plan.output_dir / f".{shard_name}.tmp.safetensors"
@@ -527,13 +566,17 @@ def convert_shard(plan: QuantizationPlan, shard_name: str, manifest: RunManifest
                         scale = handle.get_tensor(scale_name)
                         entry["source_scale_inv"] = scale_name
                     output_tensors.update(
-                        _quantize_tensor(tensor_name, tensor, scale, plan.group_size, plan.bits)
+                        _quantize_tensor(
+                            tensor_name, tensor, scale, plan.group_size, plan.bits
+                        )
                     )
                     entry["output_dtype"] = "uint32+scales+biases"
                 else:
                     output_tensors[tensor_name] = _torch_to_mx(tensor)
                     entry["output_dtype"] = str(output_tensors[tensor_name].dtype)
-        mx.save_safetensors(str(tmp_file), output_tensors, metadata={"format": "mlx-affine-6bit"})
+        mx.save_safetensors(
+            str(tmp_file), output_tensors, metadata={"format": "mlx-affine-6bit"}
+        )
         tmp_file.replace(output_file)
         shard_manifest["output_size"] = output_file.stat().st_size
         shard_manifest["status"] = "complete"
@@ -623,7 +666,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.convert == args.dry_run:
         raise ValueError("Choose exactly one of --dry-run or --convert")
     manifest = run_conversion(plan) if args.convert else run_dry_run(plan)
-    print(json.dumps({"manifest": str(plan.output_dir / "quantization_manifest.json"), "expected_output_size_bytes": manifest.get("expected_output_size_bytes", 0)}, indent=2))
+    print(
+        json.dumps(
+            {
+                "manifest": str(plan.output_dir / "quantization_manifest.json"),
+                "expected_output_size_bytes": manifest.get(
+                    "expected_output_size_bytes", 0
+                ),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

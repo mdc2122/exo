@@ -113,7 +113,9 @@ def test_get_cycles_includes_two_node_weak_cycle_for_one_way_link(
 ):
     node_a = NodeId()
     node_b = NodeId()
-    topology.add_connection(Connection(source=node_a, sink=node_b, edge=socket_connection))
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=socket_connection)
+    )
 
     cycles = topology.get_cycles()
 

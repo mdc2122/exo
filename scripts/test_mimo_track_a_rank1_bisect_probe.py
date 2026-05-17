@@ -39,7 +39,9 @@ def test_planned_ranges_default_binary_and_linear() -> None:
     assert probe.planned_end_layers(linear_config) == list(range(60, 71))
 
 
-def test_fake_subprocess_result_parsing_writes_logs_and_last_record(tmp_path: Path) -> None:
+def test_fake_subprocess_result_parsing_writes_logs_and_last_record(
+    tmp_path: Path,
+) -> None:
     manifest_path = tmp_path / "manifest.jsonl"
     config = probe.parse_args(
         [
@@ -62,7 +64,9 @@ def test_fake_subprocess_result_parsing_writes_logs_and_last_record(tmp_path: Pa
 
     captured_command: list[str] = []
 
-    def fake_runner(command: list[str], **_kwargs: object) -> probe.CompletedProcessLike:
+    def fake_runner(
+        command: list[str], **_kwargs: object
+    ) -> probe.CompletedProcessLike:
         captured_command.extend(command)
         return probe.CompletedProcessLike(
             returncode=-signal.SIGKILL,
@@ -112,14 +116,21 @@ def test_manifest_writing_includes_header_and_dry_run_attempts(tmp_path: Path) -
     assert [record["end_layer"] for record in records[1:]] == [68, 69, 70]
     assert all(record["mode"] == "dry-run" for record in records[1:])
     assert all(record["exit_code"] is None for record in records[1:])
-    assert all("mimo_track_a_rank1_load_probe.py" in record["command"][1] for record in records[1:])
+    assert all(
+        "mimo_track_a_rank1_load_probe.py" in record["command"][1]
+        for record in records[1:]
+    )
 
 
-def test_no_heavy_load_default_does_not_run_attempt(tmp_path: Path, monkeypatch) -> None:
+def test_no_heavy_load_default_does_not_run_attempt(
+    tmp_path: Path, monkeypatch
+) -> None:
     manifest_path = tmp_path / "safe-default.jsonl"
 
     def fail_if_execute_path_runs(*_args: object, **_kwargs: object) -> dict[str, Any]:
-        raise AssertionError("default dry-run must not launch the standalone load probe")
+        raise AssertionError(
+            "default dry-run must not launch the standalone load probe"
+        )
 
     monkeypatch.setattr(probe, "run_attempt", fail_if_execute_path_runs)
 

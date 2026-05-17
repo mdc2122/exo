@@ -12,7 +12,9 @@ def test_warmup_inference_skips_generation_when_turboquant_active(
     def fake_apply_chat_template(**_: object) -> str:
         return "warmup"
 
-    monkeypatch.setattr(generate_module, "apply_chat_template", fake_apply_chat_template)
+    monkeypatch.setattr(
+        generate_module, "apply_chat_template", fake_apply_chat_template
+    )
 
     barrier_calls: list[object | None] = []
 

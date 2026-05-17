@@ -169,7 +169,9 @@ def _validate_video_metadata_before_decode(container: object, stream: object) ->
     allowed_containers = _get_csv_env_values(
         "EXO_KIMI_VIDEO_ALLOWED_CONTAINERS", DEFAULT_KIMI_VIDEO_ALLOWED_CONTAINERS
     )
-    if not any(container_name in allowed_containers for container_name in container_names):
+    if not any(
+        container_name in allowed_containers for container_name in container_names
+    ):
         raise VisionPreprocessingError(
             f"unsupported video container '{','.join(container_names)}' for Kimi "
             f"video_url v1. Supported containers: {sorted(allowed_containers)}.",
@@ -195,7 +197,9 @@ def _validate_video_duration_seconds(
 
 
 def _validate_video_payload_size(byte_count: int, max_bytes: int | None = None) -> None:
-    resolved_max_bytes = _get_max_video_payload_bytes() if max_bytes is None else max_bytes
+    resolved_max_bytes = (
+        _get_max_video_payload_bytes() if max_bytes is None else max_bytes
+    )
     if byte_count <= resolved_max_bytes:
         return
     actual_mib = byte_count / 1024 / 1024
@@ -209,7 +213,9 @@ def _validate_video_payload_size(byte_count: int, max_bytes: int | None = None) 
 
 
 def _fetch_video_url_as_base64(url: str, max_bytes: int | None = None) -> str:
-    resolved_max_bytes = _get_max_video_payload_bytes() if max_bytes is None else max_bytes
+    resolved_max_bytes = (
+        _get_max_video_payload_bytes() if max_bytes is None else max_bytes
+    )
     parsed_url = urlsplit(url)
     if parsed_url.scheme not in {"http", "https"}:
         raise VisionPreprocessingError(
@@ -1043,7 +1049,9 @@ def _build_media_region_payloads(
     """
     payloads = list(images)
     for index, video_payload in enumerate(videos):
-        chunk_count = video_chunk_counts[index] if index < len(video_chunk_counts) else 1
+        chunk_count = (
+            video_chunk_counts[index] if index < len(video_chunk_counts) else 1
+        )
         payloads.extend([video_payload] * chunk_count)
     return payloads
 
@@ -1103,9 +1111,7 @@ def _resolve_video_payloads_for_preprocessing(
     resolved_videos.extend(videos)
     for video_url in video_urls:
         logger.debug("Fetching Kimi video URL on worker")
-        resolved_videos.append(
-            _wrap_fetch_video_url_for_structured_errors(video_url)
-        )
+        resolved_videos.append(_wrap_fetch_video_url_for_structured_errors(video_url))
     return resolved_videos
 
 

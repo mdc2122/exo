@@ -4,7 +4,9 @@ from exo.shared.models.model_cards import ModelCard, ModelTask
 from exo.shared.types.common import ModelId
 
 
-async def test_mimo_v25_pro_6bit_builtin_model_card_is_separate_text_only_identity() -> None:
+async def test_mimo_v25_pro_6bit_builtin_model_card_is_separate_text_only_identity() -> (
+    None
+):
     card = await ModelCard.load_from_path(
         Path("resources/inference_model_cards/XiaomiMiMo--MiMo-V2.5-Pro-6bit-MLX.toml")
     )

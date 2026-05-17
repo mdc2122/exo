@@ -25,8 +25,7 @@ from typing import Any, Final
 MODEL_ID: Final[str] = "XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX"
 BASE_MODEL_ID: Final[str] = "XiaomiMiMo/MiMo-V2.5-Pro"
 DEFAULT_MODEL_PATH: Final[Path] = Path(
-    "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/"
-    "XiaomiMiMo--MiMo-V2.5-Pro-6bit-MLX"
+    "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/XiaomiMiMo--MiMo-V2.5-Pro-6bit-MLX"
 )
 DEFAULT_INVESTIGATION_DIR: Final[Path] = Path(
     "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe"
@@ -161,10 +160,19 @@ def planned_end_layers(config: BisectConfig) -> list[int]:
     midpoint = (config.min_end_layer + config.max_end_layer) // 2
     candidates = [midpoint, config.min_end_layer, config.max_end_layer]
     # Add adjacent midpoint probes to make the threshold plan useful while still bounded.
-    for delta in (-(config.max_end_layer - config.min_end_layer) // 4, (config.max_end_layer - config.min_end_layer) // 4):
+    for delta in (
+        -(config.max_end_layer - config.min_end_layer) // 4,
+        (config.max_end_layer - config.min_end_layer) // 4,
+    ):
         if delta:
             candidates.append(midpoint + delta)
-    return sorted({end for end in candidates if config.min_end_layer <= end <= config.max_end_layer})
+    return sorted(
+        {
+            end
+            for end in candidates
+            if config.min_end_layer <= end <= config.max_end_layer
+        }
+    )
 
 
 def make_attempts(config: BisectConfig, manifest_path: Path) -> list[PlannedAttempt]:
@@ -297,7 +305,9 @@ def dry_run_record(config: BisectConfig, attempt: PlannedAttempt) -> dict[str, A
     }
 
 
-def header_record(config: BisectConfig, manifest_path: Path, attempts: Sequence[PlannedAttempt]) -> dict[str, Any]:
+def header_record(
+    config: BisectConfig, manifest_path: Path, attempts: Sequence[PlannedAttempt]
+) -> dict[str, Any]:
     return {
         "type": "manifest-header",
         "created_at": datetime.now(UTC).isoformat(),
@@ -325,14 +335,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = parse_args(argv)
         manifest_path = config.manifest_path or default_manifest_path(config.output_dir)
         attempts = make_attempts(config, manifest_path)
-        append_manifest_record(manifest_path, header_record(config, manifest_path, attempts))
+        append_manifest_record(
+            manifest_path, header_record(config, manifest_path, attempts)
+        )
         for attempt in attempts:
-            record = run_attempt(config, attempt) if config.execute else dry_run_record(config, attempt)
+            record = (
+                run_attempt(config, attempt)
+                if config.execute
+                else dry_run_record(config, attempt)
+            )
             append_manifest_record(manifest_path, record)
         mode = "EXECUTE" if config.execute else "DRY-RUN"
         print(f"MiMo Track A rank-1 bisect probe {mode} manifest: {manifest_path}")
         if not config.execute:
-            print("dry-run: standalone load probe was not launched; pass --execute for real Studio1 probing")
+            print(
+                "dry-run: standalone load probe was not launched; pass --execute for real Studio1 probing"
+            )
         return 0
     except Exception as exc:
         print(f"mimo rank-1 bisect probe failed: {exc}", file=sys.stderr)

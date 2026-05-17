@@ -78,7 +78,9 @@ _DATA_VIDEO_MP4_BASE64_RE = re.compile(
     r"\Adata:video/mp4;base64,(?P<payload>.*)\Z",
     re.IGNORECASE | re.DOTALL,
 )
-_DATA_URL_HEADER_RE = re.compile(r"\Adata:(?P<header>[^,]*)(?:,|\Z)", re.IGNORECASE | re.DOTALL)
+_DATA_URL_HEADER_RE = re.compile(
+    r"\Adata:(?P<header>[^,]*)(?:,|\Z)", re.IGNORECASE | re.DOTALL
+)
 
 # Codecs explicitly listed by Moonshot's chat-with-video documentation.
 # Indexed by lowercase MIME subtype (the bit after `video/`). Mirrored as
@@ -102,6 +104,7 @@ SUPPORTED_VIDEO_MIME_SUBTYPES: frozenset[str] = frozenset(
 SUPPORTED_VIDEO_EXTENSIONS: frozenset[str] = frozenset(
     {".mp4", ".mpeg", ".mpg", ".mov", ".avi", ".flv", ".webm", ".wmv", ".3gp", ".3gpp"}
 )
+
 
 class VideoValidationError(HTTPException):
     """HTTPException subclass that carries an OpenAI-style structured error
@@ -148,7 +151,9 @@ def allow_video_data_urls() -> bool:
 
 
 def validate_video_payload_size(byte_count: int, max_bytes: int | None = None) -> None:
-    resolved_max_bytes = get_max_video_payload_bytes() if max_bytes is None else max_bytes
+    resolved_max_bytes = (
+        get_max_video_payload_bytes() if max_bytes is None else max_bytes
+    )
     if byte_count <= resolved_max_bytes:
         return
 
@@ -206,7 +211,9 @@ def extract_data_video_mp4_base64_payload(data_url: str) -> str:
     match = _DATA_VIDEO_MP4_BASE64_RE.match(data_url)
     if match is None:
         header_match = _DATA_URL_HEADER_RE.match(data_url)
-        observed_header = header_match.group("header") if header_match is not None else ""
+        observed_header = (
+            header_match.group("header") if header_match is not None else ""
+        )
         observed = f"data:{observed_header}" if observed_header else "data URL"
         raise _invalid_data_video_url_error(
             "Malformed video_url.url data URL header. Expected exactly "
@@ -641,7 +648,9 @@ def validate_video_url_content_array_shape(request: ChatCompletionRequest) -> No
                 ),
             )
 
-        text_parts = [part for part in parts if isinstance(part, ChatCompletionMessageText)]
+        text_parts = [
+            part for part in parts if isinstance(part, ChatCompletionMessageText)
+        ]
         if not text_parts:
             raise VideoValidationError(
                 status_code=400,
@@ -674,7 +683,9 @@ def _count_video_url_parts_in_message(message: ChatCompletionMessage) -> int:
         return 1
     if isinstance(message.content, list):
         return sum(
-            1 for part in message.content if isinstance(part, ChatCompletionMessageVideoUrl)
+            1
+            for part in message.content
+            if isinstance(part, ChatCompletionMessageVideoUrl)
         )
     return 0
 
@@ -710,7 +721,9 @@ def validate_single_video_url_part_per_request(request: ChatCompletionRequest) -
 
 
 def _request_contains_video_url(request: ChatCompletionRequest) -> bool:
-    return any(_count_video_url_parts_in_message(message) for message in request.messages)
+    return any(
+        _count_video_url_parts_in_message(message) for message in request.messages
+    )
 
 
 def validate_video_streaming_not_requested(request: ChatCompletionRequest) -> None:
@@ -874,7 +887,9 @@ async def chat_request_to_text_generation(
             content = ""
         else:
             video_url_part_count = sum(
-                1 for part in msg.content if isinstance(part, ChatCompletionMessageVideoUrl)
+                1
+                for part in msg.content
+                if isinstance(part, ChatCompletionMessageVideoUrl)
             )
             if video_url_part_count > 1:
                 raise VideoValidationError(
@@ -909,7 +924,9 @@ async def chat_request_to_text_generation(
                         else:
                             video_b64 = extract_base64_from_data_url(url)
                         validate_video_base64_payload_size(video_b64)
-                        video_sources.append(_normalized_base64_mp4_video_source(video_b64))
+                        video_sources.append(
+                            _normalized_base64_mp4_video_source(video_b64)
+                        )
                     has_videos = True
                 elif isinstance(part, ChatCompletionMessageImageUrl):
                     url = part.image_url.get("url", "")

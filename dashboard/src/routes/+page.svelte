@@ -844,10 +844,7 @@
 
   // Route a message to the correct endpoint based on model capabilities.
   // Image models go to generateImage/editImage; text models go to sendMessage.
-  function routeMessage(
-    content: string,
-    files?: ChatUploadedFile[],
-  ) {
+  function routeMessage(content: string, files?: ChatUploadedFile[]) {
     const model = selectedChatModel();
     if (!model) {
       sendMessage(content, files, thinkingEnabled());
@@ -2826,10 +2823,7 @@
   }
 
   // Handle auto-send: user typed without selecting a model
-  async function handleAutoSend(
-    content: string,
-    files?: ChatUploadedFile[],
-  ) {
+  async function handleAutoSend(content: string, files?: ChatUploadedFile[]) {
     // Clear forced-idle so restore effect resumes normal operation
     userForcedIdle = false;
 
@@ -3097,10 +3091,7 @@
   }
 
   // Unified send handler: sends if model running, auto-launches if not
-  function handleChatSend(
-    content: string,
-    files?: ChatUploadedFile[],
-  ) {
+  function handleChatSend(content: string, files?: ChatUploadedFile[]) {
     const model = selectedChatModel();
 
     // Model is selected and running — send directly

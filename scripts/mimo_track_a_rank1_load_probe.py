@@ -24,8 +24,7 @@ from typing import Any, Final
 MODEL_ID: Final[str] = "XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX"
 BASE_MODEL_ID: Final[str] = "XiaomiMiMo/MiMo-V2.5-Pro"
 DEFAULT_MODEL_PATH: Final[Path] = Path(
-    "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/"
-    "XiaomiMiMo--MiMo-V2.5-Pro-6bit-MLX"
+    "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/XiaomiMiMo--MiMo-V2.5-Pro-6bit-MLX"
 )
 DEFAULT_INVESTIGATION_DIR: Final[Path] = Path(
     "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/investigations/rank1-load-probe"
@@ -140,7 +139,10 @@ def iso_timestamp() -> str:
 
 
 def default_output_path() -> Path:
-    return DEFAULT_INVESTIGATION_DIR / f"mimo-track-a-rank1-load-probe-{utc_timestamp()}.jsonl"
+    return (
+        DEFAULT_INVESTIGATION_DIR
+        / f"mimo-track-a-rank1-load-probe-{utc_timestamp()}.jsonl"
+    )
 
 
 def read_config_json(model_path: Path) -> dict[str, Any]:
@@ -200,7 +202,9 @@ def validate_model_metadata(model_path: Path) -> ModelMetadata:
             f"unexpected architecture {architecture!r}; expected {EXPECTED_ARCHITECTURE!r}"
         )
     if model_type not in {EXPECTED_MODEL_TYPE, None}:
-        raise ValueError(f"unexpected model_type {model_type!r}; expected {EXPECTED_MODEL_TYPE!r}")
+        raise ValueError(
+            f"unexpected model_type {model_type!r}; expected {EXPECTED_MODEL_TYPE!r}"
+        )
     if n_layers <= 0:
         raise ValueError(f"invalid layer count: {n_layers}")
 
@@ -395,7 +399,9 @@ def run_probe(config: ProbeConfig, metadata: ModelMetadata, output_path: Path) -
 
     model, _ = exo_mlx_utils.load_model(config.model_path, lazy=True, strict=False)
     if not isinstance(model, nn.Module):
-        raise TypeError(f"expected mlx.nn.Module from load_model, got {type(model).__name__}")
+        raise TypeError(
+            f"expected mlx.nn.Module from load_model, got {type(model).__name__}"
+        )
 
     inner_model = get_inner_model(model)
     layers = get_layers(inner_model)
@@ -436,7 +442,9 @@ def run_probe(config: ProbeConfig, metadata: ModelMetadata, output_path: Path) -
                     mx_module=mx,
                 ),
             )
-            print(f"recorded {stage}: global_layer={global_index} local={local_ordinal}")
+            print(
+                f"recorded {stage}: global_layer={global_index} local={local_ordinal}"
+            )
         except BaseException as exc:
             append_jsonl(
                 output_path,

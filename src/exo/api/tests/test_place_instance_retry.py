@@ -74,7 +74,9 @@ def test_place_instance_retries_until_placement_becomes_ready(
 
     monkeypatch.setattr(api, "_send", fake_send)
     monkeypatch.setattr("exo.api.main.anyio.sleep", fake_sleep)
-    monkeypatch.setattr("exo.api.main.get_instance_placements", fake_get_instance_placements)
+    monkeypatch.setattr(
+        "exo.api.main.get_instance_placements", fake_get_instance_placements
+    )
     monkeypatch.setattr("exo.api.main.ModelCard.load", fake_load)
 
     payload = PlaceInstanceParams(
@@ -98,16 +100,22 @@ def test_place_instance_raises_on_non_retryable_error(
     api = _api()
 
     async def fake_send(_: Any) -> None:
-        raise AssertionError("send should not be reached on non-retryable placement error")
+        raise AssertionError(
+            "send should not be reached on non-retryable placement error"
+        )
 
     async def fake_load(_: ModelId) -> ModelCard:
         return _model_card()
 
     def fake_get_instance_placements(*_: object, **__: object) -> dict[str, object]:
-        raise ValueError("Requested Tensor sharding but this model does not support tensor parallelism")
+        raise ValueError(
+            "Requested Tensor sharding but this model does not support tensor parallelism"
+        )
 
     monkeypatch.setattr(api, "_send", fake_send)
-    monkeypatch.setattr("exo.api.main.get_instance_placements", fake_get_instance_placements)
+    monkeypatch.setattr(
+        "exo.api.main.get_instance_placements", fake_get_instance_placements
+    )
     monkeypatch.setattr("exo.api.main.ModelCard.load", fake_load)
 
     payload = PlaceInstanceParams(

@@ -331,8 +331,7 @@ def test_mimo_v25_pro_6bit_two_node_pipeline_caps_tail_shard_at_32_layers():
     assert isinstance(shard_a, PipelineShardMetadata)
     assert isinstance(shard_b, PipelineShardMetadata)
     shard_ranges = sorted(
-        (shard.start_layer, shard.end_layer)
-        for shard in (shard_a, shard_b)
+        (shard.start_layer, shard.end_layer) for shard in (shard_a, shard_b)
     )
     assert shard_ranges == [(0, 38), (38, 70)]
 

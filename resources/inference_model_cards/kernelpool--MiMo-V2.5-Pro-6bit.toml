@@ -9,7 +9,14 @@ tasks = ["TextGeneration"]
 family = "mimo"
 quantization = "6bit-mlx-affine"
 base_model = "XiaomiMiMo/MiMo-V2.5-Pro"
-capabilities = ["text", "thinking", "thinking_toggle", "agentic", "long-context", "code"]
+capabilities = [
+  "text",
+  "thinking",
+  "thinking_toggle",
+  "agentic",
+  "long-context",
+  "code",
+]
 
 context_length = 1048576
 trust_remote_code = true

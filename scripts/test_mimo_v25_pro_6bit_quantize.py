@@ -143,7 +143,9 @@ def test_broadcast_scale_inv_preserves_normal_divisible_fp8_blocks() -> None:
     assert torch.all(broadcast[128:, 128:] == 4.0)
 
 
-def test_write_config_replaces_official_fp8_quantization_metadata(tmp_path: Path) -> None:
+def test_write_config_replaces_official_fp8_quantization_metadata(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "source"
     output = tmp_path / "output"
     source.mkdir()
@@ -167,7 +169,9 @@ def test_write_config_replaces_official_fp8_quantization_metadata(tmp_path: Path
     rewritten = json.loads((output / "config.json").read_text())
     assert rewritten["quantization"] == {"group_size": 64, "bits": 6, "mode": "affine"}
     assert rewritten["quantization_config"]["quant_method"] == "mlx-affine"
-    assert rewritten["quantization_config"]["custom_model_id"] == quantize.CUSTOM_MODEL_ID
+    assert (
+        rewritten["quantization_config"]["custom_model_id"] == quantize.CUSTOM_MODEL_ID
+    )
 
 
 def test_manifest_round_trip_and_output_index_generation(tmp_path: Path) -> None:
@@ -225,13 +229,23 @@ def test_dry_run_writes_sizing_support_files_config_index_and_manifest(
 
     rewritten_config = json.loads((output / "config.json").read_text())
     assert "_name_or_path" not in rewritten_config
-    assert rewritten_config["quantization_config"]["base_model"] == quantize.BASE_MODEL_ID
-    assert rewritten_config["quantization_config"]["custom_model_id"] == quantize.CUSTOM_MODEL_ID
+    assert (
+        rewritten_config["quantization_config"]["base_model"] == quantize.BASE_MODEL_ID
+    )
+    assert (
+        rewritten_config["quantization_config"]["custom_model_id"]
+        == quantize.CUSTOM_MODEL_ID
+    )
 
     output_index = json.loads((output / "model.safetensors.index.json").read_text())
     assert output_index["metadata"]["total_size"] == 116
-    assert output_index["weight_map"]["layer.weight.scales"] == "model-00001-of-00001.safetensors"
-    assert output_index["weight_map"]["layer.bias"] == "model-00001-of-00001.safetensors"
+    assert (
+        output_index["weight_map"]["layer.weight.scales"]
+        == "model-00001-of-00001.safetensors"
+    )
+    assert (
+        output_index["weight_map"]["layer.bias"] == "model-00001-of-00001.safetensors"
+    )
 
 
 def test_conversion_pilot_writes_quantized_dtype_metadata_manifest_and_no_tmp_files(
@@ -255,7 +269,10 @@ def test_conversion_pilot_writes_quantized_dtype_metadata_manifest_and_no_tmp_fi
 
     output_index = json.loads((output / "model.safetensors.index.json").read_text())
     assert output_index["metadata"]["save_format"] == "mlx-affine-6bit"
-    assert output_index["weight_map"]["layer.weight.biases"] == "model-00001-of-00001.safetensors"
+    assert (
+        output_index["weight_map"]["layer.weight.biases"]
+        == "model-00001-of-00001.safetensors"
+    )
 
 
 def test_run_dry_run_preserves_completed_shard_for_resumability(
@@ -321,4 +338,7 @@ def test_cleanup_incomplete_removes_hidden_tmp_files_and_marks_incomplete(
     assert not (output / ".model-00001-of-00001.safetensors.tmp").exists()
     assert not (output / ".model-00002-of-00002.safetensors.tmp.safetensors").exists()
     manifest = quantize.load_manifest(output / "quantization_manifest.json")
-    assert manifest["shards"]["model-00001-of-00001.safetensors"]["status"] == "cleanup-required"
+    assert (
+        manifest["shards"]["model-00001-of-00001.safetensors"]["status"]
+        == "cleanup-required"
+    )

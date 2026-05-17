@@ -20,7 +20,13 @@ export interface ChatAttachment {
   mimeType?: string;
 }
 
-export type FileCategory = "image" | "text" | "pdf" | "audio" | "video" | "unknown";
+export type FileCategory =
+  | "image"
+  | "text"
+  | "pdf"
+  | "audio"
+  | "video"
+  | "unknown";
 
 export const IMAGE_EXTENSIONS = [
   ".jpg",

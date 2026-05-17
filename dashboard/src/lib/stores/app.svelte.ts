@@ -427,13 +427,15 @@ function readMemoryBytes(
     : 0;
 }
 
-function readTelemetryNumber(
-  value: number | undefined,
-): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+function readTelemetryNumber(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
-function normalizeUtilizationFraction(value: number | undefined): number | undefined {
+function normalizeUtilizationFraction(
+  value: number | undefined,
+): number | undefined {
   const raw = readTelemetryNumber(value);
   if (raw === undefined) return undefined;
   const percent = raw <= 1 ? raw * 100 : raw;
@@ -490,10 +492,7 @@ function transformTopology(
           ram_usage: ramUsage,
           ram_total: ramTotal,
         },
-        temp:
-          temp !== undefined
-            ? { gpu_temp_avg: temp }
-            : undefined,
+        temp: temp !== undefined ? { gpu_temp_avg: temp } : undefined,
         gpu_usage: gpuUsage !== undefined ? [0, gpuUsage] : undefined,
         sys_power: sysPower,
       },
@@ -2330,7 +2329,8 @@ class AppStore {
 
     if (files && files.length > 0) {
       const videoFiles = files.filter(
-        (file) => file.type === "video/mp4" || file.name.toLowerCase().endsWith(".mp4"),
+        (file) =>
+          file.type === "video/mp4" || file.name.toLowerCase().endsWith(".mp4"),
       );
       if (videoFiles.length > 1) {
         this.isLoading = false;

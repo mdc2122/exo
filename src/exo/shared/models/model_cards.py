@@ -126,9 +126,7 @@ class VisionCardConfig(CamelCaseModel):
 
 MIMO_V25_PRO_MODEL_ID = ModelId("XiaomiMiMo/MiMo-V2.5-Pro")
 MIMO_V25_PRO_6BIT_MLX_MODEL_ID = ModelId("XiaomiMiMo/MiMo-V2.5-Pro-6bit-MLX")
-MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID = ModelId(
-    "kernelpool/MiMo-V2.5-Pro-6bit"
-)
+MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID = ModelId("kernelpool/MiMo-V2.5-Pro-6bit")
 MIMO_V25_PRO_MODEL_IDS = frozenset(
     {
         MIMO_V25_PRO_MODEL_ID,
@@ -189,8 +187,7 @@ class ModelCard(CamelCaseModel):
 
         if self.architecture != MIMO_V25_PRO_ARCHITECTURE:
             raise ValueError(
-                f"{self.model_id} requires architecture "
-                f"{MIMO_V25_PRO_ARCHITECTURE}"
+                f"{self.model_id} requires architecture {MIMO_V25_PRO_ARCHITECTURE}"
             )
         if self.tasks != [ModelTask.TextGeneration]:
             raise ValueError(f"{self.model_id} supports text generation only")

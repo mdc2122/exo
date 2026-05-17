@@ -304,8 +304,12 @@ def _memory_evidence_for_selected_workers(
                 "required_gb": required_memory.in_gb,
                 "ram_available_bytes": available_memory.in_bytes,
                 "ram_available_gb": available_memory.in_gb,
-                "ram_total_bytes": memory.ram_total.in_bytes if memory is not None else None,
-                "last_seen": last_seen_at.isoformat() if last_seen_at is not None else None,
+                "ram_total_bytes": memory.ram_total.in_bytes
+                if memory is not None
+                else None,
+                "last_seen": last_seen_at.isoformat()
+                if last_seen_at is not None
+                else None,
                 "last_seen_age_seconds": age_seconds,
                 "max_age_seconds": max_age_seconds,
                 "status": status,
@@ -681,9 +685,7 @@ class API:
                 instance_combinations.extend(
                     [
                         (sharding, instance_meta, i)
-                        for i in range(
-                            1, len(list(preview_topology.list_nodes())) + 1
-                        )
+                        for i in range(1, len(list(preview_topology.list_nodes())) + 1)
                     ]
                 )
         # TODO: PDD

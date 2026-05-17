@@ -77,7 +77,9 @@ from exo.worker.runner.bootstrap import logger
 # implementation module in the pinned runtime is named mimo_v2_flash. Register
 # the alias before load_model is called so both single-node and sharded load
 # paths can resolve the text-only MiMo V2 causal LM implementation.
-cast(dict[str, str], mlx_lm_utils.MODEL_REMAPPING).setdefault("mimo_v2", "mimo_v2_flash")
+cast(dict[str, str], mlx_lm_utils.MODEL_REMAPPING).setdefault(
+    "mimo_v2", "mimo_v2_flash"
+)
 
 _MimoV2Weights = dict[str, mx.array]
 
@@ -134,7 +136,9 @@ try:
                 normalized[_normalize_mimo_v2_weight_key(key)] = value
                 continue
             prefix, suffix = key.split(".self_attn.qkv_proj.", 1)
-            normalized_suffix = _normalize_mimo_v2_weight_key(f"x.{suffix}").removeprefix("x.")
+            normalized_suffix = _normalize_mimo_v2_weight_key(
+                f"x.{suffix}"
+            ).removeprefix("x.")
             if value.shape[0] != sum(split_sizes):
                 normalized[_normalize_mimo_v2_weight_key(key)] = value
                 continue
@@ -174,8 +178,7 @@ def _mimo_exo_quant_metadata_dtype() -> mx.Dtype | None:
     if value in {"bf16", "bfloat16"}:
         return mx.bfloat16
     raise ValueError(
-        "EXO_MIMO_QUANT_METADATA_DTYPE must be one of float16, bfloat16, "
-        "float32, none"
+        "EXO_MIMO_QUANT_METADATA_DTYPE must be one of float16, bfloat16, float32, none"
     )
 
 
@@ -186,7 +189,9 @@ def _downcast_mimo_quant_metadata(model: nn.Module) -> None:
         return
 
     converted = 0
-    named_modules = cast(Callable[[], Iterable[tuple[str, nn.Module]]], model.named_modules)
+    named_modules = cast(
+        Callable[[], Iterable[tuple[str, nn.Module]]], model.named_modules
+    )
     for _, module in named_modules():
         if not isinstance(module, QuantizedLinear):
             continue
@@ -1138,7 +1143,10 @@ def mx_all_gather_tasks(
         .tolist(),
     )
     all_task_ids: list[list[TaskId]] = [
-        [decode_task_id_bytes(encoded_task_id) for encoded_task_id in rank_tasks[:count]]
+        [
+            decode_task_id_bytes(encoded_task_id)
+            for encoded_task_id in rank_tasks[:count]
+        ]
         for rank_tasks, count in zip(gathered, all_counts, strict=True)
     ]
 

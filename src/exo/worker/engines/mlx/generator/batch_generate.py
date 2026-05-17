@@ -63,7 +63,13 @@ class _CacheListWithCaches(Protocol):
 
 def _native_batch_fallback_enabled() -> bool:
     raw = os.environ.get("EXO_TURBOQUANT_NATIVE_BATCH_FALLBACK")
-    return raw is not None and raw.strip().lower() not in {"", "0", "false", "off", "no"}
+    return raw is not None and raw.strip().lower() not in {
+        "",
+        "0",
+        "false",
+        "off",
+        "no",
+    }
 
 
 def _batch_compatible_cache(layer_cache: object) -> object:
@@ -72,7 +78,9 @@ def _batch_compatible_cache(layer_cache: object) -> object:
 
     if isinstance(layer_cache, CacheList):
         cache_list = cast(_CacheListWithCaches, cast(object, layer_cache))
-        return CacheList(*(_batch_compatible_cache(cache) for cache in cache_list.caches))
+        return CacheList(
+            *(_batch_compatible_cache(cache) for cache in cache_list.caches)
+        )
 
     native_cache = cast(object | None, getattr(layer_cache, "_native_cache", None))
     if native_cache is not None:
