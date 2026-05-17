@@ -38,3 +38,8 @@ bench/**/*.json
 
 # tmp
 tmp/models
+
+# local agent/workflow artifacts
+.omc/
+.ouroboros/
+*.seed.yaml

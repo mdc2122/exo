@@ -50,14 +50,11 @@ def check_array_shape(arr):
         return False
 
     out_channels, kernel_height, kernel_width, _ = shape
-    if (
+    return (
         out_channels >= kernel_height
         and out_channels >= kernel_width
         and kernel_height == kernel_width
-    ):
-        return True
-    else:
-        return False
+    )
 
 
 def rotate_half(x):

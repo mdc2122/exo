@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -1100,21 +1100,18 @@ def _parse_kimi_tool_calls(text: str):
         return [_parse_single_tool(text)]
 
 
+def encode_task_id_bytes(task_id: TaskId) -> list[int]:
+    return list(task_id.encode())
+
+
+def decode_task_id_bytes(encoded_task_id: Sequence[int]) -> TaskId:
+    return TaskId(bytes(value % 256 for value in encoded_task_id).decode())
+
+
 def mx_all_gather_tasks(
     tasks: list[TextGeneration],
     group: mx.distributed.Group | None,
 ) -> tuple[list[TextGeneration], list[TextGeneration]]:
-    def encode_task_id(task_id: TaskId) -> list[int]:
-        utf8_task_id = task_id.encode()
-        return [
-            int.from_bytes(utf8_task_id[i : i + 1]) for i in range(len(utf8_task_id))
-        ]
-
-    def decode_task_id(encoded_task_id: list[int]) -> TaskId:
-        return TaskId(
-            bytes.decode(b"".join((x).to_bytes(length=1) for x in encoded_task_id))
-        )
-
     uuid_byte_length = 36
 
     n_tasks = len(tasks)
@@ -1128,7 +1125,7 @@ def mx_all_gather_tasks(
     if max_tasks == 0:
         return [], []
 
-    padded = [encode_task_id(task.task_id) for task in tasks] + [
+    padded = [encode_task_id_bytes(task.task_id) for task in tasks] + [
         [0] * uuid_byte_length
     ] * (max_tasks - n_tasks)
 
@@ -1141,7 +1138,7 @@ def mx_all_gather_tasks(
         .tolist(),
     )
     all_task_ids: list[list[TaskId]] = [
-        [decode_task_id(encoded_task_id) for encoded_task_id in rank_tasks[:count]]
+        [decode_task_id_bytes(encoded_task_id) for encoded_task_id in rank_tasks[:count]]
         for rank_tasks, count in zip(gathered, all_counts, strict=True)
     ]
 

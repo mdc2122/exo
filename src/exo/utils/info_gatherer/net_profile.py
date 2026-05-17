@@ -1,6 +1,6 @@
+import ipaddress
 from collections import defaultdict
 from collections.abc import AsyncGenerator, Mapping
-import ipaddress
 
 import anyio
 import httpx

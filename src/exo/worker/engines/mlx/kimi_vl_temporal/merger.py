@@ -33,7 +33,7 @@ def tpool_patch_merger(
 
     sequences = mx.split(x, split_points, axis=0) if split_points else [x]
     outputs = []
-    for seq, (time, height, width) in zip(sequences, shapes):
+    for seq, (time, height, width) in zip(sequences, shapes, strict=True):
         new_height = height // kernel_height
         new_width = width // kernel_width
         reshaped_seq = seq.reshape(

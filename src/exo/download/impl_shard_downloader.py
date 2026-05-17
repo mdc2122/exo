@@ -7,8 +7,8 @@ from typing import AsyncIterator, Callable
 from loguru import logger
 
 from exo.download.download_utils import (
-    build_companion_vision_shard,
     RepoDownloadProgress,
+    build_companion_vision_shard,
     download_shard,
     resolve_existing_model,
 )

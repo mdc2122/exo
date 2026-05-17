@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 SSH_TARGET = "studio2@100.93.190.120"
 API_URL = "http://127.0.0.1:52415/v1/chat/completions"
 MODEL = "mlx-community/Kimi-K2.5"

@@ -1,20 +1,21 @@
 import pytest
 
-from exo.shared.types.events import NodeGatheredInfo
+from exo.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
+from exo.shared.types.events import Event, IndexedEvent, NodeGatheredInfo
 from exo.shared.types.profiling import NetworkInterfaceInfo
 from exo.utils.channels import channel
-from exo.utils.info_gatherer.info_gatherer import NodeNetworkInterfaces
+from exo.utils.info_gatherer.info_gatherer import GatheredInfo, NodeNetworkInterfaces
 from exo.worker.main import Worker
 from exo.worker.tests.constants import NODE_A
 
 
 @pytest.mark.asyncio
 async def test_forward_info_skips_duplicate_payloads() -> None:
-    event_send, event_recv = channel()
-    command_send, _command_recv = channel()
-    download_send, _download_recv = channel()
-    _event_send_unused, event_recv_unused = channel()
-    info_send, info_recv = channel()
+    event_send, event_recv = channel[Event]()
+    command_send, _command_recv = channel[ForwarderCommand]()
+    download_send, _download_recv = channel[ForwarderDownloadCommand]()
+    _event_send_unused, event_recv_unused = channel[IndexedEvent]()
+    info_send, info_recv = channel[GatheredInfo]()
 
     worker = Worker(
         NODE_A,
@@ -27,7 +28,7 @@ async def test_forward_info_skips_duplicate_payloads() -> None:
 
     info = NodeNetworkInterfaces(
         ifaces=[
-            NetworkInterfaceInfo(name="en0", ipAddress="192.168.1.2"),
+            NetworkInterfaceInfo(name="en0", ip_address="192.168.1.2"),
         ]
     )
 
@@ -36,13 +37,13 @@ async def test_forward_info_skips_duplicate_payloads() -> None:
     await info_send.send(
         NodeNetworkInterfaces(
             ifaces=[
-                NetworkInterfaceInfo(name="en0", ipAddress="192.168.1.3"),
+                NetworkInterfaceInfo(name="en0", ip_address="192.168.1.3"),
             ]
         )
     )
     info_send.close()
 
-    await worker._forward_info(info_recv)
+    await worker.forward_info(info_recv)
 
     first = await event_recv.receive()
     second = await event_recv.receive()

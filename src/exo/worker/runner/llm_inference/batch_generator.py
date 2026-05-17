@@ -94,6 +94,15 @@ EXO_RUNNER_MUST_OOM = "EXO RUNNER MUST OOM"
 EXO_RUNNER_MUST_TIMEOUT = "EXO RUNNER MUST TIMEOUT"
 
 
+def advance_coordination_counter(counter: int, threshold: int) -> tuple[int, bool]:
+    if threshold <= 0:
+        return 0, True
+    counter += 1
+    if counter >= threshold:
+        return 0, True
+    return counter, False
+
+
 def _check_for_debug_prompts(task_params: TextGenerationTaskParams) -> None:
     """Check for debug prompt triggers in the input."""
     from exo.worker.engines.mlx.utils_mlx import mlx_force_oom
@@ -300,9 +309,10 @@ class SequentialGenerator(InferenceGenerator):
 
         def on_generation_token() -> None:
             nonlocal tokens_since_cancel_check
-            tokens_since_cancel_check += 1
-            if tokens_since_cancel_check >= self.check_for_cancel_every:
-                tokens_since_cancel_check = 0
+            tokens_since_cancel_check, should_check = advance_coordination_counter(
+                tokens_since_cancel_check, self.check_for_cancel_every
+            )
+            if should_check:
                 self.agree_on_cancellations()
                 if self.should_cancel(task.task_id):
                     raise PrefillCancelled()
@@ -549,9 +559,10 @@ class BatchGenerator(InferenceGenerator):
 
         def on_generation_token() -> None:
             nonlocal tokens_since_cancel_check
-            tokens_since_cancel_check += 1
-            if tokens_since_cancel_check >= self.check_for_cancel_every:
-                tokens_since_cancel_check = 0
+            tokens_since_cancel_check, should_check = advance_coordination_counter(
+                tokens_since_cancel_check, self.check_for_cancel_every
+            )
+            if should_check:
                 self.agree_on_cancellations()
                 if self.should_cancel(task.task_id):
                     self._cancelled_tasks.add(task.task_id)

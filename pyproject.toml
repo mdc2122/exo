@@ -98,6 +98,8 @@ exclude = [
   "**/.venv",
   "**/venv",
   "**/__pycache__",
+  "**/.omc",
+  "**/.ouroboros",
   "**/exo_scripts",
   "**/.direnv",
   "**/rust",
@@ -127,6 +129,8 @@ extra-build-dependencies = { "miniaudio" = ["setuptools", "cffi", "pycparser"] }
 extend-exclude = [
   "shared/protobufs/**",
   "*mlx_typings/**",
+  ".omc/**",
+  ".ouroboros/**",
   "rust/exo_pyo3_bindings/**",
   "bench/vendor/**",
 ]

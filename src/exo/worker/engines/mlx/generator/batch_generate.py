@@ -1,7 +1,8 @@
 import contextlib
+import os
 import time
 from dataclasses import dataclass, field
-from typing import Callable, cast
+from typing import Callable, Protocol, cast
 
 import mlx.core as mx
 from mlx_lm.generate import (
@@ -10,7 +11,7 @@ from mlx_lm.generate import (
 from mlx_lm.generate import (
     generation_stream,
 )
-from mlx_lm.models.cache import RotatingKVCache
+from mlx_lm.models.cache import CacheList, RotatingKVCache
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 from mlx_lm.tokenizer_utils import StreamingDetokenizer, TokenizerWrapper
 
@@ -54,6 +55,34 @@ from exo.worker.engines.mlx.vision import (
 from exo.worker.runner.bootstrap import logger
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
+
+
+class _CacheListWithCaches(Protocol):
+    caches: tuple[object, ...]
+
+
+def _native_batch_fallback_enabled() -> bool:
+    raw = os.environ.get("EXO_TURBOQUANT_NATIVE_BATCH_FALLBACK")
+    return raw is not None and raw.strip().lower() not in {"", "0", "false", "off", "no"}
+
+
+def _batch_compatible_cache(layer_cache: object) -> object:
+    if not _native_batch_fallback_enabled():
+        return layer_cache
+
+    if isinstance(layer_cache, CacheList):
+        cache_list = cast(_CacheListWithCaches, cast(object, layer_cache))
+        return CacheList(*(_batch_compatible_cache(cache) for cache in cache_list.caches))
+
+    native_cache = cast(object | None, getattr(layer_cache, "_native_cache", None))
+    if native_cache is not None:
+        return native_cache
+
+    return layer_cache
+
+
+def _cache_for_batch_engine(cache: list[object]) -> list[object]:
+    return [_batch_compatible_cache(layer_cache) for layer_cache in cache]
 
 
 def _stop_sequences(task_params: TextGenerationTaskParams) -> list[str]:
@@ -283,7 +312,7 @@ class ExoBatchGenerator:
         uids = self._mlx_gen.insert(
             prompts=[last_tokens.tolist()],
             max_tokens=[max_tokens],
-            caches=[list(cache)],
+            caches=[_cache_for_batch_engine(list(cache))],
             samplers=[sampler],
             logits_processors=[logits_processors],
         )

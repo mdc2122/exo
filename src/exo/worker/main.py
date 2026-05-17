@@ -102,7 +102,7 @@ class Worker:
         try:
             async with self._tg as tg:
                 tg.start_soon(info_gatherer.run)
-                tg.start_soon(self._forward_info, info_recv)
+                tg.start_soon(self.forward_info, info_recv)
                 tg.start_soon(self.plan_step)
                 tg.start_soon(self._event_applier)
                 tg.start_soon(self._poll_connection_updates)
@@ -116,7 +116,7 @@ class Worker:
                 runner.shutdown()
             self._stopped.set()
 
-    async def _forward_info(self, recv: Receiver[GatheredInfo]):
+    async def forward_info(self, recv: Receiver[GatheredInfo]) -> None:
         last_info_by_type: dict[type[GatheredInfo], GatheredInfo] = {}
         with recv as info_stream:
             async for info in info_stream:
@@ -131,6 +131,9 @@ class Worker:
                         info=info,
                     )
                 )
+
+    async def _forward_info(self, recv: Receiver[GatheredInfo]) -> None:
+        await self.forward_info(recv)
 
     async def _event_applier(self):
         with self.event_receiver as events:
