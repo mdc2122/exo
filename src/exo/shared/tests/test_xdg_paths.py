@@ -16,7 +16,7 @@ def test_xdg_paths_on_linux():
                 "XDG_DATA_HOME": "/tmp/test-data",
                 "XDG_CACHE_HOME": "/tmp/test-cache",
             },
-            clear=False,
+            clear=True,
         ),
         mock.patch.object(sys, "platform", "linux"),
     ):

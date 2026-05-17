@@ -205,6 +205,12 @@ _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
 ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
 _MIMO_V25_PRO_6BIT_PREVIEW_NODE_MEMORY_GB = (512, 512)
 _SELECTED_WORKER_MEMORY_MAX_AGE_SECONDS = 120.0
+_PLACE_INSTANCE_READY_MAX_ATTEMPTS = 3
+_PLACE_INSTANCE_READY_RETRY_DELAY_SECONDS = 1.0
+_PLACE_INSTANCE_RETRYABLE_ERRORS = (
+    "No cycles found with sufficient memory",
+    "No tensor sharding found",
+)
 
 
 def _format_to_content_type(image_format: Literal["png", "jpeg", "webp"] | None) -> str:
@@ -234,6 +240,11 @@ def _ensure_seed(params: AdvancedImageParams | None) -> AdvancedImageParams:
     if params.seed is None:
         return params.model_copy(update={"seed": random.randint(0, 2**32 - 1)})
     return params
+
+
+def _is_retryable_placement_error(exc: ValueError) -> bool:
+    message = str(exc)
+    return any(error in message for error in _PLACE_INSTANCE_RETRYABLE_ERRORS)
 
 
 def _mimo_preview_socket_connection(ip_index: int) -> SocketConnection:
@@ -558,6 +569,24 @@ class API:
             instance_meta=payload.instance_meta,
             min_nodes=payload.min_nodes,
         )
+        for attempt in range(_PLACE_INSTANCE_READY_MAX_ATTEMPTS):
+            try:
+                get_instance_placements(
+                    command.model_copy(deep=True),
+                    node_memory=self.state.node_memory,
+                    node_network=self.state.node_network,
+                    topology=self.state.topology,
+                    current_instances=self.state.instances,
+                    download_status=self.state.downloads,
+                )
+                break
+            except ValueError as exc:
+                if not _is_retryable_placement_error(exc):
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+                if attempt == _PLACE_INSTANCE_READY_MAX_ATTEMPTS - 1:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+                await anyio.sleep(_PLACE_INSTANCE_READY_RETRY_DELAY_SECONDS)
+
         await self._send(command)
 
         return CreateInstanceResponse(

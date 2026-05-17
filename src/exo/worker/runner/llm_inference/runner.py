@@ -69,6 +69,13 @@ from exo.worker.runner.llm_inference.batch_generator import (
 from .batch_generator import Cancelled, Finished
 from .tool_parsers import make_mlx_parser
 
+_FALSEY_ENV_VALUES = frozenset({"", "0", "false", "off", "no"})
+
+
+def _env_flag_enabled(name: str) -> bool:
+    raw = os.environ.get(name)
+    return raw is not None and raw.strip().lower() not in _FALSEY_ENV_VALUES
+
 
 class ExitCode(str, Enum):
     AllTasksComplete = "AllTasksComplete"
@@ -420,7 +427,7 @@ class Builder:
             )
 
         device_rank = 0 if self.group is None else self.group.rank()
-        if os.environ.get("EXO_NO_BATCH"):
+        if _env_flag_enabled("EXO_NO_BATCH"):
             logger.info("using SequentialGenerator (batching disabled)")
             return SequentialGenerator(
                 model=self.inference_model,

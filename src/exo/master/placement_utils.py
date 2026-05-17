@@ -453,7 +453,7 @@ def _find_ip_prioritised(
     return min(
         ips,
         key=lambda ip: (
-            0 if _is_tailscale_ip(ip) else 1,
+            1 if _is_tailscale_ip(ip) else 0,
             priority.get(ip_to_type.get(ip, "unknown"), 2),
         ),
     )
