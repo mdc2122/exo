@@ -49,10 +49,14 @@ class MacmonMetrics(TaggedModel):
 
     @classmethod
     def from_raw(cls, raw: RawMacmonMetrics) -> Self:
+        temp = raw.temp.gpu_temp_avg
+        if temp < 0:
+            temp = raw.temp.cpu_temp_avg
+
         return cls(
             system_profile=SystemPerformanceProfile(
                 gpu_usage=raw.gpu_usage[1],
-                temp=raw.temp.gpu_temp_avg,
+                temp=temp,
                 sys_power=raw.sys_power,
                 pcpu_usage=raw.pcpu_usage[1],
                 ecpu_usage=raw.ecpu_usage[1],
