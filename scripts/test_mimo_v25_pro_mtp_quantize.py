@@ -112,14 +112,19 @@ def test_mtp_dry_run_writes_index_manifest_config_and_model_card(
     assert (output_dir / "config.json").is_file()
     assert (output_dir / "README.md").is_file()
 
-    index = json.loads((output_dir / "model.safetensors.index.json").read_text())
-    assert index["metadata"]["artifact_kind"] == "mimo-v25-pro-mtp-only"
+    index = cast(
+        dict[str, object],
+        json.loads((output_dir / "model.safetensors.index.json").read_text()),
+    )
+    index_metadata = cast(dict[str, object], index["metadata"])
+    weight_map = cast(dict[str, str], index["weight_map"])
+    assert index_metadata["artifact_kind"] == "mimo-v25-pro-mtp-only"
     assert (
-        index["weight_map"]["model.mtp.layers.0.eh_proj.weight.scales"]
+        weight_map["model.mtp.layers.0.eh_proj.weight.scales"]
         == mtp_quantize.MTP_OUTPUT_SHARD_NAME
     )
 
-    config = json.loads((output_dir / "config.json").read_text())
+    config = cast(dict[str, object], json.loads((output_dir / "config.json").read_text()))
     assert config["artifact_kind"] == "mimo-v25-pro-mtp-only"
     assert config["base_model_id"] == mtp_quantize.PRODUCTION_6BIT_MODEL_ID
     assert config["mtp_config"] == {"enabled": True, "num_layers": 3}
@@ -144,7 +149,9 @@ def test_mtp_conversion_writes_quantized_shard_and_no_tmp_files(
     assert not list(output_dir.glob("*.tmp"))
     assert not list(output_dir.glob(".*.tmp"))
 
-    loaded = mx.load(str(output_dir / mtp_quantize.MTP_OUTPUT_SHARD_NAME))
+    loaded = cast(
+        dict[str, mx.array], mx.load(str(output_dir / mtp_quantize.MTP_OUTPUT_SHARD_NAME))
+    )
     assert loaded["model.mtp.layers.0.eh_proj.weight"].dtype == mx.uint32
     assert loaded["model.mtp.layers.0.eh_proj.weight.scales"].shape[0] == 2
     assert loaded["model.mtp.layers.0.enorm.weight"].shape == (2,)
