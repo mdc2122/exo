@@ -1,0 +1,23 @@
+{
+  "artifact_dir": "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/kernelpool--MiMo-V2.5-Pro-6bit-mtp-experimental",
+  "artifact_kind": "mimo-v25-pro-mtp-only",
+  "layers": [
+    0,
+    1,
+    2
+  ],
+  "loaded_tensor_count": 72,
+  "required_key_count": 21,
+  "synthetic_forwards": {
+    "layer_0_eh_proj": [
+      1,
+      1,
+      6144
+    ],
+    "layer_0_qkv_proj": [
+      1,
+      1,
+      27136
+    ]
+  }
+}
