@@ -49,14 +49,20 @@ Date: 2026-05-19
 
 ## Recovery Recipe
 
-To return to the known-good baseline code in any clone, use a self-healing switch
-that re-creates the backup branch locally if it is missing:
+To return to the known-good baseline code, start from a clean worktree or a fresh
+clone/worktree. Do not switch branches in a dirty recovery workspace unless you
+have first preserved unrelated edits with `git stash push` or by copying them
+elsewhere.
+
+From that clean baseline recovery workspace, use a self-healing switch that
+re-creates the backup branch locally if it is missing:
 
 ```bash
 git switch backup/mimo-v25-pro-6bit-working-baseline-20260519 || git switch -c backup/mimo-v25-pro-6bit-working-baseline-20260519 1114ff855fa8f5d897388b50ccc6011c205dbf39
 ```
 
-To reapply the preserved KV/cache work from the current branch:
+Only if you intentionally want to restore the preserved KV/cache WIP after
+recovering the baseline, apply the patch artifact in that clean workspace:
 
 ```bash
 git apply docs/plans/artifacts/mimo-v25-pro-kv-cache-wip-20260519.patch

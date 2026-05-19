@@ -152,6 +152,31 @@ def test_main_fail_closes_on_malformed_state_json(
     assert captured.err == ""
 
 
+def test_main_fail_closes_on_invalid_memory_value_in_state(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = {
+        "instances": {},
+        "runners": {},
+        "nodeMemory": {
+            "studio1": {"ramAvailable": {"inBytes": "not-a-number"}},
+        },
+    }
+
+    exit_code = guard.main(["--state-json", json.dumps(state)])
+
+    captured = capsys.readouterr()
+    verdict = _parse_json_object(captured.out)
+
+    assert exit_code == 2
+    assert verdict["safe"] is False
+    assert (
+        "failed to evaluate state" in _reason_at(verdict, 0)
+        or "invalid memory value" in _reason_at(verdict, 0)
+    )
+    assert captured.err == ""
+
+
 def test_main_fail_closes_on_state_fetch_failure(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

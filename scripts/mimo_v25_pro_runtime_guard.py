@@ -67,8 +67,11 @@ def _coerce_int(value: object) -> int:
     if isinstance(value, float):
         return int(value)
     if isinstance(value, str):
-        return int(value)
-    return 0
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise ValueError(f"invalid memory value {value!r}") from exc
+    raise ValueError(f"invalid memory value {value!r}")
 
 
 def _unwrap_instance(instance: JsonObject) -> JsonObject:
@@ -215,11 +218,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
 
-    verdict = evaluate_state(
-        state,
-        processes=processes,
-        min_available_bytes=args.min_available_gib * 1024**3,
-    )
+    try:
+        verdict = evaluate_state(
+            state,
+            processes=processes,
+            min_available_bytes=args.min_available_gib * 1024**3,
+        )
+    except (TypeError, ValueError) as exc:
+        _print_verdict(
+            GuardVerdict(safe=False, reasons=[f"failed to evaluate state: {exc}"])
+        )
+        return 2
+
     _print_verdict(verdict)
     return 0 if verdict.safe else 2
 
