@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 from collections.abc import Callable
 from os import PathLike
 from pathlib import Path
@@ -156,3 +158,96 @@ def test_mtp_conversion_writes_quantized_shard_and_no_tmp_files(
     assert loaded["model.mtp.layers.0.eh_proj.weight.scales"].shape[0] == 2
     assert loaded["model.mtp.layers.0.enorm.weight"].shape == (2,)
     assert "model.layers.0.mlp.down_proj.weight" not in loaded
+
+
+def test_write_summary_guards_paths_and_allows_plan_artifacts(
+    mtp_fixture_paths: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_shard, output_dir = mtp_fixture_paths
+    plan_artifacts_dir = tmp_path / "docs" / "plans" / "artifacts"
+    monkeypatch.setattr(mtp_quantize, "PLAN_ARTIFACTS_ROOT", plan_artifacts_dir)
+
+    mtp_quantize.run_mtp_dry_run(
+        mtp_quantize.MtpQuantizationPlan(source_shard, output_dir)
+    )
+
+    allowed_summary = plan_artifacts_dir / "mimo-v25-pro-mtp-artifact-summary.json"
+    summary = mtp_quantize.write_summary(output_dir, allowed_summary)
+    assert allowed_summary.is_file()
+    assert summary["output_shard"] == mtp_quantize.MTP_OUTPUT_SHARD_NAME
+
+    with pytest.raises(ValueError, match="summary JSON"):
+        mtp_quantize.write_summary(
+            output_dir,
+            mtp_quantize.PRODUCTION_6BIT_ARTIFACT_ROOT / "summary.json",
+        )
+
+    with pytest.raises(ValueError, match="summary JSON"):
+        mtp_quantize.write_summary(
+            output_dir,
+            mtp_quantize.SOURCE_CHECKPOINT / "summary.json",
+        )
+
+
+def test_mtp_conversion_rerun_preserves_completed_shard(
+    mtp_fixture_paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_shard, output_dir = mtp_fixture_paths
+
+    first_manifest = mtp_quantize.run_mtp_conversion(
+        mtp_quantize.MtpQuantizationPlan(source_shard, output_dir)
+    )
+    shard_path = output_dir / mtp_quantize.MTP_OUTPUT_SHARD_NAME
+    before_mtime = shard_path.stat().st_mtime - 60
+    os.utime(shard_path, (before_mtime, before_mtime))
+
+    original_disk_usage = mtp_quantize.shutil.disk_usage
+    monkeypatch.setattr(
+        mtp_quantize.shutil,
+        "disk_usage",
+        lambda path: shutil._ntuple_diskusage(1, 1, 0),  # type: ignore[attr-defined]
+    )
+
+    second_manifest = mtp_quantize.run_mtp_conversion(
+        mtp_quantize.MtpQuantizationPlan(source_shard, output_dir)
+    )
+
+    assert (
+        first_manifest["shards"][mtp_quantize.MTP_OUTPUT_SHARD_NAME]["status"]
+        == "complete"
+    )
+    assert (
+        second_manifest["shards"][mtp_quantize.MTP_OUTPUT_SHARD_NAME]["status"]
+        == "complete"
+    )
+    assert shard_path.stat().st_mtime == before_mtime
+    monkeypatch.setattr(mtp_quantize.shutil, "disk_usage", original_disk_usage)
+
+
+def test_cleanup_incomplete_removes_tmp_files_and_marks_cleanup_required(
+    mtp_fixture_paths: tuple[Path, Path],
+) -> None:
+    source_shard, output_dir = mtp_fixture_paths
+
+    manifest = mtp_quantize.run_mtp_dry_run(
+        mtp_quantize.MtpQuantizationPlan(source_shard, output_dir)
+    )
+    manifest["shards"][mtp_quantize.MTP_OUTPUT_SHARD_NAME]["status"] = "failed"
+    mtp_quantize.write_mtp_manifest(
+        output_dir / mtp_quantize.MTP_MANIFEST_NAME, manifest
+    )
+    tmp_file = output_dir / f".{mtp_quantize.MTP_OUTPUT_SHARD_NAME}.tmp.safetensors"
+    tmp_file.write_bytes(b"tmp")
+
+    mtp_quantize.cleanup_incomplete(output_dir)
+
+    cleaned = mtp_quantize.load_mtp_manifest(
+        output_dir / mtp_quantize.MTP_MANIFEST_NAME
+    )
+    assert not tmp_file.exists()
+    assert (
+        cleaned["shards"][mtp_quantize.MTP_OUTPUT_SHARD_NAME]["status"]
+        == "cleanup-required"
+    )

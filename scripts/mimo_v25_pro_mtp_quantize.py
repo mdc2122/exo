@@ -41,6 +41,9 @@ EXPECTED_MTP_LAYERS: Final[tuple[int, ...]] = (0, 1, 2)
 MTP_HEADROOM_BYTES: Final[int] = 8 * 1024**3
 ARTIFACT_KIND: Final[str] = "mimo-v25-pro-mtp-only"
 SOURCE_MODEL_ID: Final[str] = base_quantize.BASE_MODEL_ID
+PLAN_ARTIFACTS_ROOT: Final[Path] = (
+    Path(__file__).resolve().parents[1] / "docs" / "plans" / "artifacts"
+)
 
 SourceNbytesFn = Callable[[Sequence[int], str], int]
 QuantizeTensorFn = Callable[
@@ -180,6 +183,10 @@ def _tmp_output_path(output_dir: Path) -> Path:
     return output_dir / f".{MTP_OUTPUT_SHARD_NAME}.tmp.safetensors"
 
 
+def _is_within(resolved_path: Path, resolved_root: Path) -> bool:
+    return resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+
 def _empty_manifest() -> MtpManifest:
     return {
         "model_id": MTP_EXPERIMENTAL_MODEL_ID,
@@ -315,20 +322,39 @@ def guard_mtp_output_path(output_dir: Path) -> None:
     production_root = PRODUCTION_6BIT_ARTIFACT_ROOT.resolve()
     source_root = SOURCE_CHECKPOINT.resolve()
 
-    if resolved != approved_root and approved_root not in resolved.parents:
+    if not _is_within(resolved, approved_root):
         raise ValueError(
             f"Refusing output path {output_dir}; must be the experimental MTP output "
             f"root {MTP_OUTPUT_ROOT} or a child"
         )
-    if resolved == production_root or production_root in resolved.parents:
+    if _is_within(resolved, production_root):
         raise ValueError(
             f"Refusing output path {output_dir}; production artifact root "
             f"{PRODUCTION_6BIT_ARTIFACT_ROOT} must remain unchanged"
         )
-    if resolved == source_root or source_root in resolved.parents:
+    if _is_within(resolved, source_root):
         raise ValueError(
             f"Refusing output path {output_dir}; output path must not overlap "
             f"source checkpoint {SOURCE_CHECKPOINT}"
+        )
+
+
+def guard_summary_json_path(output_dir: Path, summary_json: Path) -> None:
+    resolved = summary_json.resolve()
+    output_root = output_dir.resolve()
+    plan_root = PLAN_ARTIFACTS_ROOT.resolve()
+    production_root = PRODUCTION_6BIT_ARTIFACT_ROOT.resolve()
+    source_root = SOURCE_CHECKPOINT.resolve()
+
+    if _is_within(resolved, production_root) or _is_within(resolved, source_root):
+        raise ValueError(
+            f"Refusing summary JSON path {summary_json}; summary JSON must not overlap "
+            "the source checkpoint or production artifact tree"
+        )
+    if not (_is_within(resolved, output_root) or _is_within(resolved, plan_root)):
+        raise ValueError(
+            f"Refusing summary JSON path {summary_json}; summary JSON must be under "
+            f"{output_dir} or {PLAN_ARTIFACTS_ROOT}"
         )
 
 
@@ -368,6 +394,8 @@ def build_mtp_dry_run_manifest(plan: MtpQuantizationPlan) -> MtpManifest:
     guard_mtp_output_path(plan.output_dir)
 
     previous_manifest = load_mtp_manifest(_manifest_path(plan.output_dir))
+    previous_shard = previous_manifest.get("shards", {}).get(MTP_OUTPUT_SHARD_NAME)
+    output_shard = plan.output_dir / MTP_OUTPUT_SHARD_NAME
     tensor_names = _mtp_tensor_names(plan.source_shard)
     tensor_name_set = set(tensor_names)
     tensors: dict[str, TensorManifestEntry] = {}
@@ -421,6 +449,23 @@ def build_mtp_dry_run_manifest(plan: MtpQuantizationPlan) -> MtpManifest:
                 total_estimate += entry["estimated_output_nbytes"]
 
     missing_layers = [layer for layer in EXPECTED_MTP_LAYERS if layer not in layers]
+    shard_entry: ShardManifestEntry | None = None
+    if previous_shard is not None and previous_shard.get("status") == "complete":
+        shard_entry = previous_shard if output_shard.is_file() else None
+
+    if shard_entry is None:
+        shard_entry = {
+            "source_file": str(plan.source_shard),
+            "output_file": MTP_OUTPUT_SHARD_NAME,
+            "status": "dry-run",
+            "source_size": plan.source_shard.stat().st_size,
+            "output_size": 0,
+            "started_at": 0.0,
+            "completed_at": 0.0,
+            "tensors": tensors,
+            "error": "",
+        }
+
     manifest: MtpManifest = {
         "model_id": MTP_EXPERIMENTAL_MODEL_ID,
         "artifact_kind": ARTIFACT_KIND,
@@ -443,22 +488,22 @@ def build_mtp_dry_run_manifest(plan: MtpQuantizationPlan) -> MtpManifest:
         "expected_output_size_bytes": total_estimate,
         "created_at": previous_manifest.get("created_at", time.time()),
         "complete": False,
-        "shards": {
-            MTP_OUTPUT_SHARD_NAME: {
-                "source_file": str(plan.source_shard),
-                "output_file": MTP_OUTPUT_SHARD_NAME,
-                "status": "dry-run",
-                "source_size": plan.source_shard.stat().st_size,
-                "output_size": 0,
-                "started_at": 0.0,
-                "completed_at": 0.0,
-                "tensors": tensors,
-                "error": "",
-            }
-        },
+        "shards": {MTP_OUTPUT_SHARD_NAME: shard_entry},
         "updated_at": previous_manifest["updated_at"],
     }
     return manifest
+
+
+def estimate_remaining_output_bytes(manifest: MtpManifest) -> int:
+    remaining = 0
+    for shard in manifest["shards"].values():
+        if shard.get("status") == "complete":
+            continue
+        for tensor_entry in shard["tensors"].values():
+            if tensor_entry["reason"].startswith("source fp8 scale tensor"):
+                continue
+            remaining += tensor_entry["estimated_output_nbytes"]
+    return remaining
 
 
 def check_mtp_free_space(output_dir: Path, expected_output_size: int) -> None:
@@ -546,7 +591,7 @@ def run_mtp_dry_run(plan: MtpQuantizationPlan) -> MtpManifest:
     if plan.bits != DEFAULT_BITS or plan.group_size != DEFAULT_GROUP_SIZE:
         raise ValueError("This MiMo MTP path is fixed to MLX affine 6-bit group_size=64")
     manifest = build_mtp_dry_run_manifest(plan)
-    check_mtp_free_space(plan.output_dir, int(manifest["expected_output_size_bytes"]))
+    check_mtp_free_space(plan.output_dir, estimate_remaining_output_bytes(manifest))
     plan.output_dir.mkdir(parents=True, exist_ok=True)
     write_mtp_manifest(_manifest_path(plan.output_dir), manifest)
     write_mtp_config(plan.output_dir, manifest)
@@ -664,6 +709,7 @@ def write_summary(output_dir: Path, summary_json: Path | None = None) -> dict[st
         "complete": manifest["complete"],
     }
     if summary_json is not None:
+        guard_summary_json_path(output_dir, summary_json)
         summary_json.parent.mkdir(parents=True, exist_ok=True)
         summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     return summary
