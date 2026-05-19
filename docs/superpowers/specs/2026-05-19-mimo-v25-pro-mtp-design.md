@@ -13,7 +13,7 @@ Current measured baseline:
 - Single request: about 22 tokens/second sustained decode.
 - Batched aggregate: about 40 tokens/second across concurrent requests.
 - Hardware: two Mac Studio M3 Ultra machines, each with 512 GB RAM, connected via
-  the current exo tensor/JACCL setup.
+  the current exo tensor/JACCL setup over the TB5 cluster path.
 - Loaded model: `kernelpool/MiMo-V2.5-Pro-6bit`.
 - Artifact size: about 778 GiB on disk, with safetensors metadata reporting
   835,299,199,488 bytes.
@@ -21,7 +21,8 @@ Current measured baseline:
   original `XiaomiMiMo/MiMo-V2.5-Pro` checkpoint.
 
 The target is to discover the true safe single-stream ceiling with MTP enabled.
-Reaching 40 tokens/second is a stretch goal, not a promise.
+Reaching 40 tokens/second is a stretch goal, not a promise. If MTP proves faster,
+correct, and stable, it may become the default MiMo runtime path.
 
 ## Non-Negotiable Safety Rules
 
@@ -55,6 +56,13 @@ MTP work must happen on a separate feature branch, for example:
 
 The known-good 6-bit non-MTP runtime remains rollbackable and must not be mutated
 in place.
+
+## Placement Preference
+
+Prioritize the tensor/JACCL TB5 cluster placement for performance work. Local
+experience shows this is the fastest available Studio1/Studio2 configuration.
+Alternative placements may be useful for diagnostics, but they are not the
+primary performance target unless benchmarks prove otherwise.
 
 ## Approach
 
@@ -128,6 +136,10 @@ Only after offline probes pass, add opt-in runtime support:
 - Start exactly one experimental MiMo instance across Studio1/Studio2.
 - Verify with tiny bounded requests before repeated or longer throughput tests.
 
+After MTP passes the promotion gates, it may become the default MiMo runtime
+path. The promoted default must retain a kill switch or model-level fallback to
+the known-good non-MTP decoder.
+
 ## Staged Delivery
 
 ### Stage 1: Artifact And Shape Probe
@@ -159,6 +171,13 @@ experimental MiMo instance, then run tiny bounded requests. Collect acceptance
 rate, single-request effective tokens/second, memory, power, and crash-free
 repeatability evidence.
 
+### Stage 6: Promotion To Default Runtime
+
+Promote MTP from experimental opt-in to the default MiMo runtime only after it
+beats the 22 tokens/second single-stream baseline, preserves output correctness,
+survives repeated bounded runs on the tensor/JACCL TB5 placement, and leaves the
+non-MTP fallback available.
+
 ## Success Criteria
 
 Backup success:
@@ -188,10 +207,18 @@ Decode success:
 Distributed runtime success:
 
 - Preflight refuses unsafe duplicate-MiMo startup.
-- One bounded distributed request completes without crash.
+- One bounded distributed request completes without crash on the tensor/JACCL
+  TB5 placement.
 - MTP-disabled known-good path still works.
 - Single-request effective tokens/second improves over the 22 tokens/second
   baseline.
+
+Default-promotion success:
+
+- MTP is faster than the non-MTP path on repeated tensor/JACCL TB5 runs.
+- Correctness checks pass with no accepted-token divergence.
+- A runtime flag or model-level fallback can disable MTP without code changes.
+- Duplicate-MiMo preflight remains active for default MTP startup.
 
 Stretch success:
 
@@ -212,8 +239,7 @@ Stretch success:
 ## Out Of Scope
 
 - Mutating the current working 6-bit artifact in place.
-- Making MTP the default runtime path.
+- Making MTP the default runtime path before the promotion gates pass.
 - Starting full MiMo while another MiMo instance is resident.
 - Chasing multimodal MiMo support.
 - Replacing the existing batching path for aggregate throughput.
-
