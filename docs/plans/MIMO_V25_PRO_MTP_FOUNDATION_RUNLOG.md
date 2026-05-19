@@ -67,3 +67,16 @@ git apply docs/plans/artifacts/mimo-v25-pro-kv-cache-wip-20260519.patch
 Do not start a full MiMo V2.5 Pro model if any MiMo instance is active, loading,
 warming, stale-but-resident, or if either Studio node has not recovered memory.
 Duplicate full MiMo startup can crash the Mac Studios.
+
+## Foundation Verification
+
+- Focused tests: `uv run pytest scripts/test_mimo_v25_pro_runtime_guard.py scripts/test_mimo_v25_pro_mtp_artifact_probe.py -q`
+  - Result: `12 passed in 0.46s`
+- Lint: `uv run ruff check scripts/mimo_v25_pro_runtime_guard.py scripts/test_mimo_v25_pro_runtime_guard.py scripts/mimo_v25_pro_mtp_artifact_probe.py scripts/test_mimo_v25_pro_mtp_artifact_probe.py`
+  - Result: `All checks passed!`
+- Typecheck: `uv run basedpyright scripts/mimo_v25_pro_runtime_guard.py scripts/test_mimo_v25_pro_runtime_guard.py scripts/mimo_v25_pro_mtp_artifact_probe.py scripts/test_mimo_v25_pro_mtp_artifact_probe.py`
+  - Result: `0 errors, 0 warnings, 0 notes`
+- Real MTP shape report: `docs/plans/artifacts/mimo-v25-pro-mtp-shape-report-20260519.json`
+  - Result: `tensor_count=48`, `layers=[0, 1, 2]`, `complete_expected_layers=true`
+- Live duplicate-start guard: `uv run python scripts/mimo_v25_pro_runtime_guard.py --exo-url http://127.0.0.1:52415`
+  - Result: `safe=false`; reasons included `active MiMo instance 465e23f7-c776-4e9d-8760-cf768db9c56c`, four loading runners, one resident MiMo-related telemetry process match, and both nodes below the memory floor
