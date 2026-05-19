@@ -1,12 +1,38 @@
 import json
+from typing import cast
 
 import pytest
 
 from scripts import mimo_v25_pro_runtime_guard as guard
 
 
-def _bytes(gib: int) -> dict[str, dict[str, int]]:
+def _bytes(gib: int) -> dict[str, int]:
     return {"inBytes": gib * 1024**3}
+
+
+def _parse_json_object(raw_json: str) -> dict[str, object]:
+    decoded = cast(object, json.loads(raw_json))
+    if not isinstance(decoded, dict):
+        raise AssertionError("expected JSON object")
+    candidate = cast(dict[object, object], decoded)
+    if not all(isinstance(key, str) for key in candidate):
+        raise AssertionError("expected JSON object with string keys")
+    return cast(dict[str, object], candidate)
+
+
+def _reason_at(verdict: dict[str, object], index: int) -> str:
+    reasons = verdict.get("reasons")
+    if not isinstance(reasons, list):
+        raise AssertionError("expected reasons list")
+    reason = cast(object, reasons[index])
+    if not isinstance(reason, str):
+        raise AssertionError("expected string reason")
+    return reason
+
+
+def _empty_state(base_url: str) -> dict[str, object]:
+    del base_url
+    return {"instances": {}, "runners": {}, "nodeMemory": {}}
 
 
 def test_detects_active_mimo_instance_as_unsafe() -> None:
@@ -118,11 +144,11 @@ def test_main_fail_closes_on_malformed_state_json(
     exit_code = guard.main(["--state-json", "{not-json"])
 
     captured = capsys.readouterr()
-    verdict = json.loads(captured.out)
+    verdict = _parse_json_object(captured.out)
 
     assert exit_code == 2
     assert verdict["safe"] is False
-    assert "failed to parse --state-json" in verdict["reasons"][0]
+    assert "failed to parse --state-json" in _reason_at(verdict, 0)
     assert captured.err == ""
 
 
@@ -138,11 +164,11 @@ def test_main_fail_closes_on_state_fetch_failure(
     exit_code = guard.main([])
 
     captured = capsys.readouterr()
-    verdict = json.loads(captured.out)
+    verdict = _parse_json_object(captured.out)
 
     assert exit_code == 2
     assert verdict["safe"] is False
-    assert "failed to fetch exo state" in verdict["reasons"][0]
+    assert "failed to fetch exo state" in _reason_at(verdict, 0)
     assert captured.err == ""
 
 
@@ -153,7 +179,7 @@ def test_main_fail_closes_on_process_collection_failure(
     monkeypatch.setattr(
         guard,
         "fetch_exo_state",
-        lambda base_url: {"instances": {}, "runners": {}, "nodeMemory": {}},
+        _empty_state,
     )
 
     def _raise_process_error() -> list[str]:
@@ -164,9 +190,9 @@ def test_main_fail_closes_on_process_collection_failure(
     exit_code = guard.main([])
 
     captured = capsys.readouterr()
-    verdict = json.loads(captured.out)
+    verdict = _parse_json_object(captured.out)
 
     assert exit_code == 2
     assert verdict["safe"] is False
-    assert "failed to collect processes" in verdict["reasons"][0]
+    assert "failed to collect processes" in _reason_at(verdict, 0)
     assert captured.err == ""
