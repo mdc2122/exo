@@ -1,0 +1,197 @@
+diff --git a/src/exo/worker/engines/mlx/cache.py b/src/exo/worker/engines/mlx/cache.py
+index fd09a169..2ea4a054 100644
+--- a/src/exo/worker/engines/mlx/cache.py
++++ b/src/exo/worker/engines/mlx/cache.py
+@@ -252,6 +252,9 @@ class KVPrefixCache:
+         match is truncated to the start of that region.
+         """
+         max_length = len(prompt_tokens)
++        if max_length == 0:
++            return make_kv_cache(model), prompt_tokens, None
++
+         query_regions = media_regions or []
+ 
+         best_index: int | None = None
+@@ -277,11 +280,13 @@ class KVPrefixCache:
+         if best_index is None:
+             return make_kv_cache(model), prompt_tokens, None
+ 
+-        # For exact match: trim to max_length-1 so remaining has the last token
+-        # For partial match: trim to best_length, remaining has suffix to prefill
+-        # This ensures stream_generate always has at least one token to start with
++        # For exact match: trim to max_length-1 so remaining has the last token.
++        # For partial match: trim to best_length, remaining has suffix to prefill.
++        # This ensures stream_generate / BatchGenerator always has an integral
++        # seed token and never receives an empty prompt, which MLX converts to
++        # float32 and rejects as embedding indices.
+         has_ssm = has_non_kv_caches(self.caches[best_index])
+-        target = (max_length - 1) if is_exact and not has_ssm else best_length
++        target = max_length - 1 if is_exact else best_length
+         restore_pos, restore_snap = self._get_snapshot(best_index, target)
+ 
+         # No usable snapshot — need fresh cache
+@@ -301,6 +306,8 @@ class KVPrefixCache:
+         self._access_counter += 1
+         self._last_used[best_index] = self._access_counter
+         remaining = prompt_tokens[restore_pos:]
++        if len(remaining) == 0:
++            return make_kv_cache(model), prompt_tokens, None
+ 
+         return prompt_cache, remaining, best_index
+ 
+@@ -395,7 +402,7 @@ def encode_prompt(tokenizer: TokenizerWrapper, prompt: str) -> mx.array:
+     """
+     # Chat templates define their own structure - don't add BOS/EOS
+     prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+-    return mx.array(prompt_tokens)
++    return mx.array(prompt_tokens, dtype=mx.int32)
+ 
+ 
+ def _entry_length(
+diff --git a/src/exo/worker/engines/mlx/generator/batch_generate.py b/src/exo/worker/engines/mlx/generator/batch_generate.py
+index 6bd70f9c..15edcec5 100644
+--- a/src/exo/worker/engines/mlx/generator/batch_generate.py
++++ b/src/exo/worker/engines/mlx/generator/batch_generate.py
+@@ -233,6 +233,15 @@ class ExoBatchGenerator:
+         else:
+             cache = make_kv_cache(self.model)
+ 
++        if len(prompt_tokens) == 0 and len(all_prompt_tokens) > 0:
++            logger.warning(
++                "KV prefix cache returned an empty batch prompt; falling back to full prefill"
++            )
++            cache = make_kv_cache(self.model)
++            prompt_tokens = all_prompt_tokens
++            prefix_hit_length = 0
++            matched_index = None
++
+         seed = task_params.seed if task_params.seed is not None else 42
+         mx.random.seed(seed)
+ 
+diff --git a/src/exo/worker/engines/mlx/generator/generate.py b/src/exo/worker/engines/mlx/generator/generate.py
+index 2a6e23ed..b5a25ead 100644
+--- a/src/exo/worker/engines/mlx/generator/generate.py
++++ b/src/exo/worker/engines/mlx/generator/generate.py
+@@ -585,6 +585,15 @@ def mlx_generate(
+                 f"KV cache hit: {prefix_hit_length}/{len(all_prompt_tokens)} tokens cached ({100 * prefix_hit_length / len(all_prompt_tokens):.1f}%)"
+             )
+ 
++    if len(prompt_tokens) == 0 and len(all_prompt_tokens) > 0:
++        logger.warning(
++            "KV prefix cache returned an empty prompt; falling back to full prefill"
++        )
++        caches = make_kv_cache(model=model)
++        prompt_tokens = all_prompt_tokens
++        prefix_hit_length = 0
++        matched_index = None
++
+     logits_processors: list[Callable[[mx.array, mx.array], mx.array]] = (
+         make_logits_processors(
+             repetition_penalty=task.repetition_penalty,
+@@ -759,7 +768,8 @@ def mlx_generate(
+                 generated_tokens_array = mx.array(
+                     tokenizer.encode(
+                         "".join(generated_text_parts), add_special_tokens=False
+-                    )
++                    ),
++                    dtype=mx.int32,
+                 )
+                 full_prompt_tokens = mx.concatenate(
+                     [all_prompt_tokens, generated_tokens_array]
+diff --git a/src/exo/worker/tests/unittests/test_mlx/test_kv_prefix_cache.py b/src/exo/worker/tests/unittests/test_mlx/test_kv_prefix_cache.py
+index 22d2be9c..0c7025a4 100644
+--- a/src/exo/worker/tests/unittests/test_mlx/test_kv_prefix_cache.py
++++ b/src/exo/worker/tests/unittests/test_mlx/test_kv_prefix_cache.py
+@@ -7,7 +7,7 @@ from unittest.mock import patch
+ 
+ import mlx.core as mx
+ import pytest
+-from mlx_lm.models.cache import CacheList, KVCache
++from mlx_lm.models.cache import CacheList, KVCache, RotatingKVCache
+ from mlx_lm.sample_utils import make_sampler
+ 
+ from exo.shared.types.common import ModelId
+@@ -15,6 +15,7 @@ from exo.shared.types.mlx import Model
+ from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+ from exo.worker.engines.mlx import cache as mlx_cache_module
+ from exo.worker.engines.mlx.cache import (
++    CacheSnapshot,
+     KVPrefixCache,
+     cache_length,
+     encode_prompt,
+@@ -108,6 +109,75 @@ class TestKVPrefix:
+         cache.clear()
+         assert len(cache.prompts) == 0
+ 
++    def test_encode_prompt_empty_prompt_uses_integer_dtype(self, mock_tokenizer):
++        mock_tokenizer.encode.return_value = []
++
++        tokens = encode_prompt(mock_tokenizer, "")
++
++        assert tokens.dtype == mx.int32
++
++    def test_exact_rotating_cache_hit_leaves_decode_seed_token(self):
++        class DummyModel:
++            layers = [object()]
++
++            def make_cache(self):
++                return [KVCache()]
++
++        def rotating_cache(offset: int) -> RotatingKVCache:
++            cache = RotatingKVCache(max_size=8)
++            cache.keys = mx.zeros((1, 1, offset, 1))
++            cache.values = mx.zeros((1, 1, offset, 1))
++            cache.offset = offset
++            cache._idx = offset
++            return cache
++
++        tokens = mx.array([10, 20, 30], dtype=mx.int32)
++        kv_prefix_cache = KVPrefixCache(None)
++        kv_prefix_cache.prompts.append(tokens)
++        kv_prefix_cache.caches.append([rotating_cache(len(tokens))])
++        kv_prefix_cache._snapshots.append(
++            [
++                CacheSnapshot(
++                    states=[rotating_cache(len(tokens) - 1)],
++                    token_count=len(tokens) - 1,
++                )
++            ]
++        )
++        kv_prefix_cache._media_regions.append([])
++        kv_prefix_cache._last_used.append(0)
++
++        _result_cache, remaining_tokens, matched_index = kv_prefix_cache.get_kv_cache(
++            cast(Model, DummyModel()), tokens
++        )
++
++        assert matched_index == 0
++        assert remaining_tokens.dtype == mx.int32
++        assert remaining_tokens.tolist() == [30]
++
++    def test_exact_rotating_cache_without_snapshot_falls_back_to_full_prompt(self):
++        class DummyModel:
++            layers = [object()]
++
++            def make_cache(self):
++                return [KVCache()]
++
++        tokens = mx.array([10, 20, 30], dtype=mx.int32)
++        rotating_cache = RotatingKVCache(max_size=8)
++        kv_prefix_cache = KVPrefixCache(None)
++        kv_prefix_cache.prompts.append(tokens)
++        kv_prefix_cache.caches.append([rotating_cache])
++        kv_prefix_cache._snapshots.append(None)
++        kv_prefix_cache._media_regions.append([])
++        kv_prefix_cache._last_used.append(0)
++
++        _result_cache, remaining_tokens, matched_index = kv_prefix_cache.get_kv_cache(
++            cast(Model, DummyModel()), tokens
++        )
++
++        assert matched_index is None
++        assert remaining_tokens.dtype == mx.int32
++        assert remaining_tokens.tolist() == [10, 20, 30]
++
+ 
+ class FakeTurboQuantKVCache:
+     def __init__(self, bits: int, seed: int, fused: bool = False):
