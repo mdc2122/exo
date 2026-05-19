@@ -80,3 +80,7 @@ Duplicate full MiMo startup can crash the Mac Studios.
   - Result: `tensor_count=48`, `layers=[0, 1, 2]`, `complete_expected_layers=true`
 - Live duplicate-start guard: `uv run python scripts/mimo_v25_pro_runtime_guard.py --exo-url http://127.0.0.1:52415`
   - Result: `safe=false`; reasons included `active MiMo instance 465e23f7-c776-4e9d-8760-cf768db9c56c`, four loading runners, one resident MiMo-related telemetry process match, and both nodes below the memory floor
+- Staged-state check: `git diff --cached --name-only`
+  - Result: `empty`
+- Working-tree check: `git status --short`
+  - Result: only the four pre-existing dirty KV/cache runtime files remained unstaged; the verification commit was doc-only despite the intentionally dirty working tree
