@@ -77,7 +77,7 @@ Duplicate full MiMo startup can crash the Mac Studios.
 ## Foundation Verification
 
 - Focused tests: `uv run pytest scripts/test_mimo_v25_pro_runtime_guard.py scripts/test_mimo_v25_pro_mtp_artifact_probe.py -q`
-  - Result: `12 passed in 0.46s`
+  - Result: `13 passed in 0.53s`
 - Lint: `uv run ruff check scripts/mimo_v25_pro_runtime_guard.py scripts/test_mimo_v25_pro_runtime_guard.py scripts/mimo_v25_pro_mtp_artifact_probe.py scripts/test_mimo_v25_pro_mtp_artifact_probe.py`
   - Result: `All checks passed!`
 - Typecheck: `uv run basedpyright scripts/mimo_v25_pro_runtime_guard.py scripts/test_mimo_v25_pro_runtime_guard.py scripts/mimo_v25_pro_mtp_artifact_probe.py scripts/test_mimo_v25_pro_mtp_artifact_probe.py`
