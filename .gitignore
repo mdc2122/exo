@@ -42,4 +42,5 @@ tmp/models
 # local agent/workflow artifacts
 .omc/
 .ouroboros/
+.worktrees/
 *.seed.yaml
