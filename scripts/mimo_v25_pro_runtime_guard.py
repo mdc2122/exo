@@ -28,6 +28,10 @@ class GuardVerdict:
     reasons: list[str]
 
 
+def _print_verdict(verdict: GuardVerdict) -> None:
+    print(json.dumps(asdict(verdict), indent=2))
+
+
 def _unwrap_instance(instance: dict[str, Any]) -> dict[str, Any]:
     if len(instance) != 1:
         return {}
@@ -70,7 +74,7 @@ def evaluate_state(
             if isinstance(runner, dict):
                 if "RunnerLoading" in runner:
                     reasons.append(f"runner {runner_id} is loading")
-                if "RunnerWarming" in runner:
+                if "RunnerWarmingUp" in runner:
                     reasons.append(f"runner {runner_id} is warming")
 
     for proc in processes:
@@ -120,17 +124,43 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    state = (
-        json.loads(args.state_json)
-        if args.state_json
-        else fetch_exo_state(args.exo_url)
-    )
+    if args.state_json:
+        try:
+            state = json.loads(args.state_json)
+            if not isinstance(state, dict):
+                raise ValueError("--state-json did not decode to a JSON object")
+        except (ValueError, json.JSONDecodeError) as exc:
+            _print_verdict(
+                GuardVerdict(
+                    safe=False, reasons=[f"failed to parse --state-json: {exc}"]
+                )
+            )
+            return 2
+    else:
+        try:
+            state = fetch_exo_state(args.exo_url)
+        except Exception as exc:
+            _print_verdict(
+                GuardVerdict(
+                    safe=False, reasons=[f"failed to fetch exo state: {exc}"]
+                )
+            )
+            return 2
+
+    try:
+        processes = collect_processes()
+    except Exception as exc:
+        _print_verdict(
+            GuardVerdict(safe=False, reasons=[f"failed to collect processes: {exc}"])
+        )
+        return 2
+
     verdict = evaluate_state(
         state,
-        processes=collect_processes(),
+        processes=processes,
         min_available_bytes=args.min_available_gib * 1024**3,
     )
-    print(json.dumps(asdict(verdict), indent=2))
+    _print_verdict(verdict)
     return 0 if verdict.safe else 2
 
 

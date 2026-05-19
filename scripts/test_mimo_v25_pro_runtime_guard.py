@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from scripts import mimo_v25_pro_runtime_guard as guard
 
 
@@ -37,6 +41,21 @@ def test_detects_loading_mimo_runner_as_unsafe() -> None:
 
     assert verdict.safe is False
     assert "runner runner-a is loading" in verdict.reasons
+
+
+def test_detects_warming_mimo_runner_as_unsafe() -> None:
+    state = {
+        "instances": {},
+        "runners": {
+            "runner-a": {"RunnerWarmingUp": {"layersLoaded": 10, "totalLayers": 70}}
+        },
+        "nodeMemory": {},
+    }
+
+    verdict = guard.evaluate_state(state, processes=[], min_available_bytes=200)
+
+    assert verdict.safe is False
+    assert "runner runner-a is warming" in verdict.reasons
 
 
 def test_detects_resident_mimo_process_as_unsafe() -> None:
@@ -91,3 +110,63 @@ def test_clean_state_is_safe() -> None:
 
     assert verdict.safe is True
     assert verdict.reasons == []
+
+
+def test_main_fail_closes_on_malformed_state_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = guard.main(["--state-json", "{not-json"])
+
+    captured = capsys.readouterr()
+    verdict = json.loads(captured.out)
+
+    assert exit_code == 2
+    assert verdict["safe"] is False
+    assert "failed to parse --state-json" in verdict["reasons"][0]
+    assert captured.err == ""
+
+
+def test_main_fail_closes_on_state_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _raise_fetch_error(base_url: str) -> dict[str, object]:
+        raise RuntimeError(f"boom from {base_url}")
+
+    monkeypatch.setattr(guard, "fetch_exo_state", _raise_fetch_error)
+
+    exit_code = guard.main([])
+
+    captured = capsys.readouterr()
+    verdict = json.loads(captured.out)
+
+    assert exit_code == 2
+    assert verdict["safe"] is False
+    assert "failed to fetch exo state" in verdict["reasons"][0]
+    assert captured.err == ""
+
+
+def test_main_fail_closes_on_process_collection_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        guard,
+        "fetch_exo_state",
+        lambda base_url: {"instances": {}, "runners": {}, "nodeMemory": {}},
+    )
+
+    def _raise_process_error() -> list[str]:
+        raise RuntimeError("ps unavailable")
+
+    monkeypatch.setattr(guard, "collect_processes", _raise_process_error)
+
+    exit_code = guard.main([])
+
+    captured = capsys.readouterr()
+    verdict = json.loads(captured.out)
+
+    assert exit_code == 2
+    assert verdict["safe"] is False
+    assert "failed to collect processes" in verdict["reasons"][0]
+    assert captured.err == ""
