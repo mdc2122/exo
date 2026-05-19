@@ -24,6 +24,7 @@ Date: 2026-05-19
 - Single request: about `22 tok/s`
 - Batched aggregate: about `40 tok/s`
 - Benchmark artifacts:
+  - machine-local evidence on Studio2:
   - `/Users/studio2/Documents/Codex/2026-05-19/superpowers-can-we-determine-whether-22/mimo_v25_pro_sustain_probe_20260519.json`
   - `/Users/studio2/Documents/Codex/2026-05-19/superpowers-can-we-determine-whether-22/mimo_v25_pro_concurrency_probe_20260519.json`
   - `/Users/studio2/Documents/Codex/2026-05-19/superpowers-can-we-determine-whether-22/mimo_v25_pro_concurrency8_probe_20260519.json`
@@ -31,6 +32,7 @@ Date: 2026-05-19
 ## Dirty Work Preserved
 
 - Patch artifact: `docs/plans/artifacts/mimo-v25-pro-kv-cache-wip-20260519.patch`
+- This is a raw preservation patch and may retain source whitespace exactly; this is intentional.
 - Patch scope:
   - `src/exo/worker/engines/mlx/cache.py`
   - `src/exo/worker/engines/mlx/generator/batch_generate.py`
@@ -47,10 +49,11 @@ Date: 2026-05-19
 
 ## Recovery Recipe
 
-To return to the known-good baseline code:
+To return to the known-good baseline code in any clone, use a self-healing switch
+that re-creates the backup branch locally if it is missing:
 
 ```bash
-git switch backup/mimo-v25-pro-6bit-working-baseline-20260519
+git switch backup/mimo-v25-pro-6bit-working-baseline-20260519 || git switch -c backup/mimo-v25-pro-6bit-working-baseline-20260519 1114ff855fa8f5d897388b50ccc6011c205dbf39
 ```
 
 To reapply the preserved KV/cache work from the current branch:
