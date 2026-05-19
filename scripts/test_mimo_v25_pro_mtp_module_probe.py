@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -6,6 +7,12 @@ import mlx.core as mx
 import pytest
 
 from scripts import mimo_v25_pro_mtp_module_probe as probe
+
+EXPECTED_MTP_OUTPUT_SHARD_NAME = "model_mtp-00001-of-00001.safetensors"
+SaveSafetensors = Callable[
+    [str | Path, dict[str, mx.array], dict[str, str] | None], object
+]
+SAVE_SAFETENSORS = cast(SaveSafetensors, mx.save_safetensors)
 
 
 def _write_tiny_quantized_artifact(root: Path) -> None:
@@ -16,8 +23,8 @@ def _write_tiny_quantized_artifact(root: Path) -> None:
     qkv_weight, qkv_scales, qkv_biases = mx.quantize(
         mx.ones((4, 64)), group_size=64, bits=6, mode="affine"
     )
-    mx.save_safetensors(
-        str(root / probe.MTP_OUTPUT_SHARD_NAME),
+    SAVE_SAFETENSORS(
+        root / EXPECTED_MTP_OUTPUT_SHARD_NAME,
         {
             "model.mtp.layers.0.eh_proj.weight": eh_weight,
             "model.mtp.layers.0.eh_proj.weight.scales": eh_scales,
@@ -27,7 +34,7 @@ def _write_tiny_quantized_artifact(root: Path) -> None:
             "model.mtp.layers.0.self_attn.qkv_proj.weight.biases": qkv_biases,
             "model.mtp.layers.0.enorm.weight": mx.ones((2,)),
         },
-        metadata={"format": "mlx-affine-6bit-mtp-only"},
+        {"format": "mlx-affine-6bit-mtp-only"},
     )
     index = {
         "metadata": {
@@ -36,18 +43,22 @@ def _write_tiny_quantized_artifact(root: Path) -> None:
             "save_format": "mlx-affine-6bit",
         },
         "weight_map": {
-            "model.mtp.layers.0.eh_proj.weight": probe.MTP_OUTPUT_SHARD_NAME,
-            "model.mtp.layers.0.eh_proj.weight.scales": probe.MTP_OUTPUT_SHARD_NAME,
-            "model.mtp.layers.0.eh_proj.weight.biases": probe.MTP_OUTPUT_SHARD_NAME,
-            "model.mtp.layers.0.self_attn.qkv_proj.weight": probe.MTP_OUTPUT_SHARD_NAME,
-            "model.mtp.layers.0.self_attn.qkv_proj.weight.scales": probe.MTP_OUTPUT_SHARD_NAME,
-            "model.mtp.layers.0.self_attn.qkv_proj.weight.biases": probe.MTP_OUTPUT_SHARD_NAME,
-            "model.mtp.layers.0.enorm.weight": probe.MTP_OUTPUT_SHARD_NAME,
+            "model.mtp.layers.0.eh_proj.weight": EXPECTED_MTP_OUTPUT_SHARD_NAME,
+            "model.mtp.layers.0.eh_proj.weight.scales": EXPECTED_MTP_OUTPUT_SHARD_NAME,
+            "model.mtp.layers.0.eh_proj.weight.biases": EXPECTED_MTP_OUTPUT_SHARD_NAME,
+            "model.mtp.layers.0.self_attn.qkv_proj.weight": EXPECTED_MTP_OUTPUT_SHARD_NAME,
+            "model.mtp.layers.0.self_attn.qkv_proj.weight.scales": EXPECTED_MTP_OUTPUT_SHARD_NAME,
+            "model.mtp.layers.0.self_attn.qkv_proj.weight.biases": EXPECTED_MTP_OUTPUT_SHARD_NAME,
+            "model.mtp.layers.0.enorm.weight": EXPECTED_MTP_OUTPUT_SHARD_NAME,
         },
     }
     (root / "model.safetensors.index.json").write_text(
         json.dumps(index, indent=2, sort_keys=True) + "\n"
     )
+
+
+def test_probe_uses_expected_output_shard_name() -> None:
+    assert probe.MTP_OUTPUT_SHARD_NAME == EXPECTED_MTP_OUTPUT_SHARD_NAME
 
 
 def test_probe_rejects_production_artifact_path() -> None:
