@@ -50,3 +50,16 @@ Run the standalone MTP-only module probe before any runtime decode plan.
 The MTP-only artifact and standalone module probe passed. Full distributed MTP
 decode remains blocked until a separate decode-controller plan covers
 propose/verify/accept semantics and fallback behavior.
+
+## Final Verification
+
+- Focused tests: `uv run pytest scripts/test_mimo_v25_pro_mtp_quantize.py scripts/test_mimo_v25_pro_mtp_module_probe.py scripts/test_mimo_v25_pro_mtp_artifact_probe.py -q`
+  - Result: `20 passed in 1.84s`
+- Lint: `uv run ruff check scripts/mimo_v25_pro_mtp_quantize.py scripts/test_mimo_v25_pro_mtp_quantize.py scripts/mimo_v25_pro_mtp_module_probe.py scripts/test_mimo_v25_pro_mtp_module_probe.py scripts/mimo_v25_pro_mtp_artifact_probe.py scripts/test_mimo_v25_pro_mtp_artifact_probe.py`
+  - Result: `All checks passed!`
+- Typecheck: `uv run basedpyright scripts/mimo_v25_pro_mtp_quantize.py scripts/test_mimo_v25_pro_mtp_quantize.py scripts/mimo_v25_pro_mtp_module_probe.py scripts/test_mimo_v25_pro_mtp_module_probe.py scripts/mimo_v25_pro_mtp_artifact_probe.py scripts/test_mimo_v25_pro_mtp_artifact_probe.py`
+  - Result: `0 errors, 0 warnings, 0 notes`
+- Artifact summary assertions: `python3` assertion script for `mimo-v25-pro-mtp-artifact-summary-20260519.json` and `mimo-v25-pro-mtp-module-probe-20260519.json`
+  - Result: `artifact-ok`, `probe-ok`
+- Boundary check: production artifact unchanged; no diffs in `src/exo/api`, `src/exo/master`, `src/exo/shared/models`, or `resources/inference_model_cards`; only the four pre-existing KV/cache worker files remained dirty and unstaged.
+- Handoff: write the next plan for tiny fixture MTP decode-controller semantics before any distributed full-model run.
