@@ -1,0 +1,15 @@
+{
+  "artifact_kind": "mimo-v25-pro-mtp-only",
+  "complete": true,
+  "model_id": "kernelpool/MiMo-V2.5-Pro-6bit-mtp-experimental",
+  "mtp_layers": [
+    0,
+    1,
+    2
+  ],
+  "output_dir": "/Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/kernelpool--MiMo-V2.5-Pro-6bit-mtp-experimental",
+  "output_shard": "model_mtp-00001-of-00001.safetensors",
+  "output_shard_sha256": "2bd374402cf14a6c70f9f730677be75c566c42890240d95f21bfb89c3dd18b81",
+  "output_shard_size": 1659958379,
+  "tensor_count": 72
+}
