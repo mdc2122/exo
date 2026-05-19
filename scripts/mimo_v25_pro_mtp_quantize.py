@@ -18,6 +18,12 @@ import mlx.core as mx
 import torch
 from safetensors import safe_open
 
+if not __package__:
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_root_str = str(repo_root)
+    if repo_root_str not in sys.path:
+        sys.path.insert(0, repo_root_str)
+
 from scripts import mimo_v25_pro_6bit_quantize as base_quantize
 
 SOURCE_CHECKPOINT: Final[Path] = base_quantize.SOURCE_CHECKPOINT

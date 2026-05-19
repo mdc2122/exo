@@ -1,6 +1,8 @@
 import json
 import os
 import shutil
+import subprocess
+import sys
 from collections.abc import Callable
 from os import PathLike
 from pathlib import Path
@@ -42,6 +44,26 @@ def _write_mtp_fixture(path: Path) -> None:
         path,
         None,
     )
+
+
+def test_direct_script_invocation_help_works_from_repo_root() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/mimo_v25_pro_mtp_quantize.py",
+            "--help",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--dry-run" in result.stdout
+    assert "--convert" in result.stdout
 
 
 @pytest.fixture()
