@@ -66,8 +66,11 @@ def test_probe_rejects_production_artifact_path() -> None:
         probe.guard_probe_artifact_path(probe.PRODUCTION_6BIT_ARTIFACT_ROOT)
 
 
-def test_probe_validates_keys_and_runs_synthetic_matmuls(tmp_path: Path) -> None:
-    artifact = tmp_path / "kernelpool--MiMo-V2.5-Pro-6bit-mtp-experimental"
+def test_probe_validates_keys_and_runs_synthetic_matmuls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    artifact = Path("kernelpool--MiMo-V2.5-Pro-6bit-mtp-experimental")
     _write_tiny_quantized_artifact(artifact)
 
     report = probe.probe_mtp_artifact(
@@ -84,8 +87,11 @@ def test_probe_validates_keys_and_runs_synthetic_matmuls(tmp_path: Path) -> None
     assert report["synthetic_forwards"]["layer_0_qkv_proj"] == [1, 1, 4]
 
 
-def test_probe_fails_when_required_quantized_key_is_missing(tmp_path: Path) -> None:
-    artifact = tmp_path / "kernelpool--MiMo-V2.5-Pro-6bit-mtp-experimental"
+def test_probe_fails_when_required_quantized_key_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    artifact = Path("kernelpool--MiMo-V2.5-Pro-6bit-mtp-experimental")
     _write_tiny_quantized_artifact(artifact)
     index = cast(
         dict[str, object],
