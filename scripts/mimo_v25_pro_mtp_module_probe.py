@@ -77,19 +77,21 @@ def _is_within(resolved_path: Path, resolved_root: Path) -> bool:
 
 
 def guard_probe_artifact_path(artifact_dir: Path) -> None:
-    if not artifact_dir.is_absolute():
-        return
-
     resolved = artifact_dir.resolve()
     production_root = PRODUCTION_6BIT_ARTIFACT_ROOT.resolve()
     experimental_root = MTP_ARTIFACT_ROOT.resolve()
 
+    if ".." in artifact_dir.parts:
+        raise ValueError(
+            f"Refusing artifact path {artifact_dir}; relative traversal with '..' is "
+            "not allowed"
+        )
     if _is_within(resolved, production_root):
         raise ValueError(
             f"Refusing artifact path {artifact_dir}; use the experimental MTP artifact "
             f"root {MTP_ARTIFACT_ROOT}, not the production 6-bit artifact tree"
         )
-    if not _is_within(resolved, experimental_root):
+    if artifact_dir.is_absolute() and not _is_within(resolved, experimental_root):
         raise ValueError(
             f"Refusing artifact path {artifact_dir}; absolute paths must stay under "
             f"the experimental MTP artifact root {MTP_ARTIFACT_ROOT}"
@@ -233,7 +235,7 @@ def probe_mtp_artifact(
 
 def _parse_args(argv: Sequence[str]) -> CliArgs:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--artifact", type=Path, default=MTP_ARTIFACT_ROOT)
+    parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--json-out", type=Path, default=None)
     namespace = parser.parse_args(argv)
     artifact = cast(object, namespace.artifact)
