@@ -41,9 +41,8 @@ EXPECTED_MTP_LAYERS: Final[tuple[int, ...]] = (0, 1, 2)
 MTP_HEADROOM_BYTES: Final[int] = 8 * 1024**3
 ARTIFACT_KIND: Final[str] = "mimo-v25-pro-mtp-only"
 SOURCE_MODEL_ID: Final[str] = base_quantize.BASE_MODEL_ID
-PLAN_ARTIFACTS_ROOT: Final[Path] = (
-    Path(__file__).resolve().parents[1] / "docs" / "plans" / "artifacts"
-)
+REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
+PLAN_ARTIFACTS_ROOT: Final[Path] = REPO_ROOT / "docs" / "plans" / "artifacts"
 
 SourceNbytesFn = Callable[[Sequence[int], str], int]
 QuantizeTensorFn = Callable[
@@ -185,6 +184,16 @@ def _tmp_output_path(output_dir: Path) -> Path:
 
 def _is_within(resolved_path: Path, resolved_root: Path) -> bool:
     return resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+
+def _resolve_summary_json_path(output_dir: Path, summary_json: Path) -> Path:
+    if summary_json.is_absolute():
+        return summary_json
+    summary_parts = summary_json.parts
+    plan_parts = ("docs", "plans", "artifacts")
+    if summary_parts[: len(plan_parts)] == plan_parts:
+        return REPO_ROOT / summary_json
+    return output_dir / summary_json
 
 
 def _empty_manifest() -> MtpManifest:
@@ -339,8 +348,9 @@ def guard_mtp_output_path(output_dir: Path) -> None:
         )
 
 
-def guard_summary_json_path(output_dir: Path, summary_json: Path) -> None:
-    resolved = summary_json.resolve()
+def guard_summary_json_path(output_dir: Path, summary_json: Path) -> Path:
+    summary_path = _resolve_summary_json_path(output_dir, summary_json)
+    resolved = summary_path.resolve()
     output_root = output_dir.resolve()
     plan_root = PLAN_ARTIFACTS_ROOT.resolve()
     production_root = PRODUCTION_6BIT_ARTIFACT_ROOT.resolve()
@@ -356,6 +366,7 @@ def guard_summary_json_path(output_dir: Path, summary_json: Path) -> None:
             f"Refusing summary JSON path {summary_json}; summary JSON must be under "
             f"{output_dir} or {PLAN_ARTIFACTS_ROOT}"
         )
+    return summary_path
 
 
 def _mtp_tensor_names(source_shard: Path) -> list[str]:
@@ -709,9 +720,9 @@ def write_summary(output_dir: Path, summary_json: Path | None = None) -> dict[st
         "complete": manifest["complete"],
     }
     if summary_json is not None:
-        guard_summary_json_path(output_dir, summary_json)
-        summary_json.parent.mkdir(parents=True, exist_ok=True)
-        summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+        summary_path = guard_summary_json_path(output_dir, summary_json)
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     return summary
 
 

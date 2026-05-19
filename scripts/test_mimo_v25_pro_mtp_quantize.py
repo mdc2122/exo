@@ -166,6 +166,7 @@ def test_write_summary_guards_paths_and_allows_plan_artifacts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_shard, output_dir = mtp_fixture_paths
+    monkeypatch.setattr(mtp_quantize, "REPO_ROOT", tmp_path)
     plan_artifacts_dir = tmp_path / "docs" / "plans" / "artifacts"
     monkeypatch.setattr(mtp_quantize, "PLAN_ARTIFACTS_ROOT", plan_artifacts_dir)
 
@@ -173,8 +174,16 @@ def test_write_summary_guards_paths_and_allows_plan_artifacts(
         mtp_quantize.MtpQuantizationPlan(source_shard, output_dir)
     )
 
-    allowed_summary = plan_artifacts_dir / "mimo-v25-pro-mtp-artifact-summary.json"
-    summary = mtp_quantize.write_summary(output_dir, allowed_summary)
+    relative_output_summary = Path("summary.json")
+    summary = mtp_quantize.write_summary(output_dir, relative_output_summary)
+    assert (output_dir / "summary.json").is_file()
+    assert summary["output_shard"] == mtp_quantize.MTP_OUTPUT_SHARD_NAME
+
+    relative_plan_summary = Path(
+        "docs/plans/artifacts/mimo-v25-pro-mtp-artifact-summary.json"
+    )
+    allowed_summary = tmp_path / relative_plan_summary
+    summary = mtp_quantize.write_summary(output_dir, relative_plan_summary)
     assert allowed_summary.is_file()
     assert summary["output_shard"] == mtp_quantize.MTP_OUTPUT_SHARD_NAME
 
