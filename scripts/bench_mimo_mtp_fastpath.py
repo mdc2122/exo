@@ -2,23 +2,51 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+import mlx.core as mx
+
+from exo.download.download_utils import build_model_path
+from exo.shared.types.common import ModelId
+from exo.shared.types.mlx import Model
+from exo.shared.types.text_generation import TextGenerationTaskParams
+from exo.worker.engines.mlx.cache import encode_prompt, make_kv_cache
+from exo.worker.engines.mlx.generator.generate import mlx_generate
 from exo.worker.engines.mlx.mimo_mtp_fast.benchmark import (
-    BenchmarkRunResult,
-    MimoMtpBenchmarkMode,
+    ArBenchmarkRequest,
+    build_ar_task_params,
+    build_benchmark_runner,
     build_contract_probe_row,
     parse_benchmark_modes,
     render_json_line,
+    run_ar_benchmark,
     run_benchmark_modes,
+    run_mtp_benchmark,
 )
+from exo.worker.engines.mlx.mimo_mtp_fast.providers import (
+    TargetVerifierModel,
+    make_replay_mtp_one_cycle_runner,
+)
+from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_loader import (
+    load_mimo_mtp_sidecar_tensors,
+)
+from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_module import build_mimo_mtp_stack
+from exo.worker.engines.mlx.utils_mlx import (
+    apply_chat_template,
+    load_model,
+    load_tokenizer_for_model_id,
+)
+
+PromptBuilder = Callable[[object, TextGenerationTaskParams], str]
 
 
 @dataclass(frozen=True, slots=True)
 class _Args:
     model_path: Path | None
+    model_id: str
     sidecar_path: Path
     prompt: str
     max_tokens: int
@@ -31,6 +59,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Benchmark or dry-run-probe the MiMo V2.5 Pro MTP fastpath."
     )
     parser.add_argument("--model-path", type=Path, default=None)
+    parser.add_argument("--model-id", default="kernelpool/MiMo-V2.5-Pro-6bit")
     parser.add_argument("--sidecar-path", type=Path, required=True)
     parser.add_argument("--prompt", default="Write a Python function that parses JSON lines.")
     parser.add_argument("--max-tokens", type=int, default=128)
@@ -42,6 +71,7 @@ def _parser() -> argparse.ArgumentParser:
 def _parse_args() -> _Args:
     namespace = _parser().parse_args()
     model_path = cast(Path | None, namespace.model_path)
+    model_id = cast(str, namespace.model_id)
     sidecar_path = cast(Path, namespace.sidecar_path)
     prompt = cast(str, namespace.prompt)
     max_tokens = cast(int, namespace.max_tokens)
@@ -49,6 +79,7 @@ def _parse_args() -> _Args:
     dry_run_contract_only = cast(bool, namespace.dry_run_contract_only)
     return _Args(
         model_path=model_path,
+        model_id=model_id,
         sidecar_path=sidecar_path,
         prompt=prompt,
         max_tokens=max_tokens,
@@ -71,20 +102,54 @@ def main() -> int:
         return 0
 
     modes = parse_benchmark_modes(args.modes)
+    model_id = ModelId(args.model_id)
+    model_path = args.model_path or build_model_path(model_id)
+    raw_model, _config = load_model(model_path, lazy=True, strict=False)
+    model = cast(Model, raw_model)
+    target_model = cast(TargetVerifierModel, cast(object, raw_model))
+    mx.eval(raw_model)
+    tokenizer = load_tokenizer_for_model_id(model_id, model_path)
+    sidecar = load_mimo_mtp_sidecar_tensors(args.sidecar_path)
+    stack = build_mimo_mtp_stack(sidecar, raw_model)
+    prompt_builder = cast(PromptBuilder, apply_chat_template)
+    benchmark_request = ArBenchmarkRequest(
+        model=model,
+        tokenizer=tokenizer,
+        model_id=str(model_id),
+        prompt=args.prompt,
+        max_tokens=args.max_tokens,
+    )
+    prompt_for_tokens = apply_chat_template(
+        tokenizer,
+        build_ar_task_params(benchmark_request),
+    )
+    flattened_prompt_tokens = encode_prompt(tokenizer, prompt_for_tokens).reshape(-1)
+    prompt_token_history = tuple(
+        int(flattened_prompt_tokens[index].item())
+        for index in range(int(flattened_prompt_tokens.size))
+    )
+    runner = build_benchmark_runner(
+        model=model,
+        tokenizer=tokenizer,
+        model_id=str(model_id),
+        prompt=args.prompt,
+        prompt_token_history=prompt_token_history,
+        max_tokens=args.max_tokens,
+        one_cycle=make_replay_mtp_one_cycle_runner(
+            stack=stack,
+            target_model=target_model,
+            target_cache_factory=lambda: make_kv_cache(model=model),
+            token_dtype=mx.int32,
+        ),
+        ar_benchmark=lambda request: run_ar_benchmark(
+            request,
+            prompt_builder=prompt_builder,
+            generate=mlx_generate,
+        ),
+        mtp_benchmark=run_mtp_benchmark,
+    )
 
-    def placeholder_runner(mode: MimoMtpBenchmarkMode) -> BenchmarkRunResult:
-        return BenchmarkRunResult(
-            mode=mode,
-            generated_tokens=0,
-            decode_seconds=0.0,
-            attempted_depth_counts={},
-            accepted_depth_counts={},
-        )
-
-    for row in run_benchmark_modes(modes=modes, runner=placeholder_runner):
-        row["next_step"] = (
-            "full-model benchmark execution is not wired yet; implement MLX-backed AR/MTP runners next"
-        )
+    for row in run_benchmark_modes(modes=modes, runner=runner):
         print(render_json_line(row))
     return 0
 

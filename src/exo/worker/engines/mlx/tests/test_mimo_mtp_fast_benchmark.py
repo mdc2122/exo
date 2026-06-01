@@ -307,3 +307,85 @@ def test_requested_depth_for_benchmark_mode() -> None:
     assert requested_depth_for_mode(MimoMtpBenchmarkMode.D3) == 3
     assert requested_depth_for_mode(MimoMtpBenchmarkMode.AUTO) == 3
     assert requested_depth_for_mode(MimoMtpBenchmarkMode.AR) == 0
+
+
+def test_build_benchmark_runner_dispatches_ar_and_mtp_modes() -> None:
+    from exo.worker.engines.mlx.mimo_mtp_fast.benchmark import (
+        ArBenchmarkRequest,
+        BenchmarkRunResult,
+        MtpBenchmarkRequest,
+        build_benchmark_runner,
+    )
+    from exo.worker.engines.mlx.mimo_mtp_fast.one_cycle import MimoMtpOneCycleResult
+
+    ar_requests: list[ArBenchmarkRequest] = []
+    mtp_requests: list[MtpBenchmarkRequest] = []
+    one_cycle_calls: list[tuple[tuple[int, ...], int]] = []
+
+    def fake_ar(request: ArBenchmarkRequest) -> BenchmarkRunResult:
+        ar_requests.append(request)
+        return BenchmarkRunResult(
+            mode=MimoMtpBenchmarkMode.AR,
+            generated_tokens=request.max_tokens,
+            decode_seconds=1.0,
+            attempted_depth_counts={},
+            accepted_depth_counts={},
+        )
+
+    def fake_one_cycle(history: tuple[int, ...], depth: int) -> MimoMtpOneCycleResult:
+        one_cycle_calls.append((history, depth))
+        return MimoMtpOneCycleResult(
+            proposed_token_ids=(10, 11, 12),
+            accepted_token_ids=(10,),
+            fallback_token_id=99,
+            attempted_depth=depth,
+            accepted_depth=1,
+            elapsed_seconds=0.001,
+        )
+
+    def fake_mtp(request: MtpBenchmarkRequest, *, one_cycle: object) -> BenchmarkRunResult:
+        mtp_requests.append(request)
+        assert one_cycle is fake_one_cycle
+        return BenchmarkRunResult(
+            mode=request.mode,
+            generated_tokens=request.max_tokens,
+            decode_seconds=2.0,
+            attempted_depth_counts={request.requested_depth: 1},
+            accepted_depth_counts={1: 1},
+        )
+
+    runner = build_benchmark_runner(
+        model="model",
+        tokenizer="tokenizer",
+        model_id="kernelpool/MiMo-V2.5-Pro-6bit",
+        prompt="hello",
+        prompt_token_history=(1, 2, 3),
+        max_tokens=4,
+        one_cycle=fake_one_cycle,
+        ar_benchmark=fake_ar,
+        mtp_benchmark=fake_mtp,
+    )
+
+    ar_result = runner(MimoMtpBenchmarkMode.AR)
+    d2_result = runner(MimoMtpBenchmarkMode.D2)
+
+    assert ar_result.mode == MimoMtpBenchmarkMode.AR
+    assert d2_result.mode == MimoMtpBenchmarkMode.D2
+    assert ar_requests == [
+        ArBenchmarkRequest(
+            model="model",
+            tokenizer="tokenizer",
+            model_id="kernelpool/MiMo-V2.5-Pro-6bit",
+            prompt="hello",
+            max_tokens=4,
+        )
+    ]
+    assert mtp_requests == [
+        MtpBenchmarkRequest(
+            mode=MimoMtpBenchmarkMode.D2,
+            token_history=(1, 2, 3),
+            max_tokens=4,
+            requested_depth=2,
+        )
+    ]
+    assert one_cycle_calls == []

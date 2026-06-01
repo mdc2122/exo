@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import mlx.core as mx
@@ -7,6 +8,9 @@ import mlx.core as mx
 from exo.worker.engines.mlx.mimo_mtp_fast.providers import (
     make_mtp_one_cycle_runner,
     make_mtp_proposal_provider,
+    make_replay_hidden_state_provider,
+    make_replay_mtp_one_cycle_runner,
+    make_replay_target_verifier_provider,
     make_target_verifier_provider,
     mx_token_tuple,
 )
@@ -139,3 +143,102 @@ def test_make_mtp_one_cycle_runner_composes_real_proposal_and_verifier_providers
     assert result.accepted_depth == 1
     assert hidden_calls == [(7, 8)]
     assert target_model.forwarded_tokens == [8, 10]
+
+
+class _TracingReplayModel:
+    def __init__(self, verifier_tokens: tuple[int, ...]) -> None:
+        self.verifier_tokens = verifier_tokens
+        self.forwarded: list[tuple[str, int]] = []
+        self._index = 0
+
+    def model(self, input_tokens: mx.array, cache: object) -> mx.array:
+        cache_name = cache.name if isinstance(cache, _NamedCache) else "unknown"
+        self.forwarded.append((cache_name, int(input_tokens[0, 0].item())))
+        return mx.array([[[float(len(self.forwarded))]]], dtype=mx.float32)
+
+    def lm_head(self, hidden: mx.array) -> mx.array:
+        del hidden
+        token = self.verifier_tokens[self._index]
+        self._index += 1
+        logits = mx.zeros((1, 1, 128), dtype=mx.float32)
+        logits[:, :, token] = 1_000.0
+        return logits
+
+
+@dataclass(frozen=True)
+class _NamedCache:
+    name: str
+
+
+def _named_cache_factory() -> tuple[Callable[[], object], list[_NamedCache]]:
+    caches: list[_NamedCache] = []
+
+    def cache_factory() -> _NamedCache:
+        cache = _NamedCache(name=f"cache-{len(caches)}")
+        caches.append(cache)
+        return cache
+
+    return cache_factory, caches
+
+
+def test_replay_hidden_state_provider_replays_history_into_fresh_cache() -> None:
+    model = _TracingReplayModel(verifier_tokens=())
+    cache_factory, caches = _named_cache_factory()
+    hidden_provider = make_replay_hidden_state_provider(
+        model=model,
+        cache_factory=cache_factory,
+        token_dtype=mx.int32,
+    )
+
+    hidden = hidden_provider((1, 2, 3))
+
+    assert hidden.shape == (1, 1, 1)
+    assert len(caches) == 1
+    assert model.forwarded == [("cache-0", 1), ("cache-0", 2), ("cache-0", 3)]
+
+
+def test_replay_target_verifier_provider_prefills_prefix_then_boundary_and_drafts() -> None:
+    model = _TracingReplayModel(verifier_tokens=(10, 11, 99))
+    cache_factory, caches = _named_cache_factory()
+    verifier_provider = make_replay_target_verifier_provider(
+        model=model,
+        cache_factory=cache_factory,
+        token_dtype=mx.int32,
+    )
+
+    verifier_tokens = verifier_provider((1, 2, 3), (10, 11, 12))
+
+    assert verifier_tokens == (10, 11, 99)
+    assert len(caches) == 1
+    assert model.forwarded == [
+        ("cache-0", 1),
+        ("cache-0", 2),
+        ("cache-0", 3),
+        ("cache-0", 10),
+        ("cache-0", 11),
+    ]
+
+
+def test_replay_mtp_one_cycle_runner_uses_replay_verifier_provider() -> None:
+    stack = _FakeStack()
+    target_model = _TracingReplayModel(verifier_tokens=(10, 99))
+    cache_factory, caches = _named_cache_factory()
+    one_cycle = make_replay_mtp_one_cycle_runner(
+        stack=stack,
+        target_model=target_model,
+        target_cache_factory=cache_factory,
+        token_dtype=mx.int32,
+    )
+
+    result = one_cycle((7, 8), 2)
+
+    assert result.accepted_token_ids == (10,)
+    assert result.fallback_token_id == 99
+    assert [cache.name for cache in caches] == ["cache-0", "cache-1", "cache-2"]
+    assert target_model.forwarded == [
+        ("cache-1", 7),
+        ("cache-1", 8),
+        ("cache-2", 7),
+        ("cache-2", 8),
+        ("cache-2", 10),
+    ]

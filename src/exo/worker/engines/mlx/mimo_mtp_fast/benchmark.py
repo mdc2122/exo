@@ -63,6 +63,16 @@ BenchmarkRunner = Callable[[MimoMtpBenchmarkMode], BenchmarkRunResult]
 JsonRow = dict[str, Any]
 
 
+class ArBenchmarkFn(Protocol):
+    def __call__(self, request: ArBenchmarkRequest) -> BenchmarkRunResult: ...
+
+
+class MtpBenchmarkFn(Protocol):
+    def __call__(
+        self, request: MtpBenchmarkRequest, *, one_cycle: OneCycleFn
+    ) -> BenchmarkRunResult: ...
+
+
 def render_json_line(row: JsonRow) -> str:
     return json.dumps(row, sort_keys=True, separators=(",", ":"))
 
@@ -195,7 +205,7 @@ def run_benchmark_modes(
     return rows
 
 
-def _ar_task_params(request: ArBenchmarkRequest) -> TextGenerationTaskParams:
+def build_ar_task_params(request: ArBenchmarkRequest) -> TextGenerationTaskParams:
     return TextGenerationTaskParams(
         model=ModelId(request.model_id),
         input=[InputMessage(role="user", content=request.prompt)],
@@ -213,7 +223,7 @@ def run_ar_benchmark(
     timer: TimerFn = time.perf_counter,
     elapsed_seconds_override: float | None = None,
 ) -> BenchmarkRunResult:
-    task_params = _ar_task_params(request)
+    task_params = build_ar_task_params(request)
     templated_prompt = prompt_builder(request.tokenizer, task_params)
     start = timer()
     generated_tokens = 0
@@ -288,3 +298,39 @@ def run_mtp_benchmark(
         attempted_depth_counts=attempted_depth_counts,
         accepted_depth_counts=accepted_depth_counts,
     )
+
+
+def build_benchmark_runner(
+    *,
+    model: object,
+    tokenizer: object,
+    model_id: str,
+    prompt: str,
+    prompt_token_history: tuple[int, ...],
+    max_tokens: int,
+    one_cycle: OneCycleFn,
+    ar_benchmark: ArBenchmarkFn,
+    mtp_benchmark: MtpBenchmarkFn,
+) -> BenchmarkRunner:
+    def runner(mode: MimoMtpBenchmarkMode) -> BenchmarkRunResult:
+        if mode == MimoMtpBenchmarkMode.AR:
+            return ar_benchmark(
+                ArBenchmarkRequest(
+                    model=model,
+                    tokenizer=tokenizer,
+                    model_id=model_id,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                )
+            )
+        return mtp_benchmark(
+            MtpBenchmarkRequest(
+                mode=mode,
+                token_history=prompt_token_history,
+                max_tokens=max_tokens,
+                requested_depth=requested_depth_for_mode(mode),
+            ),
+            one_cycle=one_cycle,
+        )
+
+    return runner
