@@ -148,3 +148,101 @@ def test_run_benchmark_modes_uses_none_baseline_when_ar_not_requested_first() ->
             ar_baseline_tok_s=None,
         )
     ]
+
+
+def test_run_ar_benchmark_invokes_generation_dependencies_and_counts_tokens() -> None:
+    from exo.worker.engines.mlx.mimo_mtp_fast.benchmark import (
+        ArBenchmarkRequest,
+        run_ar_benchmark,
+    )
+
+    calls: dict[str, object] = {}
+    prompt_builder_task: object | None = None
+
+    def fake_prompt_builder(tokenizer: object, task_params: object) -> str:
+        nonlocal prompt_builder_task
+        calls["prompt_builder_tokenizer"] = tokenizer
+        prompt_builder_task = task_params
+        return "templated prompt"
+
+    def fake_generate(
+        *,
+        model: object,
+        tokenizer: object,
+        task: object,
+        prompt: str,
+        kv_prefix_cache: object | None,
+        group: object | None,
+    ):
+        calls["generate"] = {
+            "model": model,
+            "tokenizer": tokenizer,
+            "task": task,
+            "prompt": prompt,
+            "kv_prefix_cache": kv_prefix_cache,
+            "group": group,
+        }
+        yield object()
+        yield object()
+        yield object()
+
+    request = ArBenchmarkRequest(
+        model=object(),
+        tokenizer=object(),
+        model_id="kernelpool/MiMo-V2.5-Pro-6bit",
+        prompt="hello",
+        max_tokens=3,
+    )
+
+    result = run_ar_benchmark(
+        request,
+        prompt_builder=fake_prompt_builder,
+        generate=fake_generate,
+        timer=lambda: 10.0,
+        elapsed_seconds_override=1.5,
+    )
+
+    assert result.mode == MimoMtpBenchmarkMode.AR
+    assert result.generated_tokens == 3
+    assert result.decode_seconds == 1.5
+    assert result.attempted_depth_counts == {}
+    assert result.accepted_depth_counts == {}
+    assert calls["generate"] == {
+        "model": request.model,
+        "tokenizer": request.tokenizer,
+        "task": prompt_builder_task,
+        "prompt": "templated prompt",
+        "kv_prefix_cache": None,
+        "group": None,
+    }
+
+
+def test_run_ar_benchmark_uses_timer_when_no_elapsed_override() -> None:
+    from exo.worker.engines.mlx.mimo_mtp_fast.benchmark import (
+        ArBenchmarkRequest,
+        run_ar_benchmark,
+    )
+
+    timer_values = iter((2.0, 5.5))
+
+    def fake_generate(**_kwargs: object):
+        yield object()
+        yield object()
+
+    request = ArBenchmarkRequest(
+        model=object(),
+        tokenizer=object(),
+        model_id="kernelpool/MiMo-V2.5-Pro-6bit",
+        prompt="hello",
+        max_tokens=2,
+    )
+
+    result = run_ar_benchmark(
+        request,
+        prompt_builder=lambda _tokenizer, _task_params: "prompt",
+        generate=fake_generate,
+        timer=lambda: next(timer_values),
+    )
+
+    assert result.generated_tokens == 2
+    assert result.decode_seconds == 3.5

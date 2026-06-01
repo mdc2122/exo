@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+from exo.shared.types.common import ModelId
+from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract import (
     probe_mimo_mtp_sidecar,
 )
@@ -29,6 +32,22 @@ class BenchmarkRunResult:
     accepted_depth_counts: dict[int, int]
 
 
+@dataclass(frozen=True, slots=True)
+class ArBenchmarkRequest:
+    model: object
+    tokenizer: object
+    model_id: str
+    prompt: str
+    max_tokens: int
+
+
+class _GeneratorResponse(Protocol):
+    pass
+
+
+PromptBuilder = Callable[[object, TextGenerationTaskParams], str]
+GenerationFn = Callable[..., Iterable[_GeneratorResponse]]
+TimerFn = Callable[[], float]
 BenchmarkRunner = Callable[[MimoMtpBenchmarkMode], BenchmarkRunResult]
 JsonRow = dict[str, Any]
 
@@ -163,3 +182,48 @@ def run_benchmark_modes(
         if mode == MimoMtpBenchmarkMode.AR:
             ar_baseline_tok_s = _tok_s_for_result(result)
     return rows
+
+
+def _ar_task_params(request: ArBenchmarkRequest) -> TextGenerationTaskParams:
+    return TextGenerationTaskParams(
+        model=ModelId(request.model_id),
+        input=[InputMessage(role="user", content=request.prompt)],
+        max_output_tokens=request.max_tokens,
+        temperature=0.0,
+        bench=True,
+    )
+
+
+def run_ar_benchmark(
+    request: ArBenchmarkRequest,
+    *,
+    prompt_builder: PromptBuilder,
+    generate: GenerationFn,
+    timer: TimerFn = time.perf_counter,
+    elapsed_seconds_override: float | None = None,
+) -> BenchmarkRunResult:
+    task_params = _ar_task_params(request)
+    templated_prompt = prompt_builder(request.tokenizer, task_params)
+    start = timer()
+    generated_tokens = 0
+    for _response in generate(
+        model=request.model,
+        tokenizer=request.tokenizer,
+        task=task_params,
+        prompt=templated_prompt,
+        kv_prefix_cache=None,
+        group=None,
+    ):
+        generated_tokens += 1
+    elapsed_seconds = (
+        elapsed_seconds_override
+        if elapsed_seconds_override is not None
+        else max(0.0, timer() - start)
+    )
+    return BenchmarkRunResult(
+        mode=MimoMtpBenchmarkMode.AR,
+        generated_tokens=generated_tokens,
+        decode_seconds=elapsed_seconds,
+        attempted_depth_counts={},
+        accepted_depth_counts={},
+    )
