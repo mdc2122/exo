@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+import json
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+
+from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract import (
+    probe_mimo_mtp_sidecar,
+)
+
+
+class MimoMtpBenchmarkMode(StrEnum):
+    AR = "ar"
+    D1 = "d1"
+    D2 = "d2"
+    D3 = "d3"
+    AUTO = "auto"
+
+
+JsonRow = dict[str, Any]
+
+
+def render_json_line(row: JsonRow) -> str:
+    return json.dumps(row, sort_keys=True, separators=(",", ":"))
+
+
+def parse_benchmark_modes(raw_modes: str) -> tuple[MimoMtpBenchmarkMode, ...]:
+    modes: list[MimoMtpBenchmarkMode] = []
+    for raw_mode in raw_modes.split(","):
+        mode_text = raw_mode.strip().lower()
+        if not mode_text:
+            continue
+        try:
+            modes.append(MimoMtpBenchmarkMode(mode_text))
+        except ValueError as exc:
+            supported = ",".join(mode.value for mode in MimoMtpBenchmarkMode)
+            raise ValueError(
+                f"Unsupported MiMo MTP benchmark mode {mode_text!r}; supported modes: {supported}"
+            ) from exc
+    if not modes:
+        raise ValueError("At least one MiMo MTP benchmark mode is required")
+    return tuple(modes)
+
+
+def _next_step_for_contract_probe(*, ready: bool) -> str:
+    if ready:
+        return "run ar,d1,d2,d3,auto benchmark with the validated sidecar"
+    return "provide a valid official-layout MiMo model_mtp.safetensors sidecar"
+
+
+def build_contract_probe_row(
+    *, sidecar_path: str | Path, model_path: str | Path | None
+) -> JsonRow:
+    probe = probe_mimo_mtp_sidecar(sidecar_path)
+    return {
+        "kind": "contract_probe",
+        "ready": probe.ready,
+        "model_path": None if model_path is None else str(Path(model_path).expanduser()),
+        "sidecar_path": str(probe.path),
+        "sidecar_status": probe.status,
+        "sidecar_layer_count": probe.layer_count,
+        "missing_key_count": len(probe.missing_keys),
+        "error": probe.error,
+        "next_step": _next_step_for_contract_probe(ready=probe.ready),
+    }
+
+
+def _stringify_depth_counts(counts: dict[int, int]) -> dict[str, int]:
+    return {str(depth): count for depth, count in sorted(counts.items())}
+
+
+def _decode_tok_s(*, generated_tokens: int, decode_seconds: float) -> float:
+    if decode_seconds <= 0.0:
+        return 0.0
+    return generated_tokens / decode_seconds
+
+
+def _next_step_for_metric(
+    *, mode: MimoMtpBenchmarkMode, decode_tok_s: float, ar_baseline_tok_s: float | None
+) -> str:
+    if mode == MimoMtpBenchmarkMode.AR:
+        return "use AR row as baseline for MTP mode comparison"
+    if decode_tok_s >= 30.0 and (
+        ar_baseline_tok_s is None or decode_tok_s > ar_baseline_tok_s
+    ):
+        return f"MTP mode {mode.value} beats AR baseline; proceed to guarded exo integration"
+    if ar_baseline_tok_s is not None and decode_tok_s <= ar_baseline_tok_s:
+        return f"MTP mode {mode.value} does not beat AR; inspect proposal/verify hot path before integration"
+    return f"MTP mode {mode.value} below 30 tok/s; continue hot-path optimization before integration"
+
+
+def build_metric_row(
+    *,
+    mode: MimoMtpBenchmarkMode,
+    generated_tokens: int,
+    decode_seconds: float,
+    attempted_depth_counts: dict[int, int],
+    accepted_depth_counts: dict[int, int],
+    ar_baseline_tok_s: float | None,
+) -> JsonRow:
+    decode_tok_s = _decode_tok_s(
+        generated_tokens=generated_tokens, decode_seconds=decode_seconds
+    )
+    rounded_tok_s = round(decode_tok_s, 4)
+    return {
+        "kind": "benchmark_metric",
+        "mode": mode.value,
+        "generated_tokens": generated_tokens,
+        "decode_seconds": round(decode_seconds, 6),
+        "decode_tok_s": rounded_tok_s,
+        "attempted_depth_counts": _stringify_depth_counts(attempted_depth_counts),
+        "accepted_depth_counts": _stringify_depth_counts(accepted_depth_counts),
+        "ar_baseline_tok_s": None
+        if ar_baseline_tok_s is None
+        else round(ar_baseline_tok_s, 4),
+        "next_step": _next_step_for_metric(
+            mode=mode,
+            decode_tok_s=rounded_tok_s,
+            ar_baseline_tok_s=ar_baseline_tok_s,
+        ),
+    }
