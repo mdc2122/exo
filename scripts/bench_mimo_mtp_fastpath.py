@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import cast
 
 from exo.worker.engines.mlx.mimo_mtp_fast.benchmark import (
+    BenchmarkRunResult,
     MimoMtpBenchmarkMode,
     build_contract_probe_row,
-    build_metric_row,
     parse_benchmark_modes,
     render_json_line,
+    run_benchmark_modes,
 )
 
 
@@ -70,32 +71,19 @@ def main() -> int:
         return 0
 
     modes = parse_benchmark_modes(args.modes)
-    ar_baseline_tok_s: float | None = None
-    for mode in modes:
-        if mode != MimoMtpBenchmarkMode.AR:
-            row = build_metric_row(
-                mode=mode,
-                generated_tokens=0,
-                decode_seconds=0.0,
-                attempted_depth_counts={},
-                accepted_depth_counts={},
-                ar_baseline_tok_s=ar_baseline_tok_s,
-            )
-            row["next_step"] = (
-                "full-model benchmark execution is not wired yet; implement MLX-backed AR/MTP runners next"
-            )
-            print(render_json_line(row))
-            continue
-        row = build_metric_row(
+
+    def placeholder_runner(mode: MimoMtpBenchmarkMode) -> BenchmarkRunResult:
+        return BenchmarkRunResult(
             mode=mode,
             generated_tokens=0,
             decode_seconds=0.0,
             attempted_depth_counts={},
             accepted_depth_counts={},
-            ar_baseline_tok_s=None,
         )
+
+    for row in run_benchmark_modes(modes=modes, runner=placeholder_runner):
         row["next_step"] = (
-            "full-model AR baseline runner is not wired yet; implement MLX-backed AR/MTP runners next"
+            "full-model benchmark execution is not wired yet; implement MLX-backed AR/MTP runners next"
         )
         print(render_json_line(row))
     return 0

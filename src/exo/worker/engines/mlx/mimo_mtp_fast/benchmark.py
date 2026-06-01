@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,16 @@ class MimoMtpBenchmarkMode(StrEnum):
     AUTO = "auto"
 
 
+@dataclass(frozen=True, slots=True)
+class BenchmarkRunResult:
+    mode: MimoMtpBenchmarkMode
+    generated_tokens: int
+    decode_seconds: float
+    attempted_depth_counts: dict[int, int]
+    accepted_depth_counts: dict[int, int]
+
+
+BenchmarkRunner = Callable[[MimoMtpBenchmarkMode], BenchmarkRunResult]
 JsonRow = dict[str, Any]
 
 
@@ -120,3 +132,34 @@ def build_metric_row(
             ar_baseline_tok_s=ar_baseline_tok_s,
         ),
     }
+
+
+def _tok_s_for_result(result: BenchmarkRunResult) -> float:
+    return round(
+        _decode_tok_s(
+            generated_tokens=result.generated_tokens,
+            decode_seconds=result.decode_seconds,
+        ),
+        4,
+    )
+
+
+def run_benchmark_modes(
+    *, modes: tuple[MimoMtpBenchmarkMode, ...], runner: BenchmarkRunner
+) -> list[JsonRow]:
+    rows: list[JsonRow] = []
+    ar_baseline_tok_s: float | None = None
+    for mode in modes:
+        result = runner(mode)
+        row = build_metric_row(
+            mode=result.mode,
+            generated_tokens=result.generated_tokens,
+            decode_seconds=result.decode_seconds,
+            attempted_depth_counts=result.attempted_depth_counts,
+            accepted_depth_counts=result.accepted_depth_counts,
+            ar_baseline_tok_s=ar_baseline_tok_s,
+        )
+        rows.append(row)
+        if mode == MimoMtpBenchmarkMode.AR:
+            ar_baseline_tok_s = _tok_s_for_result(result)
+    return rows
