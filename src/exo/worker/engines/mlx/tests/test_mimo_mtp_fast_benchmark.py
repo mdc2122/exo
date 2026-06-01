@@ -246,3 +246,64 @@ def test_run_ar_benchmark_uses_timer_when_no_elapsed_override() -> None:
 
     assert result.generated_tokens == 2
     assert result.decode_seconds == 3.5
+
+
+def test_run_mtp_benchmark_streams_events_and_counts_depths() -> None:
+    from exo.worker.engines.mlx.mimo_mtp_fast.benchmark import (
+        MtpBenchmarkRequest,
+        run_mtp_benchmark,
+    )
+    from exo.worker.engines.mlx.mimo_mtp_fast.one_cycle import MimoMtpOneCycleResult
+
+    observed_histories: list[tuple[int, ...]] = []
+
+    def one_cycle(history: tuple[int, ...], requested_depth: int) -> MimoMtpOneCycleResult:
+        observed_histories.append(history)
+        if len(observed_histories) == 1:
+            return MimoMtpOneCycleResult(
+                proposed_token_ids=(10, 11, 12),
+                accepted_token_ids=(10, 11),
+                fallback_token_id=99,
+                attempted_depth=requested_depth,
+                accepted_depth=2,
+                elapsed_seconds=0.001,
+            )
+        return MimoMtpOneCycleResult(
+            proposed_token_ids=(12,),
+            accepted_token_ids=(),
+            fallback_token_id=77,
+            attempted_depth=1,
+            accepted_depth=0,
+            elapsed_seconds=0.001,
+        )
+
+    request = MtpBenchmarkRequest(
+        mode=MimoMtpBenchmarkMode.D3,
+        token_history=(1, 2),
+        max_tokens=3,
+        requested_depth=3,
+    )
+
+    result = run_mtp_benchmark(
+        request,
+        one_cycle=one_cycle,
+        timer=lambda: 100.0,
+        elapsed_seconds_override=2.0,
+    )
+
+    assert result.mode == MimoMtpBenchmarkMode.D3
+    assert result.generated_tokens == 3
+    assert result.decode_seconds == 2.0
+    assert result.attempted_depth_counts == {3: 2, 1: 1}
+    assert result.accepted_depth_counts == {2: 2, 0: 1}
+    assert observed_histories == [(1, 2), (1, 2, 10, 11)]
+
+
+def test_requested_depth_for_benchmark_mode() -> None:
+    from exo.worker.engines.mlx.mimo_mtp_fast.benchmark import requested_depth_for_mode
+
+    assert requested_depth_for_mode(MimoMtpBenchmarkMode.D1) == 1
+    assert requested_depth_for_mode(MimoMtpBenchmarkMode.D2) == 2
+    assert requested_depth_for_mode(MimoMtpBenchmarkMode.D3) == 3
+    assert requested_depth_for_mode(MimoMtpBenchmarkMode.AUTO) == 3
+    assert requested_depth_for_mode(MimoMtpBenchmarkMode.AR) == 0

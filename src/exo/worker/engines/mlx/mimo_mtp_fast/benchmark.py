@@ -10,9 +10,11 @@ from typing import Any, Protocol
 
 from exo.shared.types.common import ModelId
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from exo.worker.engines.mlx.mimo_mtp_fast.one_cycle import MimoMtpOneCycleResult
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract import (
     probe_mimo_mtp_sidecar,
 )
+from exo.worker.engines.mlx.mimo_mtp_fast.speculative_loop import stream_mimo_mtp_fast
 
 
 class MimoMtpBenchmarkMode(StrEnum):
@@ -41,12 +43,21 @@ class ArBenchmarkRequest:
     max_tokens: int
 
 
+@dataclass(frozen=True, slots=True)
+class MtpBenchmarkRequest:
+    mode: MimoMtpBenchmarkMode
+    token_history: tuple[int, ...]
+    max_tokens: int
+    requested_depth: int
+
+
 class _GeneratorResponse(Protocol):
     pass
 
 
 PromptBuilder = Callable[[object, TextGenerationTaskParams], str]
 GenerationFn = Callable[..., Iterable[_GeneratorResponse]]
+OneCycleFn = Callable[[tuple[int, ...], int], MimoMtpOneCycleResult]
 TimerFn = Callable[[], float]
 BenchmarkRunner = Callable[[MimoMtpBenchmarkMode], BenchmarkRunResult]
 JsonRow = dict[str, Any]
@@ -226,4 +237,54 @@ def run_ar_benchmark(
         decode_seconds=elapsed_seconds,
         attempted_depth_counts={},
         accepted_depth_counts={},
+    )
+
+
+def requested_depth_for_mode(mode: MimoMtpBenchmarkMode) -> int:
+    match mode:
+        case MimoMtpBenchmarkMode.D1:
+            return 1
+        case MimoMtpBenchmarkMode.D2:
+            return 2
+        case MimoMtpBenchmarkMode.D3 | MimoMtpBenchmarkMode.AUTO:
+            return 3
+        case MimoMtpBenchmarkMode.AR:
+            return 0
+
+
+def _increment_count(counts: dict[int, int], depth: int) -> None:
+    counts[depth] = counts.get(depth, 0) + 1
+
+
+def run_mtp_benchmark(
+    request: MtpBenchmarkRequest,
+    *,
+    one_cycle: OneCycleFn,
+    timer: TimerFn = time.perf_counter,
+    elapsed_seconds_override: float | None = None,
+) -> BenchmarkRunResult:
+    start = timer()
+    generated_tokens = 0
+    attempted_depth_counts: dict[int, int] = {}
+    accepted_depth_counts: dict[int, int] = {}
+    for event in stream_mimo_mtp_fast(
+        token_history=request.token_history,
+        max_tokens=request.max_tokens,
+        requested_depth=request.requested_depth,
+        one_cycle=one_cycle,
+    ):
+        generated_tokens += 1
+        _increment_count(attempted_depth_counts, event.attempted_depth)
+        _increment_count(accepted_depth_counts, event.accepted_depth)
+    elapsed_seconds = (
+        elapsed_seconds_override
+        if elapsed_seconds_override is not None
+        else max(0.0, timer() - start)
+    )
+    return BenchmarkRunResult(
+        mode=request.mode,
+        generated_tokens=generated_tokens,
+        decode_seconds=elapsed_seconds,
+        attempted_depth_counts=attempted_depth_counts,
+        accepted_depth_counts=accepted_depth_counts,
     )
