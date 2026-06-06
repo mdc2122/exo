@@ -45,7 +45,9 @@ def _tiny_tensor_for_suffix(layer_index: int, suffix: str) -> np.ndarray:
     return np.full((2,), base_value, dtype=np.float32)
 
 
-def _write_synthetic_official_sidecar(path: Path, *, omit_key: str | None = None) -> None:
+def _write_synthetic_official_sidecar(
+    path: Path, *, omit_key: str | None = None
+) -> None:
     tensors: dict[str, np.ndarray] = {}
     for layer_index in range(MIMO_MTP_LAYER_COUNT):
         for suffix in MIMO_MTP_REQUIRED_SUFFIXES:

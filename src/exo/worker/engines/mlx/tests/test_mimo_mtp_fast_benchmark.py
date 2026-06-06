@@ -10,6 +10,7 @@ from exo.worker.engines.mlx.mimo_mtp_fast.benchmark import (
     parse_benchmark_modes,
     render_json_line,
 )
+from exo.worker.engines.mlx.mimo_mtp_fast.one_cycle import MimoMtpCycleTiming
 
 
 def test_contract_probe_row_reports_missing_sidecar_without_loading_model(
@@ -27,7 +28,10 @@ def test_contract_probe_row_reports_missing_sidecar_without_loading_model(
     assert row["sidecar_status"] == "missing"
     assert row["sidecar_path"] == str(missing_sidecar)
     assert row["model_path"] is None
-    assert row["next_step"] == "provide a valid official-layout MiMo model_mtp.safetensors sidecar"
+    assert (
+        row["next_step"]
+        == "provide a valid official-layout MiMo model_mtp.safetensors sidecar"
+    )
 
 
 def test_parse_benchmark_modes_preserves_requested_order() -> None:
@@ -69,7 +73,52 @@ def test_metric_row_computes_decode_tokens_per_second_and_conclusion() -> None:
     assert row["decode_tok_s"] == 32.0
     assert row["attempted_depth_counts"] == {"3": 40}
     assert row["accepted_depth_counts"] == {"0": 4, "3": 36}
-    assert row["next_step"] == "MTP mode d3 beats AR baseline; proceed to guarded exo integration"
+    assert (
+        row["next_step"]
+        == "MTP mode d3 has benchmark evidence; next gate is guarded integration review"
+    )
+
+
+def test_metric_row_keeps_production_gate_blocked_without_ar_baseline() -> None:
+    row = build_metric_row(
+        mode=MimoMtpBenchmarkMode.D3,
+        generated_tokens=96,
+        decode_seconds=3.0,
+        attempted_depth_counts={3: 40},
+        accepted_depth_counts={3: 40},
+        ar_baseline_tok_s=None,
+    )
+
+    assert row["decode_tok_s"] == 32.0
+    assert (
+        row["next_step"]
+        == "MTP mode d3 needs same-model/same-hardware AR baseline before any speedup or production claim"
+    )
+
+
+def test_metric_row_includes_timing_breakdown_and_acceptance_rate() -> None:
+    row = build_metric_row(
+        mode=MimoMtpBenchmarkMode.D3,
+        generated_tokens=8,
+        decode_seconds=1.0,
+        attempted_depth_counts={3: 3},
+        accepted_depth_counts={0: 1, 2: 1, 3: 1},
+        ar_baseline_tok_s=None,
+        timing_totals=MimoMtpCycleTiming(
+            proposal_seconds=0.3,
+            verification_seconds=0.4,
+            acceptance_seconds=0.05,
+            fallback_seconds=0.02,
+        ),
+    )
+
+    assert row["acceptance_rate"] == 5 / 9
+    assert row["timing_breakdown_seconds"] == {
+        "proposal": 0.3,
+        "verification": 0.4,
+        "acceptance": 0.05,
+        "fallback": 0.02,
+    }
 
 
 def test_render_json_line_is_single_line_stable_json() -> None:
@@ -118,7 +167,10 @@ def test_run_benchmark_modes_calls_runner_and_threads_ar_baseline() -> None:
     assert rows[1]["mode"] == "d3"
     assert rows[1]["decode_tok_s"] == 32.0
     assert rows[1]["ar_baseline_tok_s"] == 22.0
-    assert rows[1]["next_step"] == "MTP mode d3 beats AR baseline; proceed to guarded exo integration"
+    assert (
+        rows[1]["next_step"]
+        == "MTP mode d3 has benchmark evidence; next gate is guarded integration review"
+    )
 
 
 def test_run_benchmark_modes_uses_none_baseline_when_ar_not_requested_first() -> None:
@@ -253,11 +305,16 @@ def test_run_mtp_benchmark_streams_events_and_counts_depths() -> None:
         MtpBenchmarkRequest,
         run_mtp_benchmark,
     )
-    from exo.worker.engines.mlx.mimo_mtp_fast.one_cycle import MimoMtpOneCycleResult
+    from exo.worker.engines.mlx.mimo_mtp_fast.one_cycle import (
+        MimoMtpCycleTiming,
+        MimoMtpOneCycleResult,
+    )
 
     observed_histories: list[tuple[int, ...]] = []
 
-    def one_cycle(history: tuple[int, ...], requested_depth: int) -> MimoMtpOneCycleResult:
+    def one_cycle(
+        history: tuple[int, ...], requested_depth: int
+    ) -> MimoMtpOneCycleResult:
         observed_histories.append(history)
         if len(observed_histories) == 1:
             return MimoMtpOneCycleResult(
@@ -267,6 +324,12 @@ def test_run_mtp_benchmark_streams_events_and_counts_depths() -> None:
                 attempted_depth=requested_depth,
                 accepted_depth=2,
                 elapsed_seconds=0.001,
+                timing=MimoMtpCycleTiming(
+                    proposal_seconds=0.1,
+                    verification_seconds=0.2,
+                    acceptance_seconds=0.03,
+                    fallback_seconds=0.0,
+                ),
             )
         return MimoMtpOneCycleResult(
             proposed_token_ids=(12,),
@@ -275,6 +338,12 @@ def test_run_mtp_benchmark_streams_events_and_counts_depths() -> None:
             attempted_depth=1,
             accepted_depth=0,
             elapsed_seconds=0.001,
+            timing=MimoMtpCycleTiming(
+                proposal_seconds=0.4,
+                verification_seconds=0.5,
+                acceptance_seconds=0.06,
+                fallback_seconds=0.07,
+            ),
         )
 
     request = MtpBenchmarkRequest(
@@ -296,6 +365,12 @@ def test_run_mtp_benchmark_streams_events_and_counts_depths() -> None:
     assert result.decode_seconds == 2.0
     assert result.attempted_depth_counts == {3: 2, 1: 1}
     assert result.accepted_depth_counts == {2: 2, 0: 1}
+    assert result.timing_totals == MimoMtpCycleTiming(
+        proposal_seconds=0.5,
+        verification_seconds=0.7,
+        acceptance_seconds=0.09,
+        fallback_seconds=0.07,
+    )
     assert observed_histories == [(1, 2), (1, 2, 10, 11)]
 
 
@@ -343,7 +418,9 @@ def test_build_benchmark_runner_dispatches_ar_and_mtp_modes() -> None:
             elapsed_seconds=0.001,
         )
 
-    def fake_mtp(request: MtpBenchmarkRequest, *, one_cycle: object) -> BenchmarkRunResult:
+    def fake_mtp(
+        request: MtpBenchmarkRequest, *, one_cycle: object
+    ) -> BenchmarkRunResult:
         mtp_requests.append(request)
         assert one_cycle is fake_one_cycle
         return BenchmarkRunResult(

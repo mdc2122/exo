@@ -40,7 +40,12 @@ def _tiny_tensor_for_suffix(suffix: str) -> np.ndarray:
     return np.ones((2,), dtype=np.float32)
 
 
-def _write_synthetic_official_sidecar(path: Path, *, omit_key: str | None = None) -> None:
+def _write_synthetic_official_sidecar(
+    path: Path,
+    *,
+    omit_key: str | None = None,
+    override_tensors: dict[str, np.ndarray] | None = None,
+) -> None:
     tensors: dict[str, np.ndarray] = {}
     for layer_index in range(MIMO_MTP_LAYER_COUNT):
         for suffix in MIMO_MTP_REQUIRED_SUFFIXES:
@@ -48,6 +53,8 @@ def _write_synthetic_official_sidecar(path: Path, *, omit_key: str | None = None
             if key == omit_key:
                 continue
             tensors[key] = _tiny_tensor_for_suffix(suffix)
+    if override_tensors is not None:
+        tensors.update(override_tensors)
     _save_file(tensors, str(path))
 
 
@@ -95,3 +102,43 @@ def test_missing_required_tensor_reports_exact_key(tmp_path: Path) -> None:
     assert probe.layer_count == 3
     assert probe.missing_keys == (omitted_key,)
     assert probe.error == "MiMo MTP sidecar is missing required official-layout tensors"
+
+
+def test_invalid_required_tensor_dtype_reports_actionable_contract_error(
+    tmp_path: Path,
+) -> None:
+    sidecar_path = tmp_path / "model_mtp.safetensors"
+    bad_key = official_mimo_mtp_key(0, "self_attn.qkv_proj.weight_scale_inv")
+    _write_synthetic_official_sidecar(
+        sidecar_path,
+        override_tensors={bad_key: np.ones((1, 1), dtype=np.float16)},
+    )
+
+    probe = probe_mimo_mtp_sidecar(sidecar_path)
+
+    assert not probe.ready
+    assert probe.status == "invalid"
+    assert probe.contract_errors == (
+        f"{bad_key}: role=fp8_scale_inv expected dtype F32, got F16; shape=(1, 1)",
+    )
+    assert probe.error == "MiMo MTP sidecar has invalid required tensor contract"
+
+
+def test_invalid_required_tensor_shape_reports_actionable_contract_error(
+    tmp_path: Path,
+) -> None:
+    sidecar_path = tmp_path / "model_mtp.safetensors"
+    bad_key = official_mimo_mtp_key(2, "self_attn.qkv_proj.weight")
+    _write_synthetic_official_sidecar(
+        sidecar_path,
+        override_tensors={bad_key: np.ones((2,), dtype=np.float32)},
+    )
+
+    probe = probe_mimo_mtp_sidecar(sidecar_path)
+
+    assert not probe.ready
+    assert probe.status == "invalid"
+    assert probe.contract_errors == (
+        f"{bad_key}: role=fp8_weight expected rank 2, got shape=(2,); dtype=F32",
+    )
+    assert probe.error == "MiMo MTP sidecar has invalid required tensor contract"

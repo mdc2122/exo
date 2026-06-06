@@ -12,3 +12,12 @@
 25. Rethink retry logic
 27. Log cleanup - per-module log filters and default to DEBUG log levels
 28. Validate RDMA connections with ibv_devinfo in the info gatherer
+
+## MiMo MTP fastpath readiness ledger — 2026-06-06
+
+- Code-readiness wave completed for isolated `mimo_mtp_fast` surfaces using tiny/synthetic tests only; no exo startup, no live MiMo cluster, no full-model load, and no live AR-vs-MTP benchmark.
+- Verification before ledger update: focused fastpath/script pytest `61 passed in 2.40s`; ruff on touched fastpath/script surfaces `All checks passed!`; ruff format check `19 files already formatted`; basedpyright on touched fastpath/script surfaces `0 errors, 0 warnings, 0 notes`; `git diff --check` clean.
+- Beads notes updated: `.5ge.4` records benchmark/code-readiness and absent live rows; `.5ge.5` records Slice 5 blocked/default AR unchanged.
+- Blocker/gate: no speedup or >=30 tok/s claim without same-model/same-hardware AR-vs-MTP rows; production/default MTP enablement remains blocked.
+
+- Stabilization note: full repo pytest remains red with four deferred TurboQuant failures outside touched MiMo MTP fastpath surfaces; Nix formatter path was attempted but blocked by local disk exhaustion while building formatter dependencies, so touched Python surfaces were formatted/checked with ruff.

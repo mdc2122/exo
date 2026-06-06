@@ -10,11 +10,17 @@ from typing import Any, Protocol
 
 from exo.shared.types.common import ModelId
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
-from exo.worker.engines.mlx.mimo_mtp_fast.one_cycle import MimoMtpOneCycleResult
+from exo.worker.engines.mlx.mimo_mtp_fast.one_cycle import (
+    MimoMtpCycleTiming,
+    MimoMtpOneCycleResult,
+)
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract import (
     probe_mimo_mtp_sidecar,
 )
-from exo.worker.engines.mlx.mimo_mtp_fast.speculative_loop import stream_mimo_mtp_fast
+from exo.worker.engines.mlx.mimo_mtp_fast.speculative_loop import (
+    MimoMtpCycleTrace,
+    stream_mimo_mtp_fast,
+)
 
 
 class MimoMtpBenchmarkMode(StrEnum):
@@ -32,6 +38,7 @@ class BenchmarkRunResult:
     decode_seconds: float
     attempted_depth_counts: dict[int, int]
     accepted_depth_counts: dict[int, int]
+    timing_totals: MimoMtpCycleTiming = MimoMtpCycleTiming()
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +68,7 @@ OneCycleFn = Callable[[tuple[int, ...], int], MimoMtpOneCycleResult]
 TimerFn = Callable[[], float]
 BenchmarkRunner = Callable[[MimoMtpBenchmarkMode], BenchmarkRunResult]
 JsonRow = dict[str, Any]
+_ZERO_CYCLE_TIMING = MimoMtpCycleTiming()
 
 
 class ArBenchmarkFn(Protocol):
@@ -108,7 +116,9 @@ def build_contract_probe_row(
     return {
         "kind": "contract_probe",
         "ready": probe.ready,
-        "model_path": None if model_path is None else str(Path(model_path).expanduser()),
+        "model_path": None
+        if model_path is None
+        else str(Path(model_path).expanduser()),
         "sidecar_path": str(probe.path),
         "sidecar_status": probe.status,
         "sidecar_layer_count": probe.layer_count,
@@ -128,18 +138,55 @@ def _decode_tok_s(*, generated_tokens: int, decode_seconds: float) -> float:
     return generated_tokens / decode_seconds
 
 
+def acceptance_rate(
+    *, attempted_depth_counts: dict[int, int], accepted_depth_counts: dict[int, int]
+) -> float:
+    attempted = sum(depth * count for depth, count in attempted_depth_counts.items())
+    if attempted <= 0:
+        return 0.0
+    accepted = sum(depth * count for depth, count in accepted_depth_counts.items())
+    return accepted / attempted
+
+
+def _timing_breakdown_row(timing: MimoMtpCycleTiming) -> dict[str, float]:
+    return {
+        "proposal": round(timing.proposal_seconds, 6),
+        "verification": round(timing.verification_seconds, 6),
+        "acceptance": round(timing.acceptance_seconds, 6),
+        "fallback": round(timing.fallback_seconds, 6),
+    }
+
+
+def _add_timing(
+    left: MimoMtpCycleTiming, right: MimoMtpCycleTiming
+) -> MimoMtpCycleTiming:
+    return MimoMtpCycleTiming(
+        proposal_seconds=left.proposal_seconds + right.proposal_seconds,
+        verification_seconds=left.verification_seconds + right.verification_seconds,
+        acceptance_seconds=left.acceptance_seconds + right.acceptance_seconds,
+        fallback_seconds=left.fallback_seconds + right.fallback_seconds,
+    )
+
+
 def _next_step_for_metric(
     *, mode: MimoMtpBenchmarkMode, decode_tok_s: float, ar_baseline_tok_s: float | None
 ) -> str:
     if mode == MimoMtpBenchmarkMode.AR:
         return "use AR row as baseline for MTP mode comparison"
-    if decode_tok_s >= 30.0 and (
-        ar_baseline_tok_s is None or decode_tok_s > ar_baseline_tok_s
-    ):
-        return f"MTP mode {mode.value} beats AR baseline; proceed to guarded exo integration"
-    if ar_baseline_tok_s is not None and decode_tok_s <= ar_baseline_tok_s:
-        return f"MTP mode {mode.value} does not beat AR; inspect proposal/verify hot path before integration"
-    return f"MTP mode {mode.value} below 30 tok/s; continue hot-path optimization before integration"
+    if ar_baseline_tok_s is None:
+        return (
+            f"MTP mode {mode.value} needs same-model/same-hardware AR baseline "
+            "before any speedup or production claim"
+        )
+    if decode_tok_s > ar_baseline_tok_s:
+        return (
+            f"MTP mode {mode.value} has benchmark evidence; "
+            "next gate is guarded integration review"
+        )
+    return (
+        f"MTP mode {mode.value} does not beat AR; "
+        "inspect proposal/verify hot path before integration"
+    )
 
 
 def build_metric_row(
@@ -150,6 +197,7 @@ def build_metric_row(
     attempted_depth_counts: dict[int, int],
     accepted_depth_counts: dict[int, int],
     ar_baseline_tok_s: float | None,
+    timing_totals: MimoMtpCycleTiming = _ZERO_CYCLE_TIMING,
 ) -> JsonRow:
     decode_tok_s = _decode_tok_s(
         generated_tokens=generated_tokens, decode_seconds=decode_seconds
@@ -163,6 +211,11 @@ def build_metric_row(
         "decode_tok_s": rounded_tok_s,
         "attempted_depth_counts": _stringify_depth_counts(attempted_depth_counts),
         "accepted_depth_counts": _stringify_depth_counts(accepted_depth_counts),
+        "acceptance_rate": acceptance_rate(
+            attempted_depth_counts=attempted_depth_counts,
+            accepted_depth_counts=accepted_depth_counts,
+        ),
+        "timing_breakdown_seconds": _timing_breakdown_row(timing_totals),
         "ar_baseline_tok_s": None
         if ar_baseline_tok_s is None
         else round(ar_baseline_tok_s, 4),
@@ -198,6 +251,7 @@ def run_benchmark_modes(
             attempted_depth_counts=result.attempted_depth_counts,
             accepted_depth_counts=result.accepted_depth_counts,
             ar_baseline_tok_s=ar_baseline_tok_s,
+            timing_totals=result.timing_totals,
         )
         rows.append(row)
         if mode == MimoMtpBenchmarkMode.AR:
@@ -277,11 +331,18 @@ def run_mtp_benchmark(
     generated_tokens = 0
     attempted_depth_counts: dict[int, int] = {}
     accepted_depth_counts: dict[int, int] = {}
+    timing_totals = MimoMtpCycleTiming()
+
+    def collect_trace(trace: MimoMtpCycleTrace) -> None:
+        nonlocal timing_totals
+        timing_totals = _add_timing(timing_totals, trace.timing)
+
     for event in stream_mimo_mtp_fast(
         token_history=request.token_history,
         max_tokens=request.max_tokens,
         requested_depth=request.requested_depth,
         one_cycle=one_cycle,
+        trace_collector=collect_trace,
     ):
         generated_tokens += 1
         _increment_count(attempted_depth_counts, event.attempted_depth)
@@ -297,6 +358,7 @@ def run_mtp_benchmark(
         decode_seconds=elapsed_seconds,
         attempted_depth_counts=attempted_depth_counts,
         accepted_depth_counts=accepted_depth_counts,
+        timing_totals=timing_totals,
     )
 
 

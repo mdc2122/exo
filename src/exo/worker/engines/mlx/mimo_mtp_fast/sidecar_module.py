@@ -63,7 +63,9 @@ class MimoMtpLayerCache:
     values: mx.array | None = None
     offset: int = 0
 
-    def update_and_fetch(self, keys: mx.array, values: mx.array) -> tuple[mx.array, mx.array]:
+    def update_and_fetch(
+        self, keys: mx.array, values: mx.array
+    ) -> tuple[mx.array, mx.array]:
         self.offset += int(keys.shape[2])
         if self.keys is None or self.values is None:
             self.keys = keys
@@ -118,11 +120,15 @@ def _expanded_block_scales(weight: mx.array, weight_scale_inv: mx.array) -> mx.a
     row_blocks = _ceil_div(int(weight.shape[0]), _FP8_BLOCK_SIZE)
     col_blocks = _ceil_div(int(weight.shape[1]), _FP8_BLOCK_SIZE)
     scales = weight_scale_inv[:row_blocks, :col_blocks]
-    expanded = mx.repeat(mx.repeat(scales, _FP8_BLOCK_SIZE, axis=0), _FP8_BLOCK_SIZE, axis=1)
+    expanded = mx.repeat(
+        mx.repeat(scales, _FP8_BLOCK_SIZE, axis=0), _FP8_BLOCK_SIZE, axis=1
+    )
     return expanded[: int(weight.shape[0]), : int(weight.shape[1])]
 
 
-def _dequantize_fp8_block_weight(weight: mx.array, weight_scale_inv: mx.array) -> mx.array:
+def _dequantize_fp8_block_weight(
+    weight: mx.array, weight_scale_inv: mx.array
+) -> mx.array:
     dequantized = MX_FROM_FP8(weight.astype(mx.uint8), mx.bfloat16)
     scales = _expanded_block_scales(weight, weight_scale_inv).astype(mx.bfloat16)
     return dequantized * scales
@@ -154,8 +160,12 @@ def _split_qkv(
         q_group_size = q_heads_per_kv * head_dim
         group_size = q_group_size + head_dim + value_head_dim
         if group_size * num_key_value_heads == grouped_width:
-            grouped = qkv.reshape(batch_size, sequence_length, num_key_value_heads, group_size)
-            queries = grouped[..., :q_group_size].reshape(batch_size, sequence_length, q_size)
+            grouped = qkv.reshape(
+                batch_size, sequence_length, num_key_value_heads, group_size
+            )
+            queries = grouped[..., :q_group_size].reshape(
+                batch_size, sequence_length, q_size
+            )
             keys = grouped[..., q_group_size : q_group_size + head_dim].reshape(
                 batch_size, sequence_length, k_size
             )
@@ -212,7 +222,9 @@ class MimoMtpAttention(nn.Module):
     def v_size(self) -> int:
         return self.num_key_value_heads * self.value_head_dim
 
-    def __call__(self, x: mx.array, *, cache: MimoMtpLayerCache | None = None) -> mx.array:
+    def __call__(
+        self, x: mx.array, *, cache: MimoMtpLayerCache | None = None
+    ) -> mx.array:
         batch_size, sequence_length, _hidden_width = x.shape
         qkv = self.qkv_proj(x)
         queries, keys, values = _split_qkv(
@@ -260,7 +272,9 @@ class MimoMtpAttention(nn.Module):
 
 
 class MimoMtpMLP(nn.Module):
-    def __init__(self, *, gate_proj: _LinearLike, up_proj: _LinearLike, down_proj: _LinearLike) -> None:
+    def __init__(
+        self, *, gate_proj: _LinearLike, up_proj: _LinearLike, down_proj: _LinearLike
+    ) -> None:
         super().__init__()
         self.gate_proj = gate_proj
         self.up_proj = up_proj
@@ -305,7 +319,9 @@ class MimoMtpLayer(nn.Module):
     ) -> mx.array:
         hidden_norm = self.hnorm(previous_hidden_state)
         embedding_norm = self.enorm(token_embedding)
-        hidden_state = self.eh_proj(mx.concatenate([hidden_norm, embedding_norm], axis=-1))
+        hidden_state = self.eh_proj(
+            mx.concatenate([hidden_norm, embedding_norm], axis=-1)
+        )
         hidden_state = hidden_state + self.self_attn(
             self.input_layernorm(hidden_state), cache=cache
         )
@@ -379,7 +395,9 @@ class MimoMtpStack(nn.Module):
             current_token_ids = sampled_token
 
         if not sampled_tokens:
-            return mx.zeros((int(token_history.shape[0]), 0), dtype=token_history.dtype), []
+            return mx.zeros(
+                (int(token_history.shape[0]), 0), dtype=token_history.dtype
+            ), []
         return mx.concatenate(sampled_tokens, axis=1), per_layer_logits
 
 
@@ -400,12 +418,22 @@ def build_mimo_mtp_stack(
     )
 
 
-def _build_layer(*, layer_tensors: MimoMtpLayerTensors, args: _LayerArgs) -> MimoMtpLayer:
+def _build_layer(
+    *, layer_tensors: MimoMtpLayerTensors, args: _LayerArgs
+) -> MimoMtpLayer:
     hidden_size = int(args.hidden_size)
     return MimoMtpLayer(
         hidden_size=hidden_size,
-        hnorm=_make_rmsnorm(layer_tensors.get("hnorm.weight"), hidden_size, float(args.layernorm_epsilon)),
-        enorm=_make_rmsnorm(layer_tensors.get("enorm.weight"), hidden_size, float(args.layernorm_epsilon)),
+        hnorm=_make_rmsnorm(
+            layer_tensors.get("hnorm.weight"),
+            hidden_size,
+            float(args.layernorm_epsilon),
+        ),
+        enorm=_make_rmsnorm(
+            layer_tensors.get("enorm.weight"),
+            hidden_size,
+            float(args.layernorm_epsilon),
+        ),
         eh_proj=DenseLinear(layer_tensors.get("eh_proj.weight")),
         self_attn=MimoMtpAttention(
             num_attention_heads=int(args.num_attention_heads),
@@ -416,16 +444,22 @@ def _build_layer(*, layer_tensors: MimoMtpLayerTensors, args: _LayerArgs) -> Mim
             partial_rotary_factor=float(args.partial_rotary_factor),
             qkv_proj=Fp8BlockLinear(
                 weight=layer_tensors.get("self_attn.qkv_proj.weight"),
-                weight_scale_inv=layer_tensors.get("self_attn.qkv_proj.weight_scale_inv"),
+                weight_scale_inv=layer_tensors.get(
+                    "self_attn.qkv_proj.weight_scale_inv"
+                ),
             ),
             o_proj=DenseLinear(layer_tensors.get("self_attn.o_proj.weight")),
             attention_sink_bias=layer_tensors.get("self_attn.attention_sink_bias"),
         ),
         input_layernorm=_make_rmsnorm(
-            layer_tensors.get("input_layernorm.weight"), hidden_size, float(args.layernorm_epsilon)
+            layer_tensors.get("input_layernorm.weight"),
+            hidden_size,
+            float(args.layernorm_epsilon),
         ),
         pre_mlp_layernorm=_make_rmsnorm(
-            layer_tensors.get("pre_mlp_layernorm.weight"), hidden_size, float(args.layernorm_epsilon)
+            layer_tensors.get("pre_mlp_layernorm.weight"),
+            hidden_size,
+            float(args.layernorm_epsilon),
         ),
         mlp=MimoMtpMLP(
             gate_proj=Fp8BlockLinear(
@@ -442,7 +476,9 @@ def _build_layer(*, layer_tensors: MimoMtpLayerTensors, args: _LayerArgs) -> Mim
             ),
         ),
         final_layernorm=_make_rmsnorm(
-            layer_tensors.get("final_layernorm.weight"), hidden_size, float(args.layernorm_epsilon)
+            layer_tensors.get("final_layernorm.weight"),
+            hidden_size,
+            float(args.layernorm_epsilon),
         ),
     )
 
@@ -458,7 +494,9 @@ def _as_token_history(token_ids: mx.array) -> mx.array:
         return token_ids[:, None]
     if token_ids.ndim == 2:
         return token_ids
-    raise ValueError(f"latest_token_ids must be rank 1 or 2, got rank {int(token_ids.ndim)}")
+    raise ValueError(
+        f"latest_token_ids must be rank 1 or 2, got rank {int(token_ids.ndim)}"
+    )
 
 
 def _as_token_column(token_ids: mx.array | int) -> mx.array:
@@ -468,4 +506,6 @@ def _as_token_column(token_ids: mx.array | int) -> mx.array:
         return token_ids[:, None]
     if token_ids.ndim == 2 and int(token_ids.shape[1]) == 1:
         return token_ids
-    raise ValueError(f"sampled token ids must be rank 1 or single-column rank 2, got {token_ids.shape}")
+    raise ValueError(
+        f"sampled token ids must be rank 1 or single-column rank 2, got {token_ids.shape}"
+    )

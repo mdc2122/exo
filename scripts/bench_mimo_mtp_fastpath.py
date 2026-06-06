@@ -30,6 +30,7 @@ from exo.worker.engines.mlx.mimo_mtp_fast.providers import (
     TargetVerifierModel,
     make_replay_mtp_one_cycle_runner,
 )
+from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract import probe_mimo_mtp_sidecar
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_loader import (
     load_mimo_mtp_sidecar_tensors,
 )
@@ -61,15 +62,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-path", type=Path, default=None)
     parser.add_argument("--model-id", default="kernelpool/MiMo-V2.5-Pro-6bit")
     parser.add_argument("--sidecar-path", type=Path, required=True)
-    parser.add_argument("--prompt", default="Write a Python function that parses JSON lines.")
+    parser.add_argument(
+        "--prompt", default="Write a Python function that parses JSON lines."
+    )
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--modes", default="ar,d1,d2,d3,auto")
     parser.add_argument("--dry-run-contract-only", action="store_true")
     return parser
 
 
-def _parse_args() -> _Args:
-    namespace = _parser().parse_args()
+def _parse_args(argv: list[str] | None = None) -> _Args:
+    namespace = _parser().parse_args(argv)
     model_path = cast(Path | None, namespace.model_path)
     model_id = cast(str, namespace.model_id)
     sidecar_path = cast(Path, namespace.sidecar_path)
@@ -88,8 +91,28 @@ def _parse_args() -> _Args:
     )
 
 
-def main() -> int:
-    args = _parse_args()
+def _validation_error_row(
+    *,
+    field: str,
+    path: Path,
+    error: str,
+    next_step: str,
+    sidecar_status: str | None = None,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "kind": "validation_error",
+        "field": field,
+        "path": str(path),
+        "error": error,
+        "next_step": next_step,
+    }
+    if sidecar_status is not None:
+        row["sidecar_status"] = sidecar_status
+    return row
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
     if args.dry_run_contract_only:
         print(
             render_json_line(
@@ -104,6 +127,32 @@ def main() -> int:
     modes = parse_benchmark_modes(args.modes)
     model_id = ModelId(args.model_id)
     model_path = args.model_path or build_model_path(model_id)
+    if not model_path.exists():
+        print(
+            render_json_line(
+                _validation_error_row(
+                    field="model_path",
+                    path=model_path,
+                    error="MiMo MTP benchmark model path does not exist",
+                    next_step="provide an existing local MiMo model snapshot path or use --dry-run-contract-only",
+                )
+            )
+        )
+        return 2
+    sidecar_probe = probe_mimo_mtp_sidecar(args.sidecar_path)
+    if not sidecar_probe.ready:
+        print(
+            render_json_line(
+                _validation_error_row(
+                    field="sidecar_path",
+                    path=sidecar_probe.path,
+                    error="MiMo MTP sidecar is not ready",
+                    next_step="run --dry-run-contract-only or provide a valid official-layout sidecar",
+                    sidecar_status=sidecar_probe.status,
+                )
+            )
+        )
+        return 2
     raw_model, _config = load_model(model_path, lazy=True, strict=False)
     model = cast(Model, raw_model)
     target_model = cast(TargetVerifierModel, cast(object, raw_model))

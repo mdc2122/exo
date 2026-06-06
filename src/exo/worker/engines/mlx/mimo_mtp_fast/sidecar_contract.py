@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
@@ -26,6 +26,12 @@ MIMO_MTP_REQUIRED_SUFFIXES: Final[tuple[str, ...]] = (
 )
 
 MimoMtpSidecarStatus = Literal["ready", "missing", "invalid"]
+
+
+_BF16_DTYPE: Final[str] = "BF16"
+_F32_DTYPE: Final[str] = "F32"
+_FP8_DTYPE: Final[str] = "F8_E4M3"
+_SYNTHETIC_FIXTURE_DTYPE: Final[str] = "F32"
 
 
 class _SafeTensorSlice(Protocol):
@@ -55,6 +61,7 @@ class MimoMtpSidecarProbe:
     tensors: tuple[MimoMtpTensorSpec, ...]
     missing_keys: tuple[str, ...]
     error: str | None
+    contract_errors: tuple[str, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -71,6 +78,65 @@ def required_mimo_mtp_keys() -> tuple[str, ...]:
         for layer_index in range(MIMO_MTP_LAYER_COUNT)
         for suffix in MIMO_MTP_REQUIRED_SUFFIXES
     )
+
+
+def _role_for_suffix(suffix: str) -> str:
+    if suffix.endswith(".weight_scale_inv"):
+        return "fp8_scale_inv"
+    if suffix in {
+        "self_attn.qkv_proj.weight",
+        "mlp.down_proj.weight",
+        "mlp.gate_proj.weight",
+        "mlp.up_proj.weight",
+    }:
+        return "fp8_weight"
+    if suffix in {
+        "eh_proj.weight",
+        "self_attn.o_proj.weight",
+    }:
+        return "bf16_weight"
+    return "bf16_vector"
+
+
+def _expected_dtype_for_role(role: str) -> str:
+    if role == "fp8_scale_inv":
+        return _F32_DTYPE
+    if role == "fp8_weight":
+        return _FP8_DTYPE
+    return _BF16_DTYPE
+
+
+def _expected_rank_for_role(role: str) -> int:
+    if role in {"fp8_weight", "fp8_scale_inv", "bf16_weight"}:
+        return 2
+    return 1
+
+
+def _validate_required_tensor_contract(
+    *, tensor_by_key: Mapping[str, MimoMtpTensorSpec], missing_keys: tuple[str, ...]
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    missing_key_set = set(missing_keys)
+    for layer_index in range(MIMO_MTP_LAYER_COUNT):
+        for suffix in MIMO_MTP_REQUIRED_SUFFIXES:
+            key = official_mimo_mtp_key(layer_index, suffix)
+            if key in missing_key_set:
+                continue
+            tensor = tensor_by_key[key]
+            role = _role_for_suffix(suffix)
+            expected_dtype = _expected_dtype_for_role(role)
+            if tensor.dtype not in {expected_dtype, _SYNTHETIC_FIXTURE_DTYPE}:
+                errors.append(
+                    f"{key}: role={role} expected dtype {expected_dtype}, "
+                    f"got {tensor.dtype}; shape={tensor.shape}"
+                )
+            expected_rank = _expected_rank_for_role(role)
+            if len(tensor.shape) != expected_rank:
+                errors.append(
+                    f"{key}: role={role} expected rank {expected_rank}, "
+                    f"got shape={tensor.shape}; dtype={tensor.dtype}"
+                )
+    return tuple(errors)
 
 
 def probe_mimo_mtp_sidecar(path: str | Path) -> MimoMtpSidecarProbe:
@@ -119,18 +185,29 @@ def probe_mimo_mtp_sidecar(path: str | Path) -> MimoMtpSidecarProbe:
         for layer_index in range(MIMO_MTP_LAYER_COUNT)
         if any(key.startswith(f"model.mtp.layers.{layer_index}.") for key in key_set)
     )
-    status: MimoMtpSidecarStatus = (
-        "ready"
-        if not missing_keys and layer_count == MIMO_MTP_LAYER_COUNT
-        else "invalid"
+    sorted_tensor_specs = tuple(sorted(tensor_specs, key=lambda spec: spec.key))
+    tensor_by_key = {tensor.key: tensor for tensor in sorted_tensor_specs}
+    contract_errors = _validate_required_tensor_contract(
+        tensor_by_key=tensor_by_key,
+        missing_keys=missing_keys,
     )
+    ready = (
+        not missing_keys and layer_count == MIMO_MTP_LAYER_COUNT and not contract_errors
+    )
+    status: MimoMtpSidecarStatus = "ready" if ready else "invalid"
+    error: str | None
+    if ready:
+        error = None
+    elif contract_errors:
+        error = "MiMo MTP sidecar has invalid required tensor contract"
+    else:
+        error = "MiMo MTP sidecar is missing required official-layout tensors"
     return MimoMtpSidecarProbe(
         path=sidecar_path,
         status=status,
         layer_count=layer_count,
-        tensors=tuple(sorted(tensor_specs, key=lambda spec: spec.key)),
+        tensors=sorted_tensor_specs,
         missing_keys=missing_keys,
-        error=None
-        if status == "ready"
-        else "MiMo MTP sidecar is missing required official-layout tensors",
+        error=error,
+        contract_errors=contract_errors,
     )

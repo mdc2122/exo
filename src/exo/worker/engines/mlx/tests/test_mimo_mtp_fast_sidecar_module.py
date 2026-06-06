@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import cast
 
 import mlx.core as mx
+import pytest
 
+from exo.worker.engines.mlx.mimo_mtp_fast import sidecar_module
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_loader import (
     MimoMtpLayerTensors,
     MimoMtpSidecarTensors,
@@ -16,6 +18,8 @@ from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_module import (
     MimoMtpCache,
     build_mimo_mtp_stack,
 )
+
+SPLIT_QKV = sidecar_module._split_qkv  # pyright: ignore[reportPrivateUsage]
 
 MX_TO_FP8 = cast(
     Callable[[mx.array], mx.array],
@@ -68,7 +72,9 @@ def _fp8_weight(shape: tuple[int, int], value: float = 0.0) -> mx.array:
 def _tiny_layer(layer_index: int) -> MimoMtpLayerTensors:
     del layer_index
     tensors = {
-        "eh_proj.weight": mx.array([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=mx.bfloat16),
+        "eh_proj.weight": mx.array(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=mx.bfloat16
+        ),
         "enorm.weight": mx.ones((2,), dtype=mx.bfloat16),
         "hnorm.weight": mx.ones((2,), dtype=mx.bfloat16),
         "final_layernorm.weight": mx.ones((2,), dtype=mx.bfloat16),
@@ -98,6 +104,70 @@ def test_fp8_block_linear_expands_official_scale_inv_blocks() -> None:
 
     assert output.shape == (1, 1, 2)
     assert mx.allclose(output, mx.array([[[6.0, 6.0]]]), atol=0.01)
+
+
+def test_fp8_block_linear_dequantizes_once_at_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    original_from_fp8 = sidecar_module.MX_FROM_FP8
+
+    def counted_from_fp8(weight: mx.array, dtype: mx.Dtype) -> mx.array:
+        nonlocal calls
+        calls += 1
+        return original_from_fp8(weight, dtype)
+
+    monkeypatch.setattr(sidecar_module, "MX_FROM_FP8", counted_from_fp8)
+    layer = Fp8BlockLinear(
+        weight=MX_TO_FP8(mx.ones((2, 3), dtype=mx.float32)),
+        weight_scale_inv=mx.array([[1.0]], dtype=mx.float32),
+    )
+
+    layer(mx.ones((1, 1, 3), dtype=mx.float32))
+    layer(mx.ones((1, 1, 3), dtype=mx.float32))
+
+    assert calls == 1
+
+
+def test_grouped_qkv_split_preserves_official_kv_group_order() -> None:
+    qkv = mx.array(
+        [
+            [
+                [
+                    1.0,
+                    2.0,
+                    3.0,
+                    4.0,
+                    101.0,
+                    102.0,
+                    201.0,
+                    5.0,
+                    6.0,
+                    7.0,
+                    8.0,
+                    103.0,
+                    104.0,
+                    202.0,
+                ]
+            ]
+        ],
+        dtype=mx.float32,
+    )
+
+    queries, keys, values = SPLIT_QKV(
+        qkv,
+        q_size=8,
+        k_size=4,
+        v_size=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=2,
+        value_head_dim=1,
+    )
+
+    assert queries.tolist() == [[[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]]]
+    assert keys.tolist() == [[[101.0, 102.0, 103.0, 104.0]]]
+    assert values.tolist() == [[[201.0, 202.0]]]
 
 
 def test_build_mimo_mtp_stack_proposes_tokens_with_tiny_sidecar() -> None:

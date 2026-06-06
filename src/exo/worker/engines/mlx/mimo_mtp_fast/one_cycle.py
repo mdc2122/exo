@@ -1,8 +1,20 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+
+
+class MimoMtpFastpathError(RuntimeError):
+    """Raised when the MiMo MTP fastpath receives structurally invalid data."""
+
+
+@dataclass(frozen=True, slots=True)
+class MimoMtpCycleTiming:
+    proposal_seconds: float = 0.0
+    verification_seconds: float = 0.0
+    acceptance_seconds: float = 0.0
+    fallback_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,14 +25,28 @@ class MimoMtpOneCycleResult:
     attempted_depth: int
     accepted_depth: int
     elapsed_seconds: float
+    timing: MimoMtpCycleTiming = MimoMtpCycleTiming()
 
 
-ProposalProvider = Callable[[tuple[int, ...], int], tuple[int, ...]]
-VerifierProvider = Callable[[tuple[int, ...], tuple[int, ...]], tuple[int, ...]]
+ProposalProvider = Callable[[tuple[int, ...], int], Iterable[object]]
+VerifierProvider = Callable[[tuple[int, ...], tuple[int, ...]], Iterable[object]]
+TimerFn = Callable[[], float]
 
 
 def _requested_depth(requested_depth: int) -> int:
     return max(0, int(requested_depth))
+
+
+def _as_token_tuple(*, raw_tokens: Iterable[object], source: str) -> tuple[int, ...]:
+    token_ids: list[int] = []
+    for index, token_id in enumerate(raw_tokens):
+        if not isinstance(token_id, int):
+            raise MimoMtpFastpathError(
+                f"{source} returned non-int token at index {index}: "
+                f"{token_id!r} ({type(token_id).__name__})"
+            )
+        token_ids.append(token_id)
+    return tuple(token_ids)
 
 
 def _accepted_prefix(
@@ -42,22 +68,28 @@ def run_mimo_mtp_one_cycle(
     requested_depth: int,
     proposal_provider: ProposalProvider,
     verifier_provider: VerifierProvider,
+    timer: TimerFn = time.perf_counter,
 ) -> MimoMtpOneCycleResult:
-    start = time.perf_counter()
+    start = timer()
     desired_depth = _requested_depth(requested_depth)
     if desired_depth == 0:
+        elapsed_seconds = timer() - start
         return MimoMtpOneCycleResult(
             proposed_token_ids=(),
             accepted_token_ids=(),
             fallback_token_id=None,
             attempted_depth=0,
             accepted_depth=0,
-            elapsed_seconds=time.perf_counter() - start,
+            elapsed_seconds=elapsed_seconds,
+            timing=MimoMtpCycleTiming(),
         )
 
-    proposed_token_ids = tuple(proposal_provider(token_history, desired_depth))[
-        :desired_depth
-    ]
+    proposal_start = start
+    proposed_token_ids = _as_token_tuple(
+        raw_tokens=proposal_provider(token_history, desired_depth),
+        source="proposal_provider",
+    )[:desired_depth]
+    proposal_end = timer()
     attempted_depth = len(proposed_token_ids)
     if attempted_depth == 0:
         return MimoMtpOneCycleResult(
@@ -66,10 +98,18 @@ def run_mimo_mtp_one_cycle(
             fallback_token_id=None,
             attempted_depth=0,
             accepted_depth=0,
-            elapsed_seconds=time.perf_counter() - start,
+            elapsed_seconds=proposal_end - start,
+            timing=MimoMtpCycleTiming(
+                proposal_seconds=proposal_end - proposal_start,
+            ),
         )
 
-    verifier_token_ids = tuple(verifier_provider(token_history, proposed_token_ids))
+    verification_start = proposal_end
+    verifier_token_ids = _as_token_tuple(
+        raw_tokens=verifier_provider(token_history, proposed_token_ids),
+        source="verifier_provider",
+    )
+    verification_end = timer()
     accepted_token_ids = _accepted_prefix(proposed_token_ids, verifier_token_ids)
     accepted_depth = len(accepted_token_ids)
     fallback_token_id = (
@@ -79,11 +119,18 @@ def run_mimo_mtp_one_cycle(
         if accepted_depth < len(verifier_token_ids)
         else None
     )
+    end = timer()
     return MimoMtpOneCycleResult(
         proposed_token_ids=proposed_token_ids,
         accepted_token_ids=accepted_token_ids,
         fallback_token_id=fallback_token_id,
         attempted_depth=attempted_depth,
         accepted_depth=accepted_depth,
-        elapsed_seconds=time.perf_counter() - start,
+        elapsed_seconds=end - start,
+        timing=MimoMtpCycleTiming(
+            proposal_seconds=proposal_end - proposal_start,
+            verification_seconds=verification_end - verification_start,
+            acceptance_seconds=end - verification_end,
+            fallback_seconds=0.0,
+        ),
     )

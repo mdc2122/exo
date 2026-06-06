@@ -90,3 +90,106 @@ Duplicate full MiMo startup can crash the Mac Studios.
   - Result: `empty`
 - Working-tree check: `git status --short`
   - Result: only the four pre-existing dirty KV/cache runtime files remained unstaged; the verification commit was doc-only despite the intentionally dirty working tree
+
+## 2026-06-06 Fastpath Readiness Wave
+
+Scope: guarded Ouroboros AC-tree code-readiness work for the isolated native MiMo
+V2.5 Pro MTP fastpath. This wave did not start exo, did not launch a MiMo
+cluster, did not materialize/load the full MiMo model, did not run a live
+AR-vs-MTP benchmark, and did not enable MTP in default generation.
+
+Implemented/verified readiness surfaces:
+
+- Official sidecar contract diagnostics: required tensor role/dtype/rank checks
+  now report actionable fastpath errors with key, role, dtype, and shape.
+- Sidecar module semantics: FP8 block dequantization remains constructor-time,
+  with focused coverage, and grouped QKV split behavior is tested with tiny MLX
+  fixtures only.
+- One-cycle proposal/verification semantics: proposal/verifier ordering,
+  longest-prefix acceptance, verifier-short output, D1/D2/D3 deterministic fake
+  behavior, and invalid provider outputs are covered.
+- Streaming loop observability/failure policy: per-cycle traces, attempted and
+  accepted depth counts, exact `max_tokens`, runtime fallback classification,
+  structural fail-closed classification, and stale MTP cache reset hooks are
+  covered without Ralph machinery.
+- Provider seam hardening: MLX-shaped proposal/verifier protocols now validate
+  token dtype/shape, hidden-state shape, and logits dtype/shape with
+  fastpath-specific errors. Replay one-cycle runner remains the benchmark
+  correctness reference.
+- Benchmark readiness: JSON metric rows include acceptance-rate and timing
+  breakdown diagnostics. `scripts/bench_mimo_mtp_fastpath.py` keeps the existing
+  dry-run sidecar contract path and now emits clear pre-load validation JSON for
+  missing model paths and invalid sidecars.
+- Synthetic probe: `scripts/mimo_mtp_fastpath_synthetic_probe.py` exercises the
+  tiny/synthetic fastpath timing and acceptance diagnostics without loading a
+  full MiMo model.
+
+Verification evidence before ledger update:
+
+- Focused fastpath/script tests: `uv run pytest src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast*.py scripts/test_bench_mimo_mtp_fastpath.py scripts/test_mimo_mtp_fastpath_synthetic_probe.py -q`
+  - Result: `61 passed in 2.55s`
+- Lint: `uv run ruff check src/exo/worker/engines/mlx/mimo_mtp_fast src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_benchmark.py src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_one_cycle.py src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_providers.py src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_sidecar_contract.py src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_sidecar_module.py src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_speculative_loop.py scripts/bench_mimo_mtp_fastpath.py scripts/test_bench_mimo_mtp_fastpath.py scripts/mimo_mtp_fastpath_synthetic_probe.py scripts/test_mimo_mtp_fastpath_synthetic_probe.py`
+  - Result: `All checks passed!`
+- Typecheck: `uv run basedpyright src/exo/worker/engines/mlx/mimo_mtp_fast src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_benchmark.py src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_one_cycle.py src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_providers.py src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_sidecar_contract.py src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_sidecar_module.py src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_speculative_loop.py scripts/bench_mimo_mtp_fastpath.py scripts/test_bench_mimo_mtp_fastpath.py scripts/mimo_mtp_fastpath_synthetic_probe.py scripts/test_mimo_mtp_fastpath_synthetic_probe.py`
+  - Result: `0 errors, 0 warnings, 0 notes`
+- Diff whitespace: `git diff --check`
+  - Result: clean / no output
+
+Beads updates:
+
+- Added a code-readiness note to `mimo-v25-pro-mtp-d1-live-preflight-20260601-5ge.4`.
+- Added a Slice 5 blocked/default-AR note to `mimo-v25-pro-mtp-d1-live-preflight-20260601-5ge.5`.
+
+Commit IDs: none in this execution at ledger-update time.
+
+Live benchmark blocker / performance gate:
+
+- No live AR-vs-MTP rows were produced in this workflow by design and constraint.
+- No >=30 tok/s or MTP speedup claim is made by this readiness wave.
+- Slice 5 production/default integration remains blocked. Default generation is
+  still normal AR, and this diff touches no generator/API/master/model-card or
+  inference-card integration path.
+- Next external gate remains same-model/same-hardware AR-vs-MTP measurement with
+  real rows showing MTP clearly beats AR before any guarded integration review.
+
+
+## 2026-06-06 Manual Stabilization Follow-up
+
+After the Ouroboros/Goose readiness execution, manual stabilization was run in
+`/Users/studio2/exo/.worktrees/mimo-v25-pro-mtp-fastpath-single-stream-20260601`.
+The Ouroboros runtime completed successfully, but its post-execution QA verdict
+was `revise` because repository-wide canonical checks include unrelated/deferred
+TurboQuant failures and the Nix formatter/build path encountered local disk
+pressure. The fastpath-specific code-readiness surface was then stabilized
+manually.
+
+Manual verification after formatting:
+
+- Focused fastpath/script tests: `uv run pytest src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast*.py scripts/test_bench_mimo_mtp_fastpath.py scripts/test_mimo_mtp_fastpath_synthetic_probe.py -q`
+  - Result: `61 passed in 2.40s`
+- Lint: `uv run ruff check` on touched fastpath/script surfaces
+  - Result: `All checks passed!`
+- Python formatting: `uv run ruff format --check` on touched fastpath/script surfaces
+  - Result: `19 files already formatted`
+- Typecheck: `uv run basedpyright` on touched fastpath/script surfaces
+  - Result: `0 errors, 0 warnings, 0 notes`
+- Diff whitespace: `git diff --check`
+  - Result: clean / no output
+- Official sidecar dry-run: `uv run python scripts/bench_mimo_mtp_fastpath.py --sidecar-path /Volumes/GLM5-NVMe/exo/mimo-v25-pro/hf/XiaomiMiMo--MiMo-V2.5-Pro/model_mtp.safetensors --dry-run-contract-only`
+  - Result: JSON row with `"ready": true`, `"sidecar_status": "ready"`, and `"sidecar_layer_count": 3`
+- Synthetic probe smoke: `uv run python scripts/mimo_mtp_fastpath_synthetic_probe.py --max-tokens 4 --requested-depth 3`
+  - Result: JSON row with `"full_model_loaded": false`, timing breakdowns, and acceptance diagnostics
+- Missing-model validation smoke: `uv run python scripts/bench_mimo_mtp_fastpath.py --model-path /tmp/definitely-missing-mimo-model --sidecar-path /tmp/definitely-missing-mtp-sidecar.safetensors`
+  - Result: exit code `2` with JSON `validation_error` for `model_path`, before model or sidecar materialization
+
+Known non-fastpath blockers observed during stabilization:
+
+- Full `uv run pytest -q` remains red with four existing/deferred TurboQuant failures outside the touched MiMo MTP fastpath surfaces:
+  - `test_make_kv_cache_uses_turboquant_for_glm_moe_dsa`
+  - `test_make_kv_cache_sets_fused_flag_and_applies_patch`
+  - `test_warmup_inference_skips_generation_when_turboquant_active`
+  - `test_builder_keeps_batch_generator_for_single_node_turboquant`
+- `nix --extra-experimental-features 'nix-command flakes' fmt` was attempted but failed while building formatter dependencies because the local system volume ran out of space. Nix GC recovered several GiB, but the full Nix formatter path was not completed in this stabilization.
+
+Gate remains unchanged: no live AR-vs-MTP rows exist, no >=30 tok/s claim is
+made, and Slice 5 production/default integration remains blocked.
