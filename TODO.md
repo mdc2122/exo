@@ -21,3 +21,11 @@
 - Blocker/gate: no speedup or >=30 tok/s claim without same-model/same-hardware AR-vs-MTP rows; production/default MTP enablement remains blocked.
 
 - Stabilization note: full repo pytest remains red with four deferred TurboQuant failures outside touched MiMo MTP fastpath surfaces; Nix formatter path was attempted but blocked by local disk exhaustion while building formatter dependencies, so touched Python surfaces were formatted/checked with ruff.
+
+## MiMo MTP benchmark-survival ledger - 2026-06-06
+
+- AC1-AC4 executed: benchmark CLI now supports --preflight-only and --load-only, emits structured stage/memory diagnostics, and focused fastpath/script checks remain green: 63 passed, ruff, ruff-format check, basedpyright, diff-check.
+- Official local preflight succeeded with the quantized MiMo model path and official sidecar: model path validated, sidecar contract validated, benchmark_preflight.ready=true.
+- Official local load-only failed with exit 137; last structured stage was base_model_materialization started. This confirms the local kill happens during full base-model materialization before generation.
+- Minimal AR row blocked by load-only exit 137; minimal MTP D1 row skipped because AR did not load.
+- Slice 5 remains blocked: no same-model/same-hardware AR-vs-MTP rows, no >=30 tok/s claim, no production/default MTP integration.

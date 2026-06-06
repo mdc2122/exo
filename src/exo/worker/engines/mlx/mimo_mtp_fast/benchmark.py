@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+import resource
+import subprocess
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from exo.shared.types.common import ModelId
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
@@ -69,6 +72,72 @@ TimerFn = Callable[[], float]
 BenchmarkRunner = Callable[[MimoMtpBenchmarkMode], BenchmarkRunResult]
 JsonRow = dict[str, Any]
 _ZERO_CYCLE_TIMING = MimoMtpCycleTiming()
+
+
+def _process_current_rss_bytes() -> int | None:
+    try:
+        raw_rss_kib = subprocess.check_output(
+            ["ps", "-o", "rss=", "-p", str(os.getpid())],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    if not raw_rss_kib:
+        return None
+    try:
+        return int(raw_rss_kib) * 1024
+    except ValueError:
+        return None
+
+
+def _linux_system_available_bytes() -> int | None:
+    meminfo_path = Path("/proc/meminfo")
+    if not meminfo_path.exists():
+        return None
+    try:
+        lines = meminfo_path.read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if line.startswith("MemAvailable:"):
+            parts = line.split()
+            if len(parts) < 2:
+                return None
+            try:
+                return int(parts[1]) * 1024
+            except ValueError:
+                return None
+    return None
+
+
+def memory_diagnostic_snapshot() -> dict[str, int | None]:
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return {
+        "process_current_rss_bytes": _process_current_rss_bytes(),
+        "process_max_rss_platform_units": int(usage.ru_maxrss),
+        "system_available_bytes": _linux_system_available_bytes(),
+    }
+
+
+def build_benchmark_stage_row(
+    *,
+    stage: str,
+    status: Literal["started", "completed", "failed"],
+    elapsed_seconds: float | None = None,
+    details: Mapping[str, object] | None = None,
+) -> JsonRow:
+    row: JsonRow = {
+        "kind": "benchmark_stage",
+        "stage": stage,
+        "status": status,
+        "memory": memory_diagnostic_snapshot(),
+    }
+    if elapsed_seconds is not None:
+        row["elapsed_seconds"] = round(elapsed_seconds, 6)
+    if details is not None:
+        row["details"] = dict(details)
+    return row
 
 
 class ArBenchmarkFn(Protocol):

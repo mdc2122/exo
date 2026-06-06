@@ -193,3 +193,38 @@ Known non-fastpath blockers observed during stabilization:
 
 Gate remains unchanged: no live AR-vs-MTP rows exist, no >=30 tok/s claim is
 made, and Slice 5 production/default integration remains blocked.
+
+## 2026-06-06 Benchmark Survival Diagnostics Follow-up
+
+Executed the AC1-AC7 benchmark-survival wave after the fastpath readiness commit.
+The benchmark CLI now has --preflight-only and --load-only modes, and emits
+structured JSON-lines benchmark_stage diagnostics with elapsed time and memory
+snapshots at major stages.
+
+Focused verification after the change:
+
+- Focused fastpath/script tests: uv run pytest src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast*.py scripts/test_bench_mimo_mtp_fastpath.py scripts/test_mimo_mtp_fastpath_synthetic_probe.py -q
+  - Result: 63 passed in 2.47s
+- Lint: uv run ruff check on touched fastpath/script surfaces
+  - Result: All checks passed!
+- Python formatting: uv run ruff format --check on touched fastpath/script surfaces
+  - Result: 12 files already formatted
+- Typecheck: uv run basedpyright on touched fastpath/script surfaces
+  - Result: 0 errors, 0 warnings, 0 notes
+- Diff whitespace: git diff --check
+  - Result: clean / no output
+
+Official local artifact preflight:
+
+- Command: uv run python scripts/bench_mimo_mtp_fastpath.py --model-path /Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/kernelpool--MiMo-V2.5-Pro-6bit --sidecar-path /Volumes/GLM5-NVMe/exo/mimo-v25-pro/hf/XiaomiMiMo--MiMo-V2.5-Pro/model_mtp.safetensors --modes ar,d1 --max-tokens 1 --preflight-only
+  - Result: exit 0, benchmark_preflight.ready=true; completed stages were mode validation, model path validation, and sidecar contract validation.
+
+Official local artifact load-only:
+
+- Command: uv run python scripts/bench_mimo_mtp_fastpath.py --model-path /Volumes/GLM5-NVMe/exo/mimo-v25-pro/quantized/kernelpool--MiMo-V2.5-Pro-6bit --sidecar-path /Volumes/GLM5-NVMe/exo/mimo-v25-pro/hf/XiaomiMiMo--MiMo-V2.5-Pro/model_mtp.safetensors --modes ar --max-tokens 1 --load-only
+  - Result: exit 137; last structured row was base_model_materialization with status=started. No materialization-completed row, tokenizer-load row, sidecar tensor-load row, prompt-tokenization row, AR metric row, or MTP metric row was produced.
+
+Because load-only failed, AC5 minimal AR generation was recorded as blocked and
+AC6 minimal MTP D1 generation was skipped. AC7 remains unchanged: no live
+AR-vs-MTP rows exist, no speedup claim is made, and Slice 5 production/default
+integration remains blocked.
