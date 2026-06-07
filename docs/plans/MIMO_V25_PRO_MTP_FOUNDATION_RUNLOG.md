@@ -228,3 +228,16 @@ Because load-only failed, AC5 minimal AR generation was recorded as blocked and
 AC6 minimal MTP D1 generation was skipped. AC7 remains unchanged: no live
 AR-vs-MTP rows exist, no speedup claim is made, and Slice 5 production/default
 integration remains blocked.
+
+## 2026-06-06 Cluster Benchmark Direction Correction
+
+The single-process benchmark load-only exit 137 is not evidence that the exo cluster cannot run MiMo. It only proves that one process on one Studio cannot materialize the full quantized model locally. The correct live benchmark path for MiMo V2.5 Pro is the exo cluster path, where tensor parallelization distributes the model across nodes.
+
+Added scripts/bench_mimo_mtp_cluster.py as the cluster-facing benchmark harness. It posts to an already-running exo API /bench/chat/completions endpoint and emits JSON-lines rows with generation_stats.generation_tps, token counts, power usage, repeat index, and mode labels. This harness does not load model weights in the benchmark process.
+
+Current implication:
+
+- Use the local sidecar/fastpath CLI for contract, synthetic, and provider diagnostics only.
+- Use scripts/bench_mimo_mtp_cluster.py for live distributed AR rows.
+- MTP distributed rows still require a guarded cluster request path or worker integration flag before they can be honestly collected through the cluster.
+- Slice 5 production/default enablement remains blocked until same-cluster AR and guarded-MTP rows show a real MTP speed win.

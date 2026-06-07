@@ -29,3 +29,9 @@
 - Official local load-only failed with exit 137; last structured stage was base_model_materialization started. This confirms the local kill happens during full base-model materialization before generation.
 - Minimal AR row blocked by load-only exit 137; minimal MTP D1 row skipped because AR did not load.
 - Slice 5 remains blocked: no same-model/same-hardware AR-vs-MTP rows, no >=30 tok/s claim, no production/default MTP integration.
+
+## MiMo MTP cluster benchmark correction - 2026-06-06
+
+- Correction: local single-process exit 137 is not a model viability blocker for exo. The cluster can load MiMo via tensor parallelization; live rows must use the exo cluster API rather than a one-Studio local model load.
+- Added scripts/bench_mimo_mtp_cluster.py to collect distributed /bench/chat/completions rows without loading the model inside the benchmark process.
+- Next: start or point to the exo cluster API and collect AR baseline rows with the cluster harness; then add/enable a guarded cluster MTP request path so MTP rows are measured on the same cluster.
