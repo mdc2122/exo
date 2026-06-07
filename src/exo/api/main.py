@@ -127,6 +127,7 @@ from exo.api.types.openai_responses import (
     ResponsesRequest,
     ResponsesResponse,
 )
+from exo.download.download_utils import build_model_path
 from exo.master.image_store import ImageStore
 from exo.master.placement import place_instance as get_instance_placements
 from exo.master.video_store import VideoStore
@@ -329,6 +330,83 @@ def _memory_evidence_for_selected_workers(
         )
 
     return total_required, total_available, evidence
+
+
+def _mimo_mtp_unwired_execution_detail(
+    task_params: TextGenerationTaskParams,
+) -> dict[str, object]:
+    mimo_mtp_fastpath = task_params.mimo_mtp_fastpath
+    requested_depth = mimo_mtp_fastpath.depth if mimo_mtp_fastpath is not None else None
+    return {
+        "error": "mimo_mtp_execution_backend_unwired",
+        "message": (
+            "MiMo MTP fastpath was requested, but no MTP execution backend is "
+            "wired into the exo cluster inference path yet. The request was "
+            "not dispatched as AR because mimo_mtp_fail_closed is true."
+        ),
+        "mtp_enabled": False,
+        "accepted_execution_path": "unwired",
+        "requested_mtp_depth": requested_depth,
+        "mtp_depth": None,
+        "mtp_sidecar_status": "not_loaded",
+        "mtp_disable_reason": "mimo_mtp_execution_backend_unwired",
+    }
+
+
+def _guard_unwired_mimo_mtp_request(task_params: TextGenerationTaskParams) -> None:
+    mimo_mtp_fastpath = task_params.mimo_mtp_fastpath
+    if mimo_mtp_fastpath is None or not mimo_mtp_fastpath.fail_closed:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=_mimo_mtp_unwired_execution_detail(task_params),
+    )
+
+
+def _mimo_mtp_unwired_fail_open_response_fields(
+    task_params: TextGenerationTaskParams,
+) -> dict[str, object]:
+    mimo_mtp_fastpath = task_params.mimo_mtp_fastpath
+    requested_depth = mimo_mtp_fastpath.depth if mimo_mtp_fastpath is not None else None
+    return {
+        "accepted_execution_path": "ar",
+        "mtp_enabled": False,
+        "mtp_depth": None,
+        "mtp_sidecar_status": "not_loaded",
+        "mtp_disable_reason": "mimo_mtp_execution_backend_unwired",
+        "mtp_fallback_reason": "fail_open_backend_unwired",
+        "requested_mtp_depth": requested_depth,
+    }
+
+
+def _live_execution_path_for_model(
+    *, state: State, model_id: ModelId
+) -> dict[str, object] | None:
+    for instance_id, instance in state.instances.items():
+        if instance.shard_assignments.model_id != model_id:
+            continue
+        shards = list(instance.shard_assignments.runner_to_shard.values())
+        if not shards:
+            continue
+        first_shard = shards[0]
+        if isinstance(first_shard, TensorShardMetadata) and first_shard.world_size > 1:
+            return {
+                "path": "exo_cluster_tensor_parallel",
+                "sharding": Sharding.Tensor.value,
+                "world_size": first_shard.world_size,
+                "model_path": str(build_model_path(model_id)),
+                "instance_id": str(instance_id),
+            }
+        return {
+            "path": "single_studio_full_model_load",
+            "sharding": Sharding.Tensor.value
+            if isinstance(first_shard, TensorShardMetadata)
+            else Sharding.Pipeline.value,
+            "world_size": first_shard.world_size,
+            "model_path": str(build_model_path(model_id)),
+            "instance_id": str(instance_id),
+        }
+    return None
 
 
 def _build_mimo_v25_pro_6bit_preview_state(
@@ -950,6 +1028,10 @@ class API:
             ],
             generation_stats=stats,
             power_usage=sampler.result(),
+            execution_path=_live_execution_path_for_model(
+                state=self.state,
+                model_id=model,
+            ),
         )
 
     async def _trigger_notify_user_to_download_model(self, model_id: ModelId) -> None:
@@ -1008,6 +1090,8 @@ class API:
         )
         task_params = task_params.model_copy(update={"model": resolved_model})
 
+        _guard_unwired_mimo_mtp_request(task_params)
+
         command = await self._send_text_generation_with_images(task_params)
 
         if payload.stream:
@@ -1047,11 +1131,21 @@ class API:
         )
         task_params = task_params.model_copy(update={"model": resolved_model})
 
+        _guard_unwired_mimo_mtp_request(task_params)
+
         task_params = task_params.model_copy(update={"stream": False, "bench": True})
 
         command = await self._send_text_generation_with_images(task_params)
 
-        return await self._collect_text_generation_with_stats(command.command_id)
+        response = await self._collect_text_generation_with_stats(command.command_id)
+        if (
+            task_params.mimo_mtp_fastpath is not None
+            and not task_params.mimo_mtp_fastpath.fail_closed
+        ):
+            return response.model_copy(
+                update=_mimo_mtp_unwired_fail_open_response_fields(task_params)
+            )
+        return response
 
     async def _resolve_and_validate_text_model(self, model_id: ModelId) -> ModelId:
         """Validate a text model exists and return the resolved model ID.

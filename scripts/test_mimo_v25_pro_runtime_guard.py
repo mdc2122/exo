@@ -35,6 +35,10 @@ def _empty_state(base_url: str) -> dict[str, object]:
     return {"instances": {}, "runners": {}, "nodeMemory": {}}
 
 
+def _empty_processes() -> list[str]:
+    return []
+
+
 def test_detects_active_mimo_instance_as_unsafe() -> None:
     state = {
         "instances": {
@@ -88,8 +92,7 @@ def test_detects_resident_mimo_process_as_unsafe() -> None:
     verdict = guard.evaluate_state(
         {"instances": {}, "runners": {}, "nodeMemory": {}},
         processes=[
-            "/Users/studio2/exo/.venv/bin/python3 -m exo "
-            "kernelpool/MiMo-V2.5-Pro-6bit"
+            "/Users/studio2/exo/.venv/bin/python3 -m exo kernelpool/MiMo-V2.5-Pro-6bit"
         ],
         min_available_bytes=200,
     )
@@ -138,6 +141,26 @@ def test_clean_state_is_safe() -> None:
     assert verdict.reasons == []
 
 
+def test_required_mimo_mtp_commits_are_safe_when_history_contains_all() -> None:
+    history = [commit.sha for commit in guard.REQUIRED_MIMO_MTP_COMMITS]
+
+    verdict = guard.validate_required_mimo_mtp_commits(history)
+
+    assert verdict.safe is True
+    assert verdict.reasons == []
+
+
+def test_required_mimo_mtp_commits_reports_missing_commit() -> None:
+    required_commits = guard.REQUIRED_MIMO_MTP_COMMITS
+    history = [required_commits[0].sha, required_commits[2].sha]
+
+    verdict = guard.validate_required_mimo_mtp_commits(history)
+
+    assert verdict.safe is False
+    assert required_commits[1].sha[:12] in verdict.reasons[0]
+    assert required_commits[1].description in verdict.reasons[0]
+
+
 def test_main_fail_closes_on_malformed_state_json(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -170,10 +193,9 @@ def test_main_fail_closes_on_invalid_memory_value_in_state(
 
     assert exit_code == 2
     assert verdict["safe"] is False
-    assert (
-        "failed to evaluate state" in _reason_at(verdict, 0)
-        or "invalid memory value" in _reason_at(verdict, 0)
-    )
+    assert "failed to evaluate state" in _reason_at(
+        verdict, 0
+    ) or "invalid memory value" in _reason_at(verdict, 0)
     assert captured.err == ""
 
 
@@ -220,4 +242,49 @@ def test_main_fail_closes_on_process_collection_failure(
     assert exit_code == 2
     assert verdict["safe"] is False
     assert "failed to collect processes" in _reason_at(verdict, 0)
+    assert captured.err == ""
+
+
+def test_validate_active_branch_accepts_required_work_branch() -> None:
+    verdict = guard.validate_active_branch(guard.REQUIRED_MIMO_MTP_WORK_BRANCH)
+
+    assert verdict.safe is True
+    assert verdict.reasons == []
+
+
+def test_validate_active_branch_rejects_wrong_work_branch() -> None:
+    verdict = guard.validate_active_branch("main")
+
+    assert verdict.safe is False
+    assert (
+        "active git branch 'main' does not match required MiMo V2.5 Pro MTP work branch "
+        f"'{guard.REQUIRED_MIMO_MTP_WORK_BRANCH}'"
+    ) in verdict.reasons
+
+
+def test_validate_active_branch_rejects_detached_head() -> None:
+    verdict = guard.validate_active_branch("")
+
+    assert verdict.safe is False
+    assert "active git branch is detached or unavailable" in verdict.reasons
+
+
+def test_main_fail_closes_on_wrong_active_branch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(guard, "collect_active_git_branch", lambda: "main")
+    monkeypatch.setattr(guard, "fetch_exo_state", _empty_state)
+    monkeypatch.setattr(guard, "collect_processes", _empty_processes)
+
+    exit_code = guard.main([])
+
+    captured = capsys.readouterr()
+    verdict = _parse_json_object(captured.out)
+
+    assert exit_code == 2
+    assert verdict["safe"] is False
+    assert "does not match required MiMo V2.5 Pro MTP work branch" in _reason_at(
+        verdict, 0
+    )
     assert captured.err == ""

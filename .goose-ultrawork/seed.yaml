@@ -1,0 +1,134 @@
+goal: "Implement the optimized MiMo V2.5 Pro MTP rollout strategy: a guarded exo-cluster MTP vertical slice with benchmark-grade telemetry, cluster AR baseline support, bottleneck analysis, and a strict Slice 5 gate for 30+ tok/s preferably 40+ tok/s."
+task_type: "code"
+
+constraints:
+  - "Target repository: /Users/studio2/exo/.worktrees/mimo-v25-pro-mtp-fastpath-single-stream-20260601"
+  - "Goose is the worker runtime for AC execution."
+  - "Use git worktrees for all mutating product-code work; do not mutate unrelated repos."
+  - "Do not launch nested Ouroboros runs from child Goose workers."
+  - "Default exo generation must remain AR unless an explicit experimental MTP guard is enabled."
+  - "Do not claim >=30 tok/s, >=40 tok/s, or MTP speedup without same-cluster AR-vs-MTP evidence rows."
+  - "Do not enable Slice 5 production/default MTP unless same-cluster benchmark rows prove a real MTP speed win."
+  - "Prefer one guarded vertical slice over broad controller/rollback rewrites; do not port old slow parity machinery wholesale."
+  - "Every completed AC must include evidence: files changed, commands/tests run, benchmark rows or explicit blocker, and remaining risk."
+  - "If cluster API is unavailable, preserve runnable commands and mark live rows blocked rather than fabricating results."
+
+acceptance_criteria:
+  - |
+    AC-P0 Optimized rollout seed and repo context are validated:
+    - confirm repo root, branch, git cleanliness, latest MiMo MTP commits, and existing fastpath modules
+    - record that exo cluster tensor parallelization is the live model path, not single-Studio full-model loading
+    - mirror ACs into TODO/runlog/Beads where practical
+    - identify focused verification commands for API/task/worker/benchmark changes
+  - |
+    AC-P1 Cluster AR baseline harness is canonical and budget-ready:
+    - keep scripts/bench_mimo_mtp_cluster.py as the live benchmark path through /bench/chat/completions
+    - ensure rows include generation_tps, generation_tokens, prompt_tps, power_usage, model id, mode label, repeat index, and payload extra keys
+    - add or update tests for AR baseline row parsing and unavailable-cluster failure behavior
+    - provide exact commands for max_tokens=16 and max_tokens=64 AR baseline rows
+    - if a cluster is available, collect rows; otherwise record a clear blocked-with-command status
+  - |
+    AC-P2 MTP speedup budget model exists before optimization claims:
+    - add a script or documented calculator that consumes AR/MTP JSONL rows
+    - compute AR ms/token, MTP tok/s, target gaps for 30 and 40 tok/s, speedup ratio, and pass/fail/ambiguous classification
+    - classify bottlenecks as acceptance_rate_low, proposal_too_slow, verifier_too_slow, fallback_too_high, depth_too_aggressive, mtp_beats_ar, mtp_reaches_30, and mtp_reaches_40 where telemetry exists
+    - do not require live MTP rows to pass tests; handle absent rows honestly
+  - |
+    AC-P3 Explicit guarded MTP request contract is added and fail-closed:
+    - add exo-extension request fields such as mimo_mtp_fastpath, mimo_mtp_depth, mimo_mtp_sidecar_path, and mimo_mtp_fail_closed with strict defaults
+    - normal requests produce identical task params and behavior
+    - unsupported depth, non-MiMo model, missing sidecar when fail_closed=true, or unwired execution must produce clear error/disable reason rather than pretending MTP ran
+    - request fields are documented as experimental and disabled by default
+  - |
+    AC-P4 MTP intent propagates through immutable internal task params:
+    - add a typed MimoMtpFastpathParams or equivalent to TextGenerationTaskParams
+    - API adapter maps guarded request fields into internal params
+    - command/task serialization remains type-safe and backwards compatible
+    - tests prove default None/disabled behavior and explicit enabled behavior
+  - |
+    AC-P5 Worker/generator guarded vertical slice is production-shaped but disabled by default:
+    - route explicit compatible MiMo requests toward the native sidecar-backed MTP fastpath seam where feasible
+    - if full distributed MTP execution cannot be completed in this wave, implement fail-closed/fail-open scaffolding with explicit telemetry and no silent AR-as-MTP behavior
+    - preserve the existing AR path and batch generator behavior for all default requests
+    - do not rebuild sidecar stack per token/cycle; document/cache lifecycle expectations
+  - |
+    AC-P6 Benchmark-grade MTP telemetry is defined and carried to cluster rows:
+    - expose mtp_enabled, mtp_depth, mtp_sidecar_status, mtp_disable_reason, attempted/accepted depth counts, acceptance_rate, fallback_count, and proposal/verification/acceptance/fallback timing where available
+    - AR rows explicitly show mtp_enabled=false or equivalent absence plus mode=ar
+    - MTP fallback rows identify whether fallback was fail-open, unsupported, missing sidecar, low acceptance, or runtime error
+    - cluster harness preserves telemetry from API responses when present
+  - |
+    AC-P7 Same-cluster AR-vs-MTP benchmark matrix is runnable and evidence-gated:
+    - provide commands for AR, mtp-d1, mtp-d2, mtp-d3 at max_tokens=16 and 64 with repeats=3
+    - enforce same model, same prompt, same cluster API, same temperature, and same benchmark endpoint
+    - if cluster or guarded MTP execution is unavailable, record blocked commands and do not claim performance
+    - if rows exist, summarize median/best tok/s and acceptance by mode/depth
+  - |
+    AC-P8 Measurement-driven optimization loop is encoded:
+    - bottleneck analyzer recommends exactly one next optimization family from measured data: proposal, verifier, acceptance semantics, fallback, depth policy, or Slice 5 review
+    - no blind optimization AC can be accepted without a measured/budgeted bottleneck
+    - auto-depth policy is considered; D3 is not assumed best
+  - |
+    AC-P9 Slice 5 gate remains strict:
+    - default generation remains AR
+    - guarded production integration review is allowed only if same-cluster MTP median tok/s beats AR by a meaningful margin or reaches explicit target with no correctness/fallback concern
+    - recommended margin: >=10-15% median tok/s improvement and preferably >=30 tok/s; 40+ tok/s is preferred target
+    - docs/TODO/Beads explicitly state whether Slice 5 is blocked or eligible
+  - |
+    AC-P10 Verification and closeout:
+    - focused pytest, ruff, ruff format check, basedpyright, and git diff --check pass for touched surfaces, or failures are documented as pre-existing/blocked
+    - docs/runlog/TODO/Beads are updated with AC statuses, commands, evidence, and blockers
+    - final report identifies completed ACs, remaining ACs, worktrees reviewed/merged, tests run, and next best step
+
+ontology_schema:
+  name: "MimoMtpOptimizedRollout"
+  description: "A performance-first, evidence-gated rollout tree for MiMo V2.5 Pro native MTP in exo cluster generation."
+  fields:
+    - name: "cluster_baseline"
+      type: "entity"
+      description: "Same-cluster AR generation rows collected through /bench/chat/completions."
+    - name: "mtp_vertical_slice"
+      type: "entity"
+      description: "Explicit MTP request contract propagated through API/task/worker/generator with fail-closed safeguards."
+    - name: "benchmark_telemetry"
+      type: "entity"
+      description: "MTP acceptance, timing, fallback, and tok/s evidence used for performance decisions."
+    - name: "speedup_budget"
+      type: "entity"
+      description: "Computed target and measured gap for 30+ and 40+ tok/s."
+    - name: "slice_5_gate"
+      type: "entity"
+      description: "Production/default integration decision gate based on same-cluster AR-vs-MTP evidence."
+
+evaluation_principles:
+  - name: "performance_first_vertical_slice"
+    description: "Prioritize an end-to-end guarded cluster path that can produce honest AR-vs-MTP rows over broad partial plumbing."
+    weight: 1.0
+  - name: "evidence_over_claims"
+    description: "30+ tok/s, 40+ tok/s, and speedup claims require same-cluster benchmark evidence."
+    weight: 1.0
+  - name: "default_safety"
+    description: "Default exo generation remains unchanged and MTP is disabled unless explicitly guarded."
+    weight: 0.95
+  - name: "diagnosability"
+    description: "Failures, fallbacks, and slowdowns must produce enough telemetry to choose the next optimization."
+    weight: 0.9
+  - name: "minimal_durable_change"
+    description: "Avoid porting slow legacy parity/controller machinery; reuse only necessary concepts."
+    weight: 0.8
+
+exit_conditions:
+  - name: "vertical_slice_ready"
+    description: "Guarded MTP cluster vertical slice and benchmark telemetry are implemented or blocked with exact commands and evidence."
+    criteria: "AC-P0 through AC-P10 are satisfied or explicitly blocked with evidence."
+  - name: "slice_5_eligible"
+    description: "MTP is eligible for guarded production review only after same-cluster rows show a real win."
+    criteria: "MTP median tok/s beats AR by a meaningful margin or reaches target without correctness/fallback concern."
+  - name: "blocked_with_evidence"
+    description: "Work stops only on unavailable cluster, unavailable sidecar/config, incompatible distributed seam, or external failure."
+    criteria: "Blocker includes last successful AC, exact rerun command, and recommended next step."
+
+metadata:
+  seed_id: "mimo_mtp_optimized_rollout_20260606T203800"
+  ambiguity_score: 0.12
+  generation_mode: "goose_ouroboros_ultrawork"

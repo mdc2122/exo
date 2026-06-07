@@ -1,0 +1,52 @@
+{
+  "created_at": "2026-06-06T20:38:00",
+  "goal": "Optimized MiMo V2.5 Pro MTP rollout AC tree and guarded cluster vertical slice",
+  "latest_wave": {
+    "id": "gou-run-20260607T023605Z",
+    "limitations": [
+      "No live same-cluster AR-vs-MTP rows were collected in this wave.",
+      "Distributed MTP execution backend remains guarded/unwired and must not be treated as a speedup.",
+      "Slice 5 remains blocked."
+    ],
+    "orchestrator_status": "failed",
+    "run_exit": 141,
+    "stabilization_status": "accepted_with_limitations",
+    "verification": {
+      "basedpyright": "0 errors, 0 warnings, 0 notes",
+      "budget_fixture_status": "same_cluster_budget_ready",
+      "diff_check": "clean",
+      "focused_pytest": "146 passed in 3.63s",
+      "matrix_command_rows": 8,
+      "ruff_check": "passed",
+      "ruff_format_check": "passed"
+    }
+  },
+  "notes": [
+    "Performance-first one-shot target: guarded cluster vertical slice plus telemetry, not production/default enablement.",
+    "Slice 5 remains blocked until same-cluster AR-vs-MTP rows prove real speed win."
+  ],
+  "parallel_workers": 4,
+  "repo": "/Users/studio2/exo/.worktrees/mimo-v25-pro-mtp-fastpath-single-stream-20260601",
+  "seed": ".goose-ultrawork/seed.yaml",
+  "status": "stabilized_after_failed_run",
+  "waves": [
+    {
+      "ac_markers": {
+        "completed": [],
+        "started": []
+      },
+      "llm_backend": "goose",
+      "log": "/Users/studio2/exo/.worktrees/mimo-v25-pro-mtp-fastpath-single-stream-20260601/.goose-ultrawork/evidence/gou-run-20260606T204056.log",
+      "max_decomposition_depth": null,
+      "max_decomposition_nodes": null,
+      "name": "gou-run-20260607T023605Z",
+      "parallel_workers": 4,
+      "qa_verdict": null,
+      "result": "RUN_EXIT=141",
+      "runtime": "goose",
+      "seed": "/Users/studio2/exo/.worktrees/mimo-v25-pro-mtp-fastpath-single-stream-20260601/.goose-ultrawork/seed.yaml",
+      "session_id": null,
+      "status": "failed"
+    }
+  ]
+}

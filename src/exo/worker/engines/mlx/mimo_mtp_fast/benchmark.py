@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Final, Literal, Protocol
 
 from exo.shared.types.common import ModelId
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
@@ -32,6 +32,16 @@ class MimoMtpBenchmarkMode(StrEnum):
     D2 = "d2"
     D3 = "d3"
     AUTO = "auto"
+
+
+SUPPORTED_MIMO_MTP_DEPTHS: Final[tuple[int, ...]] = (1, 2, 3)
+
+
+@dataclass(frozen=True, slots=True)
+class MimoMtpDepthEligibility:
+    eligible: bool
+    requested_depth: int
+    disable_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +80,16 @@ GenerationFn = Callable[..., Iterable[_GeneratorResponse]]
 OneCycleFn = Callable[[tuple[int, ...], int], MimoMtpOneCycleResult]
 TimerFn = Callable[[], float]
 BenchmarkRunner = Callable[[MimoMtpBenchmarkMode], BenchmarkRunResult]
+BottleneckClassification = Literal[
+    "acceptance_rate_low",
+    "proposal_too_slow",
+    "verifier_too_slow",
+    "fallback_too_high",
+    "depth_too_aggressive",
+    "mtp_beats_ar",
+    "mtp_reaches_30",
+    "mtp_reaches_40",
+]
 JsonRow = dict[str, Any]
 _ZERO_CYCLE_TIMING = MimoMtpCycleTiming()
 
@@ -237,6 +257,44 @@ def _add_timing(
     )
 
 
+def classify_bottlenecks(
+    *,
+    mode: MimoMtpBenchmarkMode,
+    decode_tok_s: float,
+    ar_baseline_tok_s: float | None,
+    acceptance_rate_value: float | None = None,
+    fallback_rate: float | None = None,
+    high_fallback_threshold: float,
+    rollout_depth: int | None = None,
+    aggressive_depth_threshold: int | None = None,
+) -> tuple[BottleneckClassification, ...]:
+    classifications: list[BottleneckClassification] = []
+    if (
+        mode != MimoMtpBenchmarkMode.AR
+        and fallback_rate is not None
+        and fallback_rate >= high_fallback_threshold
+    ):
+        classifications.append("fallback_too_high")
+    if (
+        mode != MimoMtpBenchmarkMode.AR
+        and rollout_depth is not None
+        and aggressive_depth_threshold is not None
+        and rollout_depth >= aggressive_depth_threshold
+    ):
+        classifications.append("depth_too_aggressive")
+    if (
+        mode != MimoMtpBenchmarkMode.AR
+        and ar_baseline_tok_s is not None
+        and decode_tok_s > ar_baseline_tok_s
+    ):
+        classifications.append("mtp_beats_ar")
+    if mode != MimoMtpBenchmarkMode.AR and decode_tok_s >= 30.0:
+        classifications.append("mtp_reaches_30")
+    if mode != MimoMtpBenchmarkMode.AR and decode_tok_s >= 40.0:
+        classifications.append("mtp_reaches_40")
+    return tuple(classifications)
+
+
 def _next_step_for_metric(
     *, mode: MimoMtpBenchmarkMode, decode_tok_s: float, ar_baseline_tok_s: float | None
 ) -> str:
@@ -258,6 +316,14 @@ def _next_step_for_metric(
     )
 
 
+def _accepted_execution_path_for_mode(
+    mode: MimoMtpBenchmarkMode,
+) -> Literal["ar", "mimo_mtp_fastpath"]:
+    if mode == MimoMtpBenchmarkMode.AR:
+        return "ar"
+    return "mimo_mtp_fastpath"
+
+
 def build_metric_row(
     *,
     mode: MimoMtpBenchmarkMode,
@@ -275,6 +341,7 @@ def build_metric_row(
     return {
         "kind": "benchmark_metric",
         "mode": mode.value,
+        "accepted_execution_path": _accepted_execution_path_for_mode(mode),
         "generated_tokens": generated_tokens,
         "decode_seconds": round(decode_seconds, 6),
         "decode_tok_s": rounded_tok_s,
@@ -385,6 +452,22 @@ def requested_depth_for_mode(mode: MimoMtpBenchmarkMode) -> int:
             return 0
 
 
+def validate_mtp_depth_eligibility(*, requested_depth: int) -> MimoMtpDepthEligibility:
+    if requested_depth in SUPPORTED_MIMO_MTP_DEPTHS:
+        return MimoMtpDepthEligibility(
+            eligible=True,
+            requested_depth=requested_depth,
+        )
+    supported_depths = ",".join(str(depth) for depth in SUPPORTED_MIMO_MTP_DEPTHS)
+    return MimoMtpDepthEligibility(
+        eligible=False,
+        requested_depth=requested_depth,
+        disable_reason=(
+            f"unsupported MTP depth {requested_depth}; supported depths: {supported_depths}"
+        ),
+    )
+
+
 def _increment_count(counts: dict[int, int], depth: int) -> None:
     counts[depth] = counts.get(depth, 0) + 1
 
@@ -396,6 +479,12 @@ def run_mtp_benchmark(
     timer: TimerFn = time.perf_counter,
     elapsed_seconds_override: float | None = None,
 ) -> BenchmarkRunResult:
+    depth_eligibility = validate_mtp_depth_eligibility(
+        requested_depth=request.requested_depth
+    )
+    if not depth_eligibility.eligible:
+        raise ValueError(depth_eligibility.disable_reason)
+
     start = timer()
     generated_tokens = 0
     attempted_depth_counts: dict[int, int] = {}

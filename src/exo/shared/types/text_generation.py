@@ -4,9 +4,11 @@ All external API formats (Chat Completions, Claude Messages, OpenAI Responses)
 are converted to TextGenerationTaskParams at the API boundary via adapters.
 """
 
-from typing import Any, Literal
+from collections.abc import Mapping
+from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
+from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
 from exo.shared.types.common import ModelId
 
@@ -61,6 +63,19 @@ class VideoSource(BaseModel, frozen=True):
         return self.data
 
 
+class MimoMtpFastpathParams(BaseModel, frozen=True):
+    """Guarded experimental MiMo V2.5 Pro MTP request intent.
+
+    This is absent for default autoregressive requests so normal generation
+    stays unchanged unless callers explicitly opt in at the API boundary.
+    """
+
+    enabled: bool = True
+    depth: int | None = None
+    sidecar_path: str | None = None
+    fail_closed: bool = True
+
+
 class TextGenerationTaskParams(BaseModel, frozen=True):
     """Canonical internal task params for text generation.
 
@@ -95,3 +110,15 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
     image_hashes: dict[int, str] = Field(default_factory=dict)
     total_input_chunks: int = 0
     image_count: int = 0
+    mimo_mtp_fastpath: MimoMtpFastpathParams | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_disabled_mtp(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        raw_serialized = cast(object, handler(self))
+        assert isinstance(raw_serialized, dict)
+        serialized: dict[str, Any] = dict(cast(Mapping[str, Any], raw_serialized))
+        if self.mimo_mtp_fastpath is None:
+            serialized.pop("mimo_mtp_fastpath", None)
+        return serialized

@@ -14,12 +14,94 @@ from exo.api.types import (
     ChatCompletionMessageVideoUrl,
     ChatCompletionRequest,
 )
-from exo.shared.models.model_cards import MIMO_V25_PRO_MODEL_IDS
+from exo.shared.models.model_cards import (
+    MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+    MIMO_V25_PRO_MODEL_IDS,
+)
 from exo.shared.types.common import ModelId
+from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from exo.shared.types.video_errors import (
     VIDEO_ERROR_CODE_STREAMING_UNSUPPORTED,
     VIDEO_ERROR_CODE_UNSUPPORTED_FORMAT,
 )
+
+
+def _normal_request_golden_task_params() -> TextGenerationTaskParams:
+    return TextGenerationTaskParams(
+        model=MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+        input=[InputMessage(role="user", content="Summarize MiMo Pro.")],
+        max_output_tokens=16,
+        temperature=0.0,
+        top_p=0.95,
+        top_k=40,
+        seed=1234,
+        stream=False,
+        stop=["</s>"],
+        chat_template_messages=[{"role": "user", "content": "Summarize MiMo Pro."}],
+        logprobs=False,
+        min_p=0.05,
+        repetition_penalty=1.05,
+        repetition_context_size=1024,
+        images=[],
+        videos=[],
+        video_sources=[],
+        video_urls=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_normal_request_without_enabled_mtp_matches_pre_mtp_task_params_golden() -> (
+    None
+):
+    implicit_disabled_request = ChatCompletionRequest(
+        model=MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+        messages=[ChatCompletionMessage(role="user", content="Summarize MiMo Pro.")],
+        max_tokens=16,
+        temperature=0.0,
+        top_p=0.95,
+        top_k=40,
+        seed=1234,
+        stop=["</s>"],
+        min_p=0.05,
+        repetition_penalty=1.05,
+        repetition_context_size=1024,
+    )
+    explicit_disabled_request = ChatCompletionRequest(
+        model=MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+        messages=[ChatCompletionMessage(role="user", content="Summarize MiMo Pro.")],
+        max_tokens=16,
+        temperature=0.0,
+        top_p=0.95,
+        top_k=40,
+        seed=1234,
+        stop=["</s>"],
+        min_p=0.05,
+        repetition_penalty=1.05,
+        repetition_context_size=1024,
+        mimo_mtp_fastpath=False,
+        mimo_mtp_depth=None,
+        mimo_mtp_sidecar_path=None,
+        mimo_mtp_fail_closed=True,
+    )
+
+    golden_params = _normal_request_golden_task_params()
+
+    implicit_params = await chat_request_to_text_generation(implicit_disabled_request)
+    explicit_disabled_params = await chat_request_to_text_generation(
+        explicit_disabled_request
+    )
+
+    assert implicit_params == golden_params
+    assert explicit_disabled_params == golden_params
+    assert implicit_params.model_dump() == explicit_disabled_params.model_dump()
+    for mtp_field_name in (
+        "mimo_mtp_fastpath",
+        "mimo_mtp_depth",
+        "mimo_mtp_sidecar_path",
+        "mimo_mtp_fail_closed",
+    ):
+        assert mtp_field_name not in implicit_params.model_dump()
+        assert mtp_field_name not in explicit_disabled_params.model_dump()
 
 
 @pytest.mark.asyncio

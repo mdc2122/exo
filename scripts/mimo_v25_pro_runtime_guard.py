@@ -22,6 +22,9 @@ MIMO_MODEL_MARKERS: Final[tuple[str, ...]] = (
 )
 DEFAULT_EXO_URL: Final[str] = "http://127.0.0.1:52415"
 DEFAULT_MIN_AVAILABLE_GIB: Final[int] = 200
+REQUIRED_MIMO_MTP_WORK_BRANCH: Final[str] = (
+    "feature/mimo-v25-pro-mtp-fastpath-single-stream-20260601"
+)
 type JsonObject = Mapping[str, object]
 
 
@@ -29,6 +32,28 @@ type JsonObject = Mapping[str, object]
 class GuardVerdict:
     safe: bool
     reasons: list[str]
+
+
+@dataclass(frozen=True)
+class RequiredGitCommit:
+    sha: str
+    description: str
+
+
+REQUIRED_MIMO_MTP_COMMITS: Final[tuple[RequiredGitCommit, ...]] = (
+    RequiredGitCommit(
+        sha="bc93219273d18c79436dba6aaa0fa1b1744b8f29",
+        description="feat: harden MiMo MTP fastpath readiness",
+    ),
+    RequiredGitCommit(
+        sha="ff9f28efb5b269b7d9590a2f05d68a1df296b449",
+        description="feat: add MiMo MTP benchmark survival diagnostics",
+    ),
+    RequiredGitCommit(
+        sha="e88444fd575d02be3ef116d6d73d31c830d2d46d",
+        description="feat: add MiMo MTP cluster benchmark harness",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -158,6 +183,52 @@ def collect_processes() -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
+def collect_active_git_branch() -> str:
+    return subprocess.check_output(
+        ["git", "branch", "--show-current"], text=True
+    ).strip()
+
+
+def collect_git_history() -> list[str]:
+    output = subprocess.check_output(["git", "rev-list", "HEAD"], text=True)
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def validate_required_mimo_mtp_commits(
+    history: Sequence[str],
+    *,
+    required_commits: Sequence[RequiredGitCommit] = REQUIRED_MIMO_MTP_COMMITS,
+) -> GuardVerdict:
+    history_set = set(history)
+    reasons = [
+        f"missing required MiMo MTP commit {commit.sha[:12]} ({commit.description})"
+        for commit in required_commits
+        if commit.sha not in history_set
+    ]
+    return GuardVerdict(safe=not reasons, reasons=reasons)
+
+
+def validate_active_branch(
+    active_branch: str,
+    *,
+    required_branch: str = REQUIRED_MIMO_MTP_WORK_BRANCH,
+) -> GuardVerdict:
+    if not active_branch:
+        return GuardVerdict(
+            safe=False,
+            reasons=["active git branch is detached or unavailable"],
+        )
+    if active_branch != required_branch:
+        return GuardVerdict(
+            safe=False,
+            reasons=[
+                f"active git branch {active_branch!r} does not match required "
+                f"MiMo V2.5 Pro MTP work branch {required_branch!r}"
+            ],
+        )
+    return GuardVerdict(safe=True, reasons=[])
+
+
 def _parse_args(argv: Sequence[str]) -> CliArgs:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exo-url", default=DEFAULT_EXO_URL)
@@ -189,6 +260,34 @@ def _parse_args(argv: Sequence[str]) -> CliArgs:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        active_branch = collect_active_git_branch()
+    except Exception as exc:
+        _print_verdict(
+            GuardVerdict(
+                safe=False, reasons=[f"failed to collect active git branch: {exc}"]
+            )
+        )
+        return 2
+
+    branch_verdict = validate_active_branch(active_branch)
+    if not branch_verdict.safe:
+        _print_verdict(branch_verdict)
+        return 2
+
+    try:
+        git_history = collect_git_history()
+    except Exception as exc:
+        _print_verdict(
+            GuardVerdict(safe=False, reasons=[f"failed to collect git history: {exc}"])
+        )
+        return 2
+
+    commit_verdict = validate_required_mimo_mtp_commits(git_history)
+    if not commit_verdict.safe:
+        _print_verdict(commit_verdict)
+        return 2
+
     if args.state_json:
         try:
             state = _load_json_object(args.state_json, context="--state-json")
@@ -204,9 +303,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             state = fetch_exo_state(args.exo_url)
         except Exception as exc:
             _print_verdict(
-                GuardVerdict(
-                    safe=False, reasons=[f"failed to fetch exo state: {exc}"]
-                )
+                GuardVerdict(safe=False, reasons=[f"failed to fetch exo state: {exc}"])
             )
             return 2
 

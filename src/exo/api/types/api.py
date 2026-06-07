@@ -3,7 +3,7 @@ from collections.abc import Generator
 from typing import Annotated, Any, Literal, get_args
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr, field_validator
 
 from exo.shared.models.model_cards import ModelCard, ModelId
 from exo.shared.types.common import CommandId, NodeId
@@ -222,6 +222,14 @@ class PowerUsage(BaseModel, frozen=True):
 class BenchChatCompletionResponse(ChatCompletionResponse):
     generation_stats: GenerationStats | None = None
     power_usage: PowerUsage | None = None
+    execution_path: dict[str, object] | None = None
+    accepted_execution_path: str | None = None
+    mtp_enabled: bool | None = None
+    mtp_depth: int | None = None
+    mtp_sidecar_status: str | None = None
+    mtp_disable_reason: str | None = None
+    mtp_fallback_reason: str | None = None
+    requested_mtp_depth: int | None = None
 
 
 class StreamOptions(BaseModel):
@@ -255,6 +263,42 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: str | dict[str, Any] | None = None
     parallel_tool_calls: bool | None = None
     user: str | None = None
+    mimo_mtp_fastpath: StrictBool = Field(
+        default=False,
+        description=(
+            "experimental exo extension: opt in to the guarded MiMo V2.5 Pro "
+            "MTP fastpath. Defaults to false so normal requests remain "
+            "autoregressive."
+        ),
+        json_schema_extra={"x-exo-extension": True},
+    )
+    mimo_mtp_depth: StrictInt | None = Field(
+        default=None,
+        description=(
+            "experimental exo extension: requested MiMo V2.5 Pro MTP draft "
+            "depth. Defaults to null and has no effect unless "
+            "mimo_mtp_fastpath is true."
+        ),
+        json_schema_extra={"x-exo-extension": True},
+    )
+    mimo_mtp_sidecar_path: StrictStr | None = Field(
+        default=None,
+        description=(
+            "experimental exo extension: optional path to the MiMo V2.5 Pro "
+            "MTP sidecar artifacts. Defaults to null so no sidecar is used "
+            "unless explicitly requested."
+        ),
+        json_schema_extra={"x-exo-extension": True},
+    )
+    mimo_mtp_fail_closed: StrictBool = Field(
+        default=True,
+        description=(
+            "experimental exo extension: fail the request instead of silently "
+            "falling back when the guarded MiMo V2.5 Pro MTP fastpath cannot "
+            "run. Defaults to true for fail-closed experimental behavior."
+        ),
+        json_schema_extra={"x-exo-extension": True},
+    )
     kimi_video_allow_local_urls: bool | None = Field(
         default=None,
         description=(

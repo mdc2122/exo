@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncGenerator, Mapping
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, cast
 
 import anyio
@@ -10,11 +12,21 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from exo.api.main import API
-from exo.api.types.api import CreateInstanceParams, PlacementPreviewResponse
+from exo.api.types.api import (
+    BenchChatCompletionRequest,
+    ChatCompletionMessage,
+    CreateInstanceParams,
+    GenerationStats,
+    PlacementPreviewResponse,
+)
+from exo.download.download_utils import build_model_path
 from exo.shared.models.model_cards import (
     MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
     ModelId,
 )
+from exo.shared.types.chunks import TokenChunk
+from exo.shared.types.common import CommandId
+from exo.shared.types.memory import Memory
 from exo.shared.types.profiling import MemoryUsage
 from exo.shared.types.state import State
 from exo.shared.types.worker.shards import PipelineShardMetadata, TensorShardMetadata
@@ -110,6 +122,166 @@ def test_tensor_create_memory_evidence_uses_per_rank_storage() -> None:
     assert create_response.message == "Command received."
     assert create_response.model_card.model_id == MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID
     assert len(sent_commands) == 1
+
+
+async def test_bench_response_reports_tensor_parallel_execution_path() -> None:
+    api = _api_with_empty_topology()
+    response = await api.get_placement_previews(MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID)
+    preview = next(
+        preview
+        for preview in response.previews
+        if preview.instance is not None and preview.sharding.value == "Tensor"
+    )
+    assert preview.instance is not None
+    api.state = api.state.model_copy(
+        update={"instances": {preview.instance.instance_id: preview.instance}}
+    )
+
+    async def stream(_command_id: CommandId) -> AsyncGenerator[TokenChunk, None]:
+        yield TokenChunk(
+            model=MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+            text="ok",
+            token_id=1,
+            usage=None,
+            finish_reason="stop",
+            stats=GenerationStats(
+                prompt_tps=10.0,
+                generation_tps=20.0,
+                prompt_tokens=3,
+                generation_tokens=1,
+                peak_memory_usage=Memory.from_bytes(0),
+            ),
+        )
+
+    sent_commands: list[object] = []
+
+    async def fake_send(command: object) -> None:
+        sent_commands.append(command)
+
+    cast(Any, api)._token_chunk_stream = stream
+    cast(Any, api)._send = fake_send
+
+    bench_response = await api.bench_chat_completions(
+        BenchChatCompletionRequest(
+            model=MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+            messages=[ChatCompletionMessage(role="user", content="hello")],
+            max_tokens=1,
+        )
+    )
+
+    assert bench_response.execution_path == {
+        "path": "exo_cluster_tensor_parallel",
+        "sharding": "Tensor",
+        "world_size": 2,
+        "model_path": str(build_model_path(MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID)),
+        "instance_id": str(preview.instance.instance_id),
+    }
+
+
+async def test_bench_mtp_request_fail_open_reports_ar_disabled_telemetry(
+    tmp_path: Path,
+) -> None:
+    sidecar_path = tmp_path / "model_mtp.safetensors"
+    sidecar_path.write_bytes(b"not-a-real-sidecar; backend is intentionally unwired")
+    api = _api_with_empty_topology()
+    response = await api.get_placement_previews(MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID)
+    preview = next(
+        preview
+        for preview in response.previews
+        if preview.instance is not None and preview.sharding.value == "Tensor"
+    )
+    assert preview.instance is not None
+    api.state = api.state.model_copy(
+        update={"instances": {preview.instance.instance_id: preview.instance}}
+    )
+
+    async def stream(_command_id: CommandId) -> AsyncGenerator[TokenChunk, None]:
+        yield TokenChunk(
+            model=MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+            text="ok",
+            token_id=1,
+            usage=None,
+            finish_reason="stop",
+            stats=GenerationStats(
+                prompt_tps=10.0,
+                generation_tps=20.0,
+                prompt_tokens=3,
+                generation_tokens=1,
+                peak_memory_usage=Memory.from_bytes(0),
+            ),
+        )
+
+    sent_commands: list[object] = []
+
+    async def fake_send(command: object) -> None:
+        sent_commands.append(command)
+
+    cast(Any, api)._token_chunk_stream = stream
+    cast(Any, api)._send = fake_send
+
+    bench_response = await api.bench_chat_completions(
+        BenchChatCompletionRequest(
+            model=MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+            messages=[ChatCompletionMessage(role="user", content="hello")],
+            max_tokens=1,
+            mimo_mtp_fastpath=True,
+            mimo_mtp_depth=1,
+            mimo_mtp_sidecar_path=str(sidecar_path),
+            mimo_mtp_fail_closed=False,
+        )
+    )
+
+    assert len(sent_commands) == 1
+    assert bench_response.accepted_execution_path == "ar"
+    assert bench_response.mtp_enabled is False
+    assert bench_response.mtp_depth is None
+    assert bench_response.mtp_disable_reason == "mimo_mtp_execution_backend_unwired"
+    assert bench_response.mtp_fallback_reason == "fail_open_backend_unwired"
+    assert bench_response.requested_mtp_depth == 1
+
+
+async def test_bench_mtp_request_fails_before_send_when_backend_is_unwired(
+    tmp_path: Path,
+) -> None:
+    sidecar_path = tmp_path / "model_mtp.safetensors"
+    sidecar_path.write_bytes(b"not-a-real-sidecar; backend is intentionally unwired")
+    api = _api_with_empty_topology()
+    response = await api.get_placement_previews(MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID)
+    preview = next(
+        preview
+        for preview in response.previews
+        if preview.instance is not None and preview.sharding.value == "Tensor"
+    )
+    assert preview.instance is not None
+    api.state = api.state.model_copy(
+        update={"instances": {preview.instance.instance_id: preview.instance}}
+    )
+
+    async def fail_send(_: object) -> None:
+        raise AssertionError("MTP fail-closed guard must reject before _send")
+
+    cast(Any, api)._send = fail_send
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.bench_chat_completions(
+            BenchChatCompletionRequest(
+                model=MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+                messages=[ChatCompletionMessage(role="user", content="hello")],
+                max_tokens=1,
+                mimo_mtp_fastpath=True,
+                mimo_mtp_depth=1,
+                mimo_mtp_sidecar_path=str(sidecar_path),
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    raw_detail = cast(object, exc_info.value.detail)
+    assert isinstance(raw_detail, dict)
+    detail = cast(Mapping[str, object], raw_detail)
+    assert detail["error"] == "mimo_mtp_execution_backend_unwired"
+    assert detail["mtp_enabled"] is False
+    assert detail["requested_mtp_depth"] == 1
+    assert "no MTP execution backend" in str(detail["message"])
 
 
 def test_create_instance_failure_reports_selected_worker_memory_evidence() -> None:

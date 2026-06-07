@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from exo.worker.engines.mlx.mimo_mtp_fast.benchmark import (
     MimoMtpBenchmarkMode,
     build_contract_probe_row,
     build_metric_row,
+    classify_bottlenecks,
     parse_benchmark_modes,
     render_json_line,
 )
@@ -119,6 +122,109 @@ def test_metric_row_includes_timing_breakdown_and_acceptance_rate() -> None:
         "acceptance": 0.05,
         "fallback": 0.02,
     }
+
+
+def test_metric_row_records_accepted_execution_path_for_rollout_telemetry() -> None:
+    ar_row = build_metric_row(
+        mode=MimoMtpBenchmarkMode.AR,
+        generated_tokens=4,
+        decode_seconds=1.0,
+        attempted_depth_counts={},
+        accepted_depth_counts={},
+        ar_baseline_tok_s=None,
+    )
+    mtp_row = build_metric_row(
+        mode=MimoMtpBenchmarkMode.D2,
+        generated_tokens=8,
+        decode_seconds=1.0,
+        attempted_depth_counts={2: 4},
+        accepted_depth_counts={2: 4},
+        ar_baseline_tok_s=4.0,
+    )
+
+    assert ar_row["accepted_execution_path"] == "ar"
+    assert mtp_row["accepted_execution_path"] == "mimo_mtp_fastpath"
+
+
+def test_bottleneck_classifier_emits_fallback_too_high_when_rate_crosses_threshold() -> (
+    None
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        acceptance_rate_value=0.75,
+        fallback_rate=0.4,
+        high_fallback_threshold=0.25,
+    )
+
+    assert "fallback_too_high" in classifications
+
+
+def test_bottleneck_classifier_suppresses_fallback_too_high_without_fallback_telemetry() -> (
+    None
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        acceptance_rate_value=0.75,
+        fallback_rate=None,
+        high_fallback_threshold=0.25,
+    )
+
+    assert "fallback_too_high" not in classifications
+
+
+def test_bottleneck_classifier_emits_depth_too_aggressive_when_rollout_depth_crosses_threshold() -> (
+    None
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        acceptance_rate_value=0.75,
+        fallback_rate=0.0,
+        high_fallback_threshold=0.25,
+        rollout_depth=3,
+        aggressive_depth_threshold=3,
+    )
+
+    assert "depth_too_aggressive" in classifications
+
+
+def test_bottleneck_classifier_suppresses_depth_too_aggressive_without_rollout_depth_telemetry() -> (
+    None
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        acceptance_rate_value=0.75,
+        fallback_rate=0.0,
+        high_fallback_threshold=0.25,
+        rollout_depth=None,
+        aggressive_depth_threshold=3,
+    )
+
+    assert "depth_too_aggressive" not in classifications
+
+
+def test_bottleneck_classifier_suppresses_depth_too_aggressive_below_configured_threshold() -> (
+    None
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D2,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        acceptance_rate_value=0.75,
+        fallback_rate=0.0,
+        high_fallback_threshold=0.25,
+        rollout_depth=2,
+        aggressive_depth_threshold=3,
+    )
+
+    assert "depth_too_aggressive" not in classifications
 
 
 def test_render_json_line_is_single_line_stable_json() -> None:
@@ -382,6 +488,44 @@ def test_requested_depth_for_benchmark_mode() -> None:
     assert requested_depth_for_mode(MimoMtpBenchmarkMode.D3) == 3
     assert requested_depth_for_mode(MimoMtpBenchmarkMode.AUTO) == 3
     assert requested_depth_for_mode(MimoMtpBenchmarkMode.AR) == 0
+
+
+def test_validate_mtp_depth_eligibility_returns_clear_disable_reason_for_unsupported_depth() -> (
+    None
+):
+    from exo.worker.engines.mlx.mimo_mtp_fast.benchmark import (
+        validate_mtp_depth_eligibility,
+    )
+
+    result = validate_mtp_depth_eligibility(requested_depth=4)
+
+    assert result.eligible is False
+    assert result.disable_reason == "unsupported MTP depth 4; supported depths: 1,2,3"
+
+
+def test_run_mtp_benchmark_rejects_unsupported_depth_before_one_cycle() -> None:
+    from exo.worker.engines.mlx.mimo_mtp_fast.benchmark import (
+        MtpBenchmarkRequest,
+        run_mtp_benchmark,
+    )
+    from exo.worker.engines.mlx.mimo_mtp_fast.one_cycle import MimoMtpOneCycleResult
+
+    def one_cycle(
+        _history: tuple[int, ...], _requested_depth: int
+    ) -> MimoMtpOneCycleResult:
+        raise AssertionError("unsupported depth must not enter the MTP cycle")
+
+    request = MtpBenchmarkRequest(
+        mode=MimoMtpBenchmarkMode.D3,
+        token_history=(1, 2),
+        max_tokens=4,
+        requested_depth=4,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        run_mtp_benchmark(request, one_cycle=one_cycle)
+
+    assert str(exc_info.value) == "unsupported MTP depth 4; supported depths: 1,2,3"
 
 
 def test_build_benchmark_runner_dispatches_ar_and_mtp_modes() -> None:

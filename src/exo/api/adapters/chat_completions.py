@@ -43,6 +43,7 @@ from exo.shared.types.chunks import (
 from exo.shared.types.common import CommandId
 from exo.shared.types.text_generation import (
     InputMessage,
+    MimoMtpFastpathParams,
     TextGenerationTaskParams,
     VideoSource,
     resolve_reasoning_params,
@@ -70,6 +71,9 @@ from exo.shared.types.video_errors import (
 )
 from exo.shared.types.video_errors import (
     VIDEO_ERROR_CODE_URL_BLOCKED as VIDEO_ERROR_CODE_URL_BLOCKED,
+)
+from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract import (
+    probe_mimo_mtp_sidecar,
 )
 
 DEFAULT_MAX_VIDEO_PAYLOAD_BYTES = 100 * 1024 * 1024
@@ -805,6 +809,47 @@ def _message_media_marker(message: ChatCompletionMessage) -> str | None:
     return _content_part_media_marker(content)
 
 
+def validate_mimo_mtp_fastpath_eligibility(request: ChatCompletionRequest) -> None:
+    """Fail closed when an explicit guarded MiMo MTP fastpath request is ineligible."""
+    if not request.mimo_mtp_fastpath:
+        return
+
+    if not _is_mimo_v25_pro_request(request):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "MiMo MTP fastpath is only supported for MiMo V2.5 Pro models; "
+                f"model {request.model} is not eligible. "
+                "Disable mimo_mtp_fastpath or use a MiMo V2.5 Pro model."
+            ),
+        )
+
+    if not request.mimo_mtp_fail_closed:
+        return
+
+    if request.mimo_mtp_sidecar_path is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "MiMo MTP fastpath is disabled: required sidecar path was not "
+                "provided. disable_reason=missing_sidecar. Provide a valid "
+                "model_mtp.safetensors sidecar or disable mimo_mtp_fastpath."
+            ),
+        )
+
+    sidecar_probe = probe_mimo_mtp_sidecar(request.mimo_mtp_sidecar_path)
+    if sidecar_probe.status == "missing":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "MiMo MTP fastpath is disabled: required sidecar is missing at "
+                f"{sidecar_probe.path}. disable_reason=missing_sidecar. "
+                "Provide a valid model_mtp.safetensors sidecar or disable "
+                "mimo_mtp_fastpath."
+            ),
+        )
+
+
 def validate_mimo_v25_pro_text_only_request(request: ChatCompletionRequest) -> None:
     """Fail closed for MiMo Pro media requests before media fetch or dispatch."""
     if not _is_mimo_v25_pro_request(request):
@@ -830,6 +875,7 @@ def validate_mimo_v25_pro_text_only_request(request: ChatCompletionRequest) -> N
 async def chat_request_to_text_generation(
     request: ChatCompletionRequest,
 ) -> TextGenerationTaskParams:
+    validate_mimo_mtp_fastpath_eligibility(request)
     validate_mimo_v25_pro_text_only_request(request)
     validate_video_url_content_array_shape(request)
     validate_single_video_url_part_per_request(request)
@@ -1007,6 +1053,16 @@ async def chat_request_to_text_generation(
     resolved_effort, resolved_thinking = resolve_reasoning_params(
         request.reasoning_effort, request.enable_thinking
     )
+    mimo_mtp_fastpath = (
+        MimoMtpFastpathParams(
+            enabled=True,
+            depth=request.mimo_mtp_depth,
+            sidecar_path=request.mimo_mtp_sidecar_path,
+            fail_closed=request.mimo_mtp_fail_closed,
+        )
+        if request.mimo_mtp_fastpath
+        else None
+    )
 
     return TextGenerationTaskParams(
         model=request.model,
@@ -1036,6 +1092,7 @@ async def chat_request_to_text_generation(
         videos=videos,
         video_sources=video_sources,
         video_urls=video_urls,
+        mimo_mtp_fastpath=mimo_mtp_fastpath,
     )
 
 

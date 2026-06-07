@@ -241,3 +241,56 @@ Current implication:
 - Use scripts/bench_mimo_mtp_cluster.py for live distributed AR rows.
 - MTP distributed rows still require a guarded cluster request path or worker integration flag before they can be honestly collected through the cluster.
 - Slice 5 production/default enablement remains blocked until same-cluster AR and guarded-MTP rows show a real MTP speed win.
+
+## 2026-06-06 Optimized Rollout Ultrawork Seed
+
+Created or refreshed `.goose-ultrawork/seed.yaml` as the source of truth for a performance-first MiMo MTP rollout AC tree.
+The tree optimizes for a one-shot guarded cluster vertical slice rather than a broad production rollout. The critical path is:
+
+1. collect or require same-cluster AR baseline rows through `/bench/chat/completions`,
+2. compute 30+/40+ tok/s budget and bottleneck classification,
+3. add explicit guarded MTP request/task contract,
+4. route compatible requests through production-shaped MTP scaffolding or fail/fallback with honest telemetry,
+5. preserve benchmark-grade MTP telemetry in cluster rows,
+6. run AR-vs-MTP matrix when cluster and guarded MTP path are available,
+7. keep Slice 5 blocked unless same-cluster AR-vs-MTP rows prove a real speed win.
+
+This seed explicitly corrects the local single-Studio load framing: live MiMo rows must use the exo tensor-parallel cluster path, while local scripts remain for sidecar, synthetic, and provider diagnostics.
+
+Mirrored acceptance criteria:
+- AC-P0 Optimized rollout seed and repo context are validated:
+- AC-P1 Cluster AR baseline harness is canonical and budget-ready:
+- AC-P2 MTP speedup budget model exists before optimization claims:
+- AC-P3 Explicit guarded MTP request contract is added and fail-closed:
+- AC-P4 MTP intent propagates through immutable internal task params:
+- AC-P5 Worker/generator guarded vertical slice is production-shaped but disabled by default:
+- AC-P6 Benchmark-grade MTP telemetry is defined and carried to cluster rows:
+- AC-P7 Same-cluster AR-vs-MTP benchmark matrix is runnable and evidence-gated:
+- AC-P8 Measurement-driven optimization loop is encoded:
+- AC-P9 Slice 5 gate remains strict:
+- AC-P10 Verification and closeout:
+
+## 2026-06-06 Optimized Rollout Ultrawork Stabilization
+
+The optimized Goose-Ouroboros ultrawork wave was launched from .goose-ultrawork/seed.yaml. The raw gou-run ended with RUN_EXIT=141, so the orchestrator result is recorded as failed rather than a clean AC completion. However, the generated changes were manually reviewed and stabilized.
+
+Accepted stabilized outputs:
+
+- Experimental MiMo MTP request fields and internal immutable MimoMtpFastpathParams propagation.
+- Fail-closed/fail-open handling for explicit MTP requests while the distributed execution backend remains unwired. Requested MTP is not silently reported as AR.
+- Cluster benchmark harness support for preserving telemetry and rendering the same-cluster AR/MTP matrix commands.
+- Benchmark ingestion, speedup budget, and bottleneck classifier scripts for 30+/40+ tok/s evidence analysis.
+- Module validation helpers for MTP stack semantics.
+- Docs/TODO/ultrawork evidence updates preserving the Slice 5 gate.
+
+Verification after stabilization:
+
+- Focused pytest across scripts/API/MTP fastpath tests: 146 passed in 3.63s
+- uv run ruff check on touched surfaces: passed
+- uv run ruff format --check on touched surfaces: passed; 36 files already formatted
+- uv run basedpyright on touched surfaces: 0 errors, 0 warnings, 0 notes
+- git diff --check: clean
+- Matrix command smoke emitted 8 rows for AR plus MTP D1/D2/D3 at max_tokens 16 and 64.
+- Budget analyzer fixture smoke returned same_cluster_budget_ready and at_least_30_tok_s for fixture data.
+
+Gate status remains unchanged: no live same-cluster AR-vs-MTP rows were collected, no >=30 tok/s or >=40 tok/s claim is made, and Slice 5 production/default integration remains blocked.

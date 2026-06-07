@@ -235,6 +235,21 @@ Executes a chat completion request using an OpenAI-compatible schema. Supports s
 * `logprobs`: boolean (optional) - Return log probabilities
 * `top_logprobs`: integer (optional) - Number of top log probabilities to return
 
+#### Experimental MiMo V2.5 Pro MTP request fields
+
+These fields are exo extensions for the guarded MiMo V2.5 Pro MTP vertical slice. They are disabled by default and must not be used for default or production generation unless the explicit rollout gate has same-cluster AR-vs-MTP evidence that proves a real speed win.
+
+* `mimo_mtp_fastpath`: Experimental. Disabled by default (`false`). Opts a request into the guarded MiMo V2.5 Pro MTP fastpath; omitted or `false` requests remain normal autoregressive generation.
+* `mimo_mtp_depth`: Experimental. Disabled by default (`null`). Requests an MTP draft depth only when `mimo_mtp_fastpath` is `true`; omitted or `null` has no effect.
+* `mimo_mtp_sidecar_path`: Experimental. Disabled by default (`null`). Provides an explicit path to MiMo V2.5 Pro MTP sidecar artifacts only for an opted-in request; omitted or `null` means no sidecar is used.
+* `mimo_mtp_fail_closed`: Experimental. Disabled by default for production/default MTP rollout; the request-field default is `true` so explicitly opted-in MTP requests fail closed instead of silently falling back when the guarded fastpath cannot run.
+
+Runnable documentation validation check:
+
+```bash
+uv run python3 scripts/validate_mimo_mtp_request_docs.py
+```
+
 **Response:**
 OpenAI-compatible chat completion response.
 
