@@ -1,15 +1,18 @@
-"""Pure planning helpers for mirroring rollout seeds into operator ledgers.
+"""Helpers for mirroring rollout seeds into operator ledgers.
 
-This module deliberately returns planned operations only. Callers can inspect,
-review, or execute those operations elsewhere; no files, Beads issues, shell
-commands, or external services are touched here.
+Planning helpers deliberately return planned operations only. Focused sink
+helpers keep persistence boundaries explicit so TODO updates can be tested
+without touching runlog files, Beads issues, shell commands, or external
+services.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Generic, TypeAlias, TypeVar
+from pathlib import Path
+from typing import Generic, Literal, TypeAlias, TypeVar
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +44,10 @@ class BeadsNoteOperation:
 
 
 MirrorOperation: TypeAlias = FileAppendOperation | BeadsNoteOperation
+PersistenceAction: TypeAlias = Literal["created", "updated", "unchanged"]
+RolloutTodoEntryStatus: TypeAlias = Literal["todo", "done", "blocked"]
+RunlogPersistence: TypeAlias = Callable[[FileAppendOperation], object]
+BeadsPersistence: TypeAlias = Callable[[BeadsNoteOperation], object]
 
 PlanT = TypeVar("PlanT")
 FileResultT = TypeVar("FileResultT")
@@ -77,6 +84,28 @@ class RolloutSeedMirrorPlan:
 
     summary: str
     operations: tuple[MirrorOperation, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutTodoChecklistEntry:
+    """Canonical status payload for one rollout TODO checklist entry."""
+
+    acceptance_id: str
+    title: str
+    status: RolloutTodoEntryStatus
+    concepts: tuple[str, ...]
+    evidence: tuple[str, ...]
+    remaining_risk: str
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutTodoPayload:
+    """Canonical rollout payload rendered into the operator TODO ledger."""
+
+    seed_id: str
+    goal: str
+    entries: tuple[RolloutTodoChecklistEntry, ...]
+    slice_5_gate: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +191,34 @@ def _todo_content(
     return "\n".join(lines)
 
 
+def _todo_checkbox(status: RolloutTodoEntryStatus) -> str:
+    if status == "done":
+        return "[x]"
+    if status == "blocked":
+        return "[!]"
+    return "[ ]"
+
+
+def render_rollout_todo_checklist(payload: RolloutTodoPayload) -> str:
+    """Render canonical rollout status into TODO checklist entries."""
+
+    lines = [
+        f"- Seed `{payload.seed_id}`: {_short_goal(payload.goal)}.",
+        f"- Slice 5 gate: {payload.slice_5_gate}",
+    ]
+    for entry in payload.entries:
+        concepts = _concepts_text(entry.concepts)
+        evidence = " | ".join(entry.evidence)
+        lines.append(
+            f"- {_todo_checkbox(entry.status)} "
+            f"{entry.acceptance_id} {entry.title} — "
+            f"concepts={concepts}; "
+            f"evidence={evidence}; "
+            f"remaining_risk={entry.remaining_risk}"
+        )
+    return "\n".join(lines)
+
+
 def _runlog_content(
     seed: RolloutSeed, summaries: tuple[_AcceptanceCriterionSummary, ...]
 ) -> str:
@@ -198,6 +255,95 @@ def _beads_operations(
         )
         for index, summary in enumerate(summaries, start=1)
     )
+
+
+def _markdown_section_pattern(heading: str) -> re.Pattern[str]:
+    return re.compile(rf"(?ms)^## {re.escape(heading)}\n.*?(?=^##\s|\Z)")
+
+
+def _render_markdown_section(operation: FileAppendOperation) -> str:
+    return f"## {operation.heading}\n\n{operation.content.rstrip()}\n"
+
+
+def _upsert_markdown_section(
+    existing_text: str | None, operation: FileAppendOperation
+) -> tuple[str, PersistenceAction]:
+    section_text = _render_markdown_section(operation)
+    if existing_text is None:
+        return section_text, "created"
+
+    pattern = _markdown_section_pattern(operation.heading)
+    match = pattern.search(existing_text)
+    if match is None:
+        separator = (
+            "" if existing_text.endswith("\n\n") or existing_text == "" else "\n"
+        )
+        new_text = (
+            f"{existing_text}{separator}\n{section_text}"
+            if existing_text
+            else section_text
+        )
+        return new_text, "updated"
+
+    if match.group(0).rstrip() == section_text.rstrip():
+        return existing_text, "unchanged"
+
+    return (
+        f"{existing_text[: match.start()]}{section_text}{existing_text[match.end() :]}",
+        "updated",
+    )
+
+
+def sync_rollout_todo_payload(
+    payload: RolloutTodoPayload,
+    *,
+    todo_path: Path,
+    heading: str,
+) -> PersistenceAction:
+    """Synchronize canonical rollout TODO payload into one managed section.
+
+    Existing content outside the managed heading is preserved by the shared
+    markdown section upsert helper. Repeated runs with the same payload return
+    ``unchanged`` and do not duplicate checklist entries.
+    """
+
+    operation = FileAppendOperation(
+        path=str(todo_path),
+        heading=heading,
+        content=render_rollout_todo_checklist(payload),
+    )
+    existing_text = (
+        todo_path.read_text(encoding="utf-8") if todo_path.exists() else None
+    )
+    new_text, action = _upsert_markdown_section(existing_text, operation)
+    if action != "unchanged":
+        todo_path.parent.mkdir(parents=True, exist_ok=True)
+        todo_path.write_text(new_text, encoding="utf-8")
+    return action
+
+
+def persist_todo_mirror(
+    operation: FileAppendOperation,
+    *,
+    persist_runlog: RunlogPersistence | None = None,
+    persist_beads: BeadsPersistence | None = None,
+) -> PersistenceAction:
+    """Create or update one TODO mirror section without touching other sinks.
+
+    The runlog and Beads callables are intentionally unused boundary sentinels:
+    callers/tests may inject failing functions to prove this sink remains TODO-only.
+    """
+
+    _ = persist_runlog, persist_beads
+    todo_path = Path(operation.path)
+    existing_text = (
+        todo_path.read_text(encoding="utf-8") if todo_path.exists() else None
+    )
+    new_text, action = _upsert_markdown_section(existing_text, operation)
+    if action != "unchanged":
+        todo_path.parent.mkdir(parents=True, exist_ok=True)
+        todo_path.write_text(new_text, encoding="utf-8")
+    return action
 
 
 def orchestrate_ac_mirroring_boundary(

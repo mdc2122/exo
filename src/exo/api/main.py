@@ -194,7 +194,12 @@ from exo.shared.types.state import State
 from exo.shared.types.text_generation import TextGenerationTaskParams
 from exo.shared.types.topology import Connection, SocketConnection
 from exo.shared.types.worker.downloads import DownloadCompleted, DownloadProgress
-from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from exo.shared.types.worker.instances import (
+    Instance,
+    InstanceId,
+    InstanceMeta,
+    MlxRingInstance,
+)
 from exo.shared.types.worker.shards import Sharding, TensorShardMetadata
 from exo.utils.banner import print_startup_banner
 from exo.utils.channels import Receiver, Sender, channel
@@ -332,17 +337,25 @@ def _memory_evidence_for_selected_workers(
     return total_required, total_available, evidence
 
 
+def _requested_mimo_mtp_depth(
+    task_params: TextGenerationTaskParams,
+) -> int | None:
+    mimo_mtp_fastpath = task_params.mimo_mtp_fastpath
+    return mimo_mtp_fastpath.depth if mimo_mtp_fastpath is not None else None
+
+
 def _mimo_mtp_unwired_execution_detail(
     task_params: TextGenerationTaskParams,
 ) -> dict[str, object]:
-    mimo_mtp_fastpath = task_params.mimo_mtp_fastpath
-    requested_depth = mimo_mtp_fastpath.depth if mimo_mtp_fastpath is not None else None
+    requested_depth = _requested_mimo_mtp_depth(task_params)
     return {
         "error": "mimo_mtp_execution_backend_unwired",
         "message": (
-            "MiMo MTP fastpath was requested, but no MTP execution backend is "
-            "wired into the exo cluster inference path yet. The request was "
-            "not dispatched as AR because mimo_mtp_fail_closed is true."
+            "MiMo MTP fastpath was requested, but the native exo-cluster MTP "
+            "runtime guard EXO_MIMO_MTP_NATIVE_RUNTIME is disabled by default "
+            "or no MTP execution backend is wired into the exo cluster "
+            "inference path yet. The request was not dispatched as AR because "
+            "mimo_mtp_fail_closed is true."
         ),
         "mtp_enabled": False,
         "accepted_execution_path": "unwired",
@@ -350,17 +363,77 @@ def _mimo_mtp_unwired_execution_detail(
         "mtp_depth": None,
         "mtp_sidecar_status": "not_loaded",
         "mtp_disable_reason": "mimo_mtp_execution_backend_unwired",
+        "mtp_execution_state": "unwired_execution",
     }
+
+
+def _mimo_mtp_backend_incompatible_detail(
+    *, task_params: TextGenerationTaskParams, instance: Instance
+) -> dict[str, object]:
+    backend_source = _backend_source_for_instance(instance)
+    return {
+        "error": "mimo_mtp_backend_incompatible",
+        "message": (
+            "MiMo MTP fastpath was requested, but backend "
+            f"{backend_source} is not compatible with guarded MTP execution. "
+            "The request was rejected before generation dispatch. "
+            "disable_reason=unsupported_backend."
+        ),
+        "mtp_enabled": False,
+        "accepted_execution_path": "rejected",
+        "requested_mtp_depth": _requested_mimo_mtp_depth(task_params),
+        "mtp_depth": None,
+        "mtp_sidecar_status": "not_loaded",
+        "mtp_disable_reason": "unsupported_backend",
+        "mtp_execution_state": "unwired_execution",
+        "backend_source": backend_source,
+        "supported_backends": ["mlx_ring"],
+    }
+
+
+_FALSEY_MIMO_MTP_RUNTIME_GUARD_VALUES = frozenset({"", "0", "false", "off", "no"})
+_MIMO_MTP_WORKER_NATIVE_RUNTIME_ENV = "EXO_MIMO_MTP_NATIVE_RUNTIME"
+
+
+def _mimo_mtp_worker_runtime_guard_enabled() -> bool:
+    raw_value = os.environ.get(_MIMO_MTP_WORKER_NATIVE_RUNTIME_ENV)
+    return (
+        raw_value is not None
+        and raw_value.strip().lower() not in _FALSEY_MIMO_MTP_RUNTIME_GUARD_VALUES
+    )
 
 
 def _guard_unwired_mimo_mtp_request(task_params: TextGenerationTaskParams) -> None:
     mimo_mtp_fastpath = task_params.mimo_mtp_fastpath
-    if mimo_mtp_fastpath is None or not mimo_mtp_fastpath.fail_closed:
+    if mimo_mtp_fastpath is None or _mimo_mtp_worker_runtime_guard_enabled():
+        return
+    if not mimo_mtp_fastpath.fail_closed:
         return
     raise HTTPException(
         status_code=400,
         detail=_mimo_mtp_unwired_execution_detail(task_params),
     )
+
+
+def _guard_mimo_mtp_backend_compatibility(
+    *, state: State, task_params: TextGenerationTaskParams
+) -> None:
+    mimo_mtp_fastpath = task_params.mimo_mtp_fastpath
+    if mimo_mtp_fastpath is None:
+        return
+    for instance in state.instances.values():
+        if instance.shard_assignments.model_id != task_params.model:
+            continue
+        if isinstance(instance, MlxRingInstance):
+            return
+        if not mimo_mtp_fastpath.fail_closed:
+            return
+        raise HTTPException(
+            status_code=400,
+            detail=_mimo_mtp_backend_incompatible_detail(
+                task_params=task_params, instance=instance
+            ),
+        )
 
 
 def _mimo_mtp_unwired_fail_open_response_fields(
@@ -376,7 +449,27 @@ def _mimo_mtp_unwired_fail_open_response_fields(
         "mtp_disable_reason": "mimo_mtp_execution_backend_unwired",
         "mtp_fallback_reason": "fail_open_backend_unwired",
         "requested_mtp_depth": requested_depth,
+        "fallback_count": 1,
     }
+
+
+def _strip_unwired_mimo_mtp_fail_open_intent(
+    task_params: TextGenerationTaskParams,
+) -> TextGenerationTaskParams:
+    mimo_mtp_fastpath = task_params.mimo_mtp_fastpath
+    if (
+        mimo_mtp_fastpath is None
+        or mimo_mtp_fastpath.fail_closed
+        or _mimo_mtp_worker_runtime_guard_enabled()
+    ):
+        return task_params
+    return task_params.model_copy(update={"mimo_mtp_fastpath_params": None})
+
+
+def _backend_source_for_instance(instance: Instance) -> str:
+    if isinstance(instance, MlxRingInstance):
+        return "mlx_ring"
+    return "mlx_jaccl"
 
 
 def _live_execution_path_for_model(
@@ -389,13 +482,80 @@ def _live_execution_path_for_model(
         if not shards:
             continue
         first_shard = shards[0]
+        node_assignments: list[dict[str, object]] = []
+        tensor_parallel_shards: list[dict[str, object]] = []
+        loaded_model_ids: list[str] = []
+        for node_id, runner_id in instance.shard_assignments.node_to_runner.items():
+            shard = instance.shard_assignments.runner_to_shard[runner_id]
+            runner_status = state.runners.get(runner_id)
+            node_assignments.append(
+                {
+                    "node_id": str(node_id),
+                    "runner_id": str(runner_id),
+                    "runner_status": type(runner_status).__name__
+                    if runner_status is not None
+                    else "unknown",
+                }
+            )
+            loaded_model_ids.append(str(shard.model_card.model_id))
+            if isinstance(shard, TensorShardMetadata):
+                tensor_parallel_shards.append(
+                    {
+                        "node_id": str(node_id),
+                        "runner_id": str(runner_id),
+                        "model_id": str(shard.model_card.model_id),
+                        "device_rank": shard.device_rank,
+                        "world_size": shard.world_size,
+                        "start_layer": shard.start_layer,
+                        "end_layer": shard.end_layer,
+                        "n_layers": shard.n_layers,
+                    }
+                )
+
+        live_evidence: dict[str, object] = {
+            "model_path": str(build_model_path(model_id)),
+            "instance_id": str(instance_id),
+            "backend_source": _backend_source_for_instance(instance),
+            "cluster_nodes": node_assignments,
+            "loaded_model_ids": loaded_model_ids,
+            "tensor_parallel_shards": tensor_parallel_shards,
+        }
         if isinstance(first_shard, TensorShardMetadata) and first_shard.world_size > 1:
+            tensor_participant_node_ids = {
+                str(shard_evidence["node_id"])
+                for shard_evidence in tensor_parallel_shards
+            }
+            tensor_device_ranks = {
+                int(shard_evidence["device_rank"])
+                for shard_evidence in tensor_parallel_shards
+                if isinstance(shard_evidence["device_rank"], int)
+            }
+            tensor_shards_match_requested_model = all(
+                shard_evidence["model_id"] == str(model_id)
+                for shard_evidence in tensor_parallel_shards
+            )
+            all_participants_are_tensor_shards = len(tensor_parallel_shards) == len(
+                node_assignments
+            )
+            is_exo_cluster_tensor_parallel = (
+                len(tensor_participant_node_ids) > 1
+                and len(tensor_device_ranks) > 1
+                and tensor_shards_match_requested_model
+                and all_participants_are_tensor_shards
+            )
+            if is_exo_cluster_tensor_parallel:
+                return {
+                    "path": "exo_cluster_tensor_parallel",
+                    "sharding": Sharding.Tensor.value,
+                    "world_size": first_shard.world_size,
+                    **live_evidence,
+                }
             return {
-                "path": "exo_cluster_tensor_parallel",
+                "path": "single_studio_full_model_load",
                 "sharding": Sharding.Tensor.value,
                 "world_size": first_shard.world_size,
-                "model_path": str(build_model_path(model_id)),
-                "instance_id": str(instance_id),
+                "disable_reason": "tensor metadata is not hosted by multiple cluster participants",
+                **live_evidence,
             }
         return {
             "path": "single_studio_full_model_load",
@@ -403,8 +563,7 @@ def _live_execution_path_for_model(
             if isinstance(first_shard, TensorShardMetadata)
             else Sharding.Pipeline.value,
             "world_size": first_shard.world_size,
-            "model_path": str(build_model_path(model_id)),
-            "instance_id": str(instance_id),
+            **live_evidence,
         }
     return None
 
@@ -1032,6 +1191,26 @@ class API:
                 state=self.state,
                 model_id=model,
             ),
+            accepted_execution_path=None
+            if stats is None
+            else stats.accepted_execution_path,
+            mtp_enabled=None if stats is None else stats.mtp_enabled,
+            requested_mtp_depth=None if stats is None else stats.requested_mtp_depth,
+            mtp_depth=None if stats is None else stats.mtp_depth,
+            mtp_sidecar_status=None if stats is None else stats.mtp_sidecar_status,
+            mtp_disable_reason=None if stats is None else stats.mtp_disable_reason,
+            mtp_fallback_reason=None if stats is None else stats.mtp_fallback_reason,
+            attempted_depth_counts=None
+            if stats is None
+            else stats.attempted_depth_counts,
+            accepted_depth_counts=None
+            if stats is None
+            else stats.accepted_depth_counts,
+            acceptance_rate=None if stats is None else stats.acceptance_rate,
+            fallback_count=None if stats is None else stats.fallback_count,
+            timing_breakdown_seconds=None
+            if stats is None
+            else stats.timing_breakdown_seconds,
         )
 
     async def _trigger_notify_user_to_download_model(self, model_id: ModelId) -> None:
@@ -1091,6 +1270,10 @@ class API:
         task_params = task_params.model_copy(update={"model": resolved_model})
 
         _guard_unwired_mimo_mtp_request(task_params)
+        _guard_mimo_mtp_backend_compatibility(
+            state=self.state, task_params=task_params
+        )
+        task_params = _strip_unwired_mimo_mtp_fail_open_intent(task_params)
 
         command = await self._send_text_generation_with_images(task_params)
 
@@ -1132,18 +1315,26 @@ class API:
         task_params = task_params.model_copy(update={"model": resolved_model})
 
         _guard_unwired_mimo_mtp_request(task_params)
+        _guard_mimo_mtp_backend_compatibility(
+            state=self.state, task_params=task_params
+        )
+        requested_task_params = task_params
 
+        task_params = _strip_unwired_mimo_mtp_fail_open_intent(task_params)
         task_params = task_params.model_copy(update={"stream": False, "bench": True})
 
         command = await self._send_text_generation_with_images(task_params)
 
         response = await self._collect_text_generation_with_stats(command.command_id)
         if (
-            task_params.mimo_mtp_fastpath is not None
-            and not task_params.mimo_mtp_fastpath.fail_closed
+            requested_task_params.mimo_mtp_fastpath is not None
+            and not requested_task_params.mimo_mtp_fastpath.fail_closed
+            and not _mimo_mtp_worker_runtime_guard_enabled()
         ):
             return response.model_copy(
-                update=_mimo_mtp_unwired_fail_open_response_fields(task_params)
+                update=_mimo_mtp_unwired_fail_open_response_fields(
+                    requested_task_params
+                )
             )
         return response
 

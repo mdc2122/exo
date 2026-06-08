@@ -25,6 +25,11 @@ from exo.worker.engines.mlx.generator.generate import (
     mlx_generate,
     warmup_inference,
 )
+from exo.worker.engines.mlx.mimo_mtp_fast.worker_fastpath import (
+    MimoMtpWorkerFastpathCache,
+    MimoMtpWorkerFastpathDecision,
+    evaluate_mimo_mtp_worker_fastpath,
+)
 from exo.worker.engines.mlx.utils_mlx import (
     apply_chat_template,
     mx_all_gather_tasks,
@@ -120,6 +125,45 @@ def _check_for_debug_prompts(task_params: TextGenerationTaskParams) -> None:
         time.sleep(100)
 
 
+def _strip_mimo_mtp_fastpath_intent(
+    task_params: TextGenerationTaskParams,
+) -> TextGenerationTaskParams:
+    return task_params.model_copy(update={"mimo_mtp_fastpath": None})
+
+
+def _log_mimo_mtp_worker_decision(
+    *,
+    task_id: TaskId,
+    decision: MimoMtpWorkerFastpathDecision,
+) -> None:
+    if decision.disable_reason is None and decision.accepted_execution_path == "ar":
+        return
+    logger.info(
+        "mimo mtp worker decision: task_id={} accepted_execution_path={} "
+        "mtp_enabled={} requested_depth={} mtp_depth={} sidecar_status={} "
+        "disable_reason={} fallback_reason={}",
+        task_id,
+        decision.accepted_execution_path,
+        decision.mtp_enabled,
+        decision.requested_depth,
+        decision.mtp_depth,
+        decision.sidecar_status,
+        decision.disable_reason,
+        decision.fallback_reason,
+    )
+
+
+def _error_response_for_mimo_mtp_rejection(
+    decision: MimoMtpWorkerFastpathDecision,
+) -> GenerationResponse:
+    return GenerationResponse(
+        text=decision.error_message or "MiMo MTP fastpath rejected before execution",
+        token=0,
+        finish_reason="error",
+        usage=None,
+    )
+
+
 @dataclass(eq=False)
 class SequentialGenerator(InferenceGenerator):
     model: Model
@@ -139,6 +183,9 @@ class SequentialGenerator(InferenceGenerator):
     _maybe_cancel: list[TextGeneration] = field(default_factory=list, init=False)
     _all_tasks: dict[TaskId, TextGeneration] = field(default_factory=dict, init=False)
     _queue: deque[TextGeneration] = field(default_factory=deque, init=False)
+    _mimo_mtp_fastpath_cache: MimoMtpWorkerFastpathCache = field(
+        default_factory=MimoMtpWorkerFastpathCache, init=False
+    )
     _active: (
         tuple[
             TextGeneration,
@@ -283,7 +330,50 @@ class SequentialGenerator(InferenceGenerator):
 
     def _build_generator(self, task: TextGeneration) -> Generator[GenerationResponse]:
         _check_for_debug_prompts(task.task_params)
-        prompt = apply_chat_template(self.tokenizer, task.task_params)
+        generation_task_params = task.task_params
+        mtp_params = generation_task_params.mimo_mtp_fastpath
+        if mtp_params is not None and mtp_params.enabled:
+            decision = evaluate_mimo_mtp_worker_fastpath(
+                generation_task_params,
+                cache=self._mimo_mtp_fastpath_cache,
+            )
+            _log_mimo_mtp_worker_decision(task_id=task.task_id, decision=decision)
+            if decision.accepted_execution_path == "rejected":
+                yield _error_response_for_mimo_mtp_rejection(decision)
+                return
+            if decision.should_use_mtp:
+                yield _error_response_for_mimo_mtp_rejection(
+                    MimoMtpWorkerFastpathDecision(
+                        should_use_mtp=False,
+                        accepted_execution_path="rejected",
+                        mtp_enabled=False,
+                        requested_depth=decision.requested_depth,
+                        mtp_depth=None,
+                        sidecar_status=decision.sidecar_status,
+                        disable_reason="mimo_mtp_distributed_generator_unwired",
+                        reject_reason="mimo_mtp_distributed_generator_unwired",
+                        fallback_reason=None,
+                        error_message=(
+                            "MiMo MTP fastpath rejected before execution: native sidecar "
+                            "loaded but distributed generator seam is not wired; "
+                            "disable_reason=mimo_mtp_distributed_generator_unwired"
+                        ),
+                        telemetry={
+                            "accepted_execution_path": "rejected",
+                            "mtp_enabled": False,
+                            "requested_mtp_depth": decision.requested_depth,
+                            "mtp_sidecar_status": decision.sidecar_status,
+                            "mtp_disable_reason": "mimo_mtp_distributed_generator_unwired",
+                            "mtp_reject_reason": "mimo_mtp_distributed_generator_unwired",
+                        },
+                    )
+                )
+                return
+            if decision.disable_reason is not None:
+                generation_task_params = _strip_mimo_mtp_fastpath_intent(
+                    generation_task_params
+                )
+        prompt = apply_chat_template(self.tokenizer, generation_task_params)
 
         def on_prefill_progress(processed: int, total: int) -> None:
             if self.device_rank == 0:
@@ -319,10 +409,10 @@ class SequentialGenerator(InferenceGenerator):
 
                 self.agree_on_tasks()
 
-        return mlx_generate(
+        yield from mlx_generate(
             model=self.model,
             tokenizer=self.tokenizer,
-            task=task.task_params,
+            task=generation_task_params,
             prompt=prompt,
             kv_prefix_cache=self.kv_prefix_cache,
             on_prefill_progress=on_prefill_progress,
@@ -355,6 +445,9 @@ class BatchGenerator(InferenceGenerator):
     _maybe_cancel: list[TextGeneration] = field(default_factory=list, init=False)
     _all_tasks: dict[TaskId, TextGeneration] = field(default_factory=dict, init=False)
     _queue: deque[TextGeneration] = field(default_factory=deque, init=False)
+    _mimo_mtp_fastpath_cache: MimoMtpWorkerFastpathCache = field(
+        default_factory=MimoMtpWorkerFastpathCache, init=False
+    )
     _mlx_gen: ExoBatchGenerator = field(init=False)
     _active_tasks: dict[
         int,
@@ -522,13 +615,36 @@ class BatchGenerator(InferenceGenerator):
 
     def _start_task(self, task: TextGeneration) -> int:
         _check_for_debug_prompts(task.task_params)
+        generation_task_params = task.task_params
+        mtp_params = generation_task_params.mimo_mtp_fastpath
+        if mtp_params is not None and mtp_params.enabled:
+            decision = evaluate_mimo_mtp_worker_fastpath(
+                generation_task_params,
+                cache=self._mimo_mtp_fastpath_cache,
+            )
+            _log_mimo_mtp_worker_decision(task_id=task.task_id, decision=decision)
+            if (
+                decision.accepted_execution_path == "rejected"
+                or decision.should_use_mtp
+            ):
+                reason = decision.disable_reason
+                if decision.should_use_mtp:
+                    reason = "mimo_mtp_batch_generator_unwired"
+                raise RuntimeError(
+                    "MiMo MTP fastpath rejected before batch AR dispatch: "
+                    f"disable_reason={reason}"
+                )
+            if decision.disable_reason is not None:
+                generation_task_params = _strip_mimo_mtp_fastpath_intent(
+                    generation_task_params
+                )
         logger.info(
             "runner batch _start_task begin: task_id={} image_count={} total_input_chunks={}",
             task.task_id,
-            task.task_params.image_count,
-            task.task_params.total_input_chunks,
+            generation_task_params.image_count,
+            generation_task_params.total_input_chunks,
         )
-        prompt = apply_chat_template(self.tokenizer, task.task_params)
+        prompt = apply_chat_template(self.tokenizer, generation_task_params)
         logger.info(
             "runner batch _start_task prompt ready: task_id={} prompt_len={}",
             task.task_id,
@@ -573,7 +689,7 @@ class BatchGenerator(InferenceGenerator):
             "runner batch _start_task calling mlx submit: task_id={}", task.task_id
         )
         uid = self._mlx_gen.submit(
-            task_params=task.task_params,
+            task_params=generation_task_params,
             prompt=prompt,
             on_prefill_progress=on_prefill_progress,
             distributed_prompt_progress_callback=distributed_prompt_progress_callback,

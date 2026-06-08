@@ -1,9 +1,19 @@
 import time
-from collections.abc import Generator
-from typing import Annotated, Any, Literal, get_args
+from collections.abc import Generator, Mapping
+from typing import Annotated, Any, Literal, cast, get_args
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializationInfo,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_serializer,
+)
 
 from exo.shared.models.model_cards import ModelCard, ModelId
 from exo.shared.types.common import CommandId, NodeId
@@ -12,6 +22,13 @@ from exo.shared.types.text_generation import ReasoningEffort
 from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from exo.shared.types.worker.shards import Sharding, ShardMetadata
 from exo.utils.pydantic_ext import CamelCaseModel
+
+MIMO_MTP_REQUEST_EXTENSION_FIELDS: tuple[str, ...] = (
+    "mimo_mtp_fastpath",
+    "mimo_mtp_depth",
+    "mimo_mtp_sidecar_path",
+    "mimo_mtp_fail_closed",
+)
 
 FinishReason = Literal[
     "stop", "length", "tool_calls", "content_filter", "function_call", "error"
@@ -185,12 +202,27 @@ class ChatCompletionResponse(BaseModel):
     service_tier: str | None = None
 
 
+type MimoMtpDepthCounts = dict[str, int]
+type MimoMtpTimingBreakdown = dict[str, float]
+
 class GenerationStats(BaseModel):
     prompt_tps: float
     generation_tps: float
     prompt_tokens: int
     generation_tokens: int
     peak_memory_usage: Memory
+    accepted_execution_path: str | None = None
+    mtp_enabled: bool | None = None
+    requested_mtp_depth: int | None = None
+    mtp_depth: int | None = None
+    mtp_sidecar_status: str | None = None
+    mtp_disable_reason: str | None = None
+    mtp_fallback_reason: str | None = None
+    attempted_depth_counts: MimoMtpDepthCounts | None = None
+    accepted_depth_counts: MimoMtpDepthCounts | None = None
+    acceptance_rate: float | None = None
+    fallback_count: int | None = None
+    timing_breakdown_seconds: MimoMtpTimingBreakdown | None = None
 
 
 class ImageGenerationStats(BaseModel):
@@ -230,6 +262,11 @@ class BenchChatCompletionResponse(ChatCompletionResponse):
     mtp_disable_reason: str | None = None
     mtp_fallback_reason: str | None = None
     requested_mtp_depth: int | None = None
+    attempted_depth_counts: MimoMtpDepthCounts | None = None
+    accepted_depth_counts: MimoMtpDepthCounts | None = None
+    acceptance_rate: float | None = None
+    fallback_count: int | None = None
+    timing_breakdown_seconds: MimoMtpTimingBreakdown | None = None
 
 
 class StreamOptions(BaseModel):
@@ -308,6 +345,20 @@ class ChatCompletionRequest(BaseModel):
         ),
         json_schema_extra={"x-exo-extension": True},
     )
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_omitted_mtp_extensions(
+        self,
+        handler: SerializerFunctionWrapHandler,
+        _info: SerializationInfo,
+    ) -> dict[str, Any]:
+        raw_serialized = cast(object, handler(self))
+        assert isinstance(raw_serialized, dict)
+        serialized: dict[str, Any] = dict(cast(Mapping[str, Any], raw_serialized))
+        for field_name in MIMO_MTP_REQUEST_EXTENSION_FIELDS:
+            if field_name not in self.model_fields_set:
+                serialized.pop(field_name, None)
+        return serialized
 
 
 class BenchChatCompletionRequest(ChatCompletionRequest):

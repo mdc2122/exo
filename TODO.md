@@ -63,3 +63,32 @@
 - Verification after stabilization: focused pytest 146 passed; ruff check passed; ruff format check passed; basedpyright 0 errors; git diff --check clean; matrix command smoke emitted 8 rows; fixture budget analyzer returned same_cluster_budget_ready / at_least_30_tok_s.
 - No live same-cluster AR-vs-MTP rows were collected; no >=30 or >=40 tok/s claim is made; Slice 5 production/default integration remains blocked.
 - Next: run matrix commands against a running exo tensor-parallel cluster and then wire the distributed MTP execution backend so guarded MTP rows can be measured honestly.
+
+## MiMo MTP AC-P9 strict Slice 5 gate — 2026-06-07
+
+- Default generation remains AR. MiMo MTP remains opt-in behind the explicit experimental guarded request/runtime path and is not production/default enabled.
+- Slice 5 status: **blocked**, not eligible. This worktree has no live same-cluster AR-vs-guarded-MTP evidence rows, so no >=30 tok/s, >=40 tok/s, MTP speedup, or production/default enablement claim is made.
+- Slice 5 can become eligible for guarded production integration review only after same-cluster rows show guarded MTP median tok/s beats AR and either reaches a meaningful margin (minimum 1.10x / 10%; 10-15% is the review band) or reaches the explicit >=30 tok/s target; 40+ tok/s is preferred.
+- Slice 5 remains blocked even with high throughput if telemetry reports fallback/correctness concern such as `fallback_too_high`; live MTP rows must be accepted as `mimo_mtp_fastpath` rather than AR fallback.
+
+## MiMo MTP optimized rollout AC-P10 closeout - 2026-06-07
+
+- AC-P0 through AC-P10 are recorded as complete for the guarded optimized rollout vertical slice, with AC-P10 closeout evidence in `.goose-ultrawork/evidence/ac-p10-verification-closeout.md`.
+- Fresh focused verification for touched rollout surfaces: pytest `225 passed in 4.28s`; ruff check `All checks passed!`; ruff format check initially found `scripts/test_git_cleanliness.py`, then after formatting reported `41 files already formatted`; basedpyright `0 errors, 0 warnings, 0 notes`; `git diff --check` clean.
+- Beads status: no live Beads rows were mutated; Beads mirroring remains explicitly opt-in via `uv run python3 scripts/mirror_rollout_seed_to_beads.py .goose-ultrawork/seed.yaml --enable-beads-mirror`.
+- Gate status remains blocked: no live same-cluster AR-vs-guarded-MTP rows exist, no >=30 tok/s or >=40 tok/s claim is made, no MTP speedup claim is made, and production/default MTP remains disabled.
+- Next: run `.goose-ultrawork/evidence/ac-p7-benchmark-matrix-commands.jsonl` against a healthy exo cluster API with the official MiMo MTP sidecar, then classify rows with the budget and bottleneck scripts before any Slice 5 review.
+
+- AC-P10 final post-format pytest rerun: after formatting `scripts/test_git_cleanliness.py`, the same focused touched-surface pytest suite reported `225 passed in 4.23s`.
+
+## MiMo MTP optimized rollout AC-P10 final verification refresh - 2026-06-07
+
+- AC-P0 through AC-P10 remain recorded/evidenced for the guarded optimized rollout vertical slice.
+- Fresh final verification evidence prefix: `.goose-ultrawork/evidence/ac-p10-final-20260607T080246Z-*`.
+- Focused touched-surface pytest: `317 passed in 5.18s`.
+- Ruff check: `All checks passed!`; ruff format check: `49 files already formatted`; basedpyright: `0 errors, 0 warnings, 0 notes`; `git diff --check`: clean.
+- Matrix command generation, budget fixture, and bottleneck classifier fixture completed with exit 0.
+- Live cluster rows remain blocked: localhost exo API returned connection refused, with rerun command recorded in `.goose-ultrawork/evidence/ac-p10-final-20260607T080246Z-cluster-probe.log`.
+- Beads status: no live Beads rows were mutated; guarded mirror remains opt-in via `uv run python3 scripts/mirror_rollout_seed_to_beads.py .goose-ultrawork/seed.yaml --enable-beads-mirror`.
+- Gate status remains blocked: no live same-cluster AR-vs-guarded-MTP rows, no >=30 tok/s or >=40 tok/s claim, no MTP speedup claim, and no production/default MTP enablement.
+- Next: run `.goose-ultrawork/evidence/ac-p7-benchmark-matrix-commands.jsonl` or regenerate the matrix against a healthy exo tensor-parallel cluster API with the official MiMo MTP sidecar, then classify rows before any Slice 5 review.

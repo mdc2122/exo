@@ -43,9 +43,10 @@ from exo.shared.types.chunks import (
 from exo.shared.types.common import CommandId
 from exo.shared.types.text_generation import (
     InputMessage,
-    MimoMtpFastpathParams,
+    MimoMtpRequestFields,
     TextGenerationTaskParams,
     VideoSource,
+    map_request_mtp_fields_to_fastpath_params,
     resolve_reasoning_params,
 )
 from exo.shared.types.video_errors import (
@@ -77,6 +78,7 @@ from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract import (
 )
 
 DEFAULT_MAX_VIDEO_PAYLOAD_BYTES = 100 * 1024 * 1024
+SUPPORTED_MIMO_MTP_REQUEST_DEPTHS: frozenset[int] = frozenset({1, 2, 3})
 _MISSING_VIDEO_URL_FIELD = object()
 _DATA_VIDEO_MP4_BASE64_RE = re.compile(
     r"\Adata:video/mp4;base64,(?P<payload>.*)\Z",
@@ -765,6 +767,83 @@ def _is_mimo_v25_pro_request(request: ChatCompletionRequest) -> bool:
     return request.model in MIMO_V25_PRO_MODEL_IDS
 
 
+def _mimo_mtp_non_mimo_disable_detail(
+    request: ChatCompletionRequest,
+) -> dict[str, object]:
+    detail: dict[str, object] = {
+        "error": "mimo_mtp_model_ineligible",
+        "message": (
+            "MiMo MTP fastpath is only supported for MiMo V2.5 Pro models; "
+            f"model {request.model} is not eligible. Disable mimo_mtp_fastpath "
+            "or use a MiMo V2.5 Pro model."
+        ),
+        "mtp_enabled": False,
+        "accepted_execution_path": "rejected",
+        "requested_mtp_depth": request.mimo_mtp_depth,
+        "mtp_depth": None,
+        "mtp_sidecar_status": "not_loaded",
+        "mtp_disable_reason": "non_mimo_model",
+    }
+    if request.mimo_mtp_fail_closed:
+        detail.update(
+            {
+                "mtp_disable_reason": "unsupported_model",
+                "mtp_execution_state": "unsupported_model",
+                "mimo_mtp_fail_closed": True,
+            }
+        )
+    return detail
+
+
+def _mimo_mtp_unsupported_depth_disable_detail(
+    *, request: ChatCompletionRequest, supported_depths: list[int], message: str
+) -> dict[str, object]:
+    return {
+        "error": "mimo_mtp_depth_unsupported",
+        "message": message,
+        "mtp_enabled": False,
+        "accepted_execution_path": "rejected",
+        "requested_mtp_depth": request.mimo_mtp_depth,
+        "mtp_depth": None,
+        "supported_mtp_depths": supported_depths,
+        "mtp_sidecar_status": "not_loaded",
+        "mtp_disable_reason": "unsupported_depth",
+        "mtp_execution_state": "unsupported_depth",
+    }
+
+
+def _mimo_mtp_missing_sidecar_disable_detail(
+    *, request: ChatCompletionRequest, message: str
+) -> dict[str, object]:
+    return {
+        "error": "mimo_mtp_sidecar_missing",
+        "message": message,
+        "mtp_enabled": False,
+        "accepted_execution_path": "rejected",
+        "requested_mtp_depth": request.mimo_mtp_depth,
+        "mtp_depth": None,
+        "mtp_sidecar_status": "missing",
+        "mtp_disable_reason": "missing_sidecar",
+        "mtp_execution_state": "missing_sidecar",
+    }
+
+
+def _mimo_mtp_invalid_sidecar_disable_detail(
+    *, request: ChatCompletionRequest, message: str
+) -> dict[str, object]:
+    return {
+        "error": "mimo_mtp_sidecar_invalid",
+        "message": message,
+        "mtp_enabled": False,
+        "accepted_execution_path": "rejected",
+        "requested_mtp_depth": request.mimo_mtp_depth,
+        "mtp_depth": None,
+        "mtp_sidecar_status": "invalid",
+        "mtp_disable_reason": "invalid_sidecar",
+        "mtp_execution_state": "invalid_sidecar",
+    }
+
+
 def _mapping_media_marker(content_part: Mapping[object, object]) -> str | None:
     raw_type = content_part.get("type")
     normalized_type = raw_type.lower() if isinstance(raw_type, str) else ""
@@ -817,10 +896,24 @@ def validate_mimo_mtp_fastpath_eligibility(request: ChatCompletionRequest) -> No
     if not _is_mimo_v25_pro_request(request):
         raise HTTPException(
             status_code=400,
-            detail=(
-                "MiMo MTP fastpath is only supported for MiMo V2.5 Pro models; "
-                f"model {request.model} is not eligible. "
-                "Disable mimo_mtp_fastpath or use a MiMo V2.5 Pro model."
+            detail=_mimo_mtp_non_mimo_disable_detail(request),
+        )
+
+    if request.mimo_mtp_depth not in SUPPORTED_MIMO_MTP_REQUEST_DEPTHS:
+        supported_depths = sorted(SUPPORTED_MIMO_MTP_REQUEST_DEPTHS)
+        supported_depths_text = ",".join(str(depth) for depth in supported_depths)
+        message = (
+            "MiMo MTP fastpath is disabled: unsupported MTP depth "
+            f"{request.mimo_mtp_depth}. supported_depths={supported_depths_text}. "
+            "disable_reason=unsupported_depth. Use a supported "
+            "mimo_mtp_depth or disable mimo_mtp_fastpath."
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=_mimo_mtp_unsupported_depth_disable_detail(
+                request=request,
+                supported_depths=supported_depths,
+                message=message,
             ),
         )
 
@@ -828,24 +921,43 @@ def validate_mimo_mtp_fastpath_eligibility(request: ChatCompletionRequest) -> No
         return
 
     if request.mimo_mtp_sidecar_path is None:
+        message = (
+            "MiMo MTP fastpath is disabled: required sidecar path was not "
+            "provided. disable_reason=missing_sidecar. Provide a valid "
+            "model_mtp.safetensors sidecar or disable mimo_mtp_fastpath."
+        )
         raise HTTPException(
             status_code=400,
-            detail=(
-                "MiMo MTP fastpath is disabled: required sidecar path was not "
-                "provided. disable_reason=missing_sidecar. Provide a valid "
-                "model_mtp.safetensors sidecar or disable mimo_mtp_fastpath."
+            detail=_mimo_mtp_missing_sidecar_disable_detail(
+                request=request, message=message
             ),
         )
 
     sidecar_probe = probe_mimo_mtp_sidecar(request.mimo_mtp_sidecar_path)
     if sidecar_probe.status == "missing":
+        message = (
+            "MiMo MTP fastpath is disabled: required sidecar is missing at "
+            f"{sidecar_probe.path}. disable_reason=missing_sidecar. "
+            "Provide a valid model_mtp.safetensors sidecar or disable "
+            "mimo_mtp_fastpath."
+        )
         raise HTTPException(
             status_code=400,
-            detail=(
-                "MiMo MTP fastpath is disabled: required sidecar is missing at "
-                f"{sidecar_probe.path}. disable_reason=missing_sidecar. "
-                "Provide a valid model_mtp.safetensors sidecar or disable "
-                "mimo_mtp_fastpath."
+            detail=_mimo_mtp_missing_sidecar_disable_detail(
+                request=request, message=message
+            ),
+        )
+    if sidecar_probe.status == "invalid":
+        message = (
+            "MiMo MTP fastpath is disabled: sidecar is invalid at "
+            f"{sidecar_probe.path}. disable_reason=invalid_sidecar. "
+            "Provide a valid model_mtp.safetensors sidecar or disable "
+            "mimo_mtp_fastpath."
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=_mimo_mtp_invalid_sidecar_disable_detail(
+                request=request, message=message
             ),
         )
 
@@ -1053,18 +1165,16 @@ async def chat_request_to_text_generation(
     resolved_effort, resolved_thinking = resolve_reasoning_params(
         request.reasoning_effort, request.enable_thinking
     )
-    mimo_mtp_fastpath = (
-        MimoMtpFastpathParams(
-            enabled=True,
-            depth=request.mimo_mtp_depth,
-            sidecar_path=request.mimo_mtp_sidecar_path,
-            fail_closed=request.mimo_mtp_fail_closed,
-        )
-        if request.mimo_mtp_fastpath
-        else None
+    mimo_mtp_fastpath_params = map_request_mtp_fields_to_fastpath_params(
+        MimoMtpRequestFields(
+            mimo_mtp_fastpath=request.mimo_mtp_fastpath,
+            mimo_mtp_depth=request.mimo_mtp_depth,
+            mimo_mtp_sidecar_path=request.mimo_mtp_sidecar_path,
+            mimo_mtp_fail_closed=request.mimo_mtp_fail_closed,
+        ),
     )
 
-    return TextGenerationTaskParams(
+    task_params = TextGenerationTaskParams(
         model=request.model,
         input=input_messages
         if input_messages
@@ -1092,7 +1202,11 @@ async def chat_request_to_text_generation(
         videos=videos,
         video_sources=video_sources,
         video_urls=video_urls,
-        mimo_mtp_fastpath=mimo_mtp_fastpath,
+    )
+    if mimo_mtp_fastpath_params is None:
+        return task_params
+    return task_params.model_copy(
+        update={"mimo_mtp_fastpath_params": mimo_mtp_fastpath_params}
     )
 
 

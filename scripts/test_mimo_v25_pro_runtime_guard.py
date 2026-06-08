@@ -4,6 +4,7 @@ from typing import cast
 import pytest
 
 from scripts import mimo_v25_pro_runtime_guard as guard
+from scripts.mimo_mtp_commit_detection import EXPECTED_LATEST_MIMO_MTP_COMMITS
 
 
 def _bytes(gib: int) -> dict[str, int]:
@@ -141,10 +142,28 @@ def test_clean_state_is_safe() -> None:
     assert verdict.reasons == []
 
 
-def test_required_mimo_mtp_commits_are_safe_when_history_contains_all() -> None:
-    history = [commit.sha for commit in guard.REQUIRED_MIMO_MTP_COMMITS]
+def test_runtime_guard_required_mimo_mtp_commits_match_latest_commit_detector() -> None:
+    expected_required_commits = tuple(
+        guard.RequiredGitCommit(sha=commit.sha, description=commit.description)
+        for commit in EXPECTED_LATEST_MIMO_MTP_COMMITS
+    )
 
-    verdict = guard.validate_required_mimo_mtp_commits(history)
+    assert expected_required_commits == guard.REQUIRED_MIMO_MTP_COMMITS
+
+
+@pytest.mark.parametrize(
+    "required_commit",
+    guard.REQUIRED_MIMO_MTP_COMMITS,
+)
+def test_required_mimo_mtp_commits_are_safe_when_history_contains_required_commit(
+    required_commit: guard.RequiredGitCommit,
+) -> None:
+    history = [required_commit.sha]
+
+    verdict = guard.validate_required_mimo_mtp_commits(
+        history,
+        required_commits=(required_commit,),
+    )
 
     assert verdict.safe is True
     assert verdict.reasons == []
@@ -159,6 +178,20 @@ def test_required_mimo_mtp_commits_reports_missing_commit() -> None:
     assert verdict.safe is False
     assert required_commits[1].sha[:12] in verdict.reasons[0]
     assert required_commits[1].description in verdict.reasons[0]
+
+
+def test_required_mimo_mtp_commits_reports_missing_latest_commit() -> None:
+    required_commits = guard.REQUIRED_MIMO_MTP_COMMITS
+    latest_required_commit = required_commits[-1]
+    history = [commit.sha for commit in required_commits[:-1]]
+
+    verdict = guard.validate_required_mimo_mtp_commits(history)
+
+    assert verdict.safe is False
+    assert verdict.reasons == [
+        "missing required MiMo MTP commit "
+        f"{latest_required_commit.sha[:12]} ({latest_required_commit.description})"
+    ]
 
 
 def test_main_fail_closes_on_malformed_state_json(

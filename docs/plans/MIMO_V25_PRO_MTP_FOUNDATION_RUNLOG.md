@@ -242,6 +242,33 @@ Current implication:
 - MTP distributed rows still require a guarded cluster request path or worker integration flag before they can be honestly collected through the cluster.
 - Slice 5 production/default enablement remains blocked until same-cluster AR and guarded-MTP rows show a real MTP speed win.
 
+## 2026-06-07 Sub-AC 4 Exact Cluster AR Baseline Commands
+
+The canonical live MiMo V2.5 Pro benchmark harness path is the exo cluster API
+endpoint `/bench/chat/completions`, driven by `scripts/bench_mimo_mtp_cluster.py`.
+The benchmark process must not materialize the full model locally; it posts to an
+already-running tensor-parallel exo API.
+
+Run these exact AR baseline commands before making any MTP speedup, >=30 tok/s,
+>=40 tok/s, or Slice 5 eligibility claim. These commands intentionally use
+`--mode-label ar`, include `--list-models`, and provide no `--payload-extra-json`,
+so default generation remains AR and `mtp_enabled=false` in the resulting rows.
+
+```bash
+uv run python3 scripts/bench_mimo_mtp_cluster.py --api-base http://127.0.0.1:52415 --model-id kernelpool/MiMo-V2.5-Pro-6bit --max-tokens 16 --repeats 1 --mode-label ar --list-models
+```
+
+```bash
+uv run python3 scripts/bench_mimo_mtp_cluster.py --api-base http://127.0.0.1:52415 --model-id kernelpool/MiMo-V2.5-Pro-6bit --max-tokens 64 --repeats 1 --mode-label ar --list-models
+```
+
+Guarded MTP opt-in is separate and must be explicit. A row may not be treated as
+successful MTP unless the request includes guarded experimental fields such as
+`mimo_mtp_fastpath=true`, `mimo_mtp_fail_closed=true`, a matching
+`mimo_mtp_depth`, and the execution telemetry proves the `mimo_mtp_fastpath`
+path was attempted/accepted. AR behavior with MTP-shaped fields must be labeled
+as disabled, fail-closed, or fail-open fallback rather than successful MTP.
+
 ## 2026-06-06 Optimized Rollout Ultrawork Seed
 
 Created or refreshed `.goose-ultrawork/seed.yaml` as the source of truth for a performance-first MiMo MTP rollout AC tree.
@@ -294,3 +321,141 @@ Verification after stabilization:
 - Budget analyzer fixture smoke returned same_cluster_budget_ready and at_least_30_tok_s for fixture data.
 
 Gate status remains unchanged: no live same-cluster AR-vs-MTP rows were collected, no >=30 tok/s or >=40 tok/s claim is made, and Slice 5 production/default integration remains blocked.
+
+### 2026-06-06T22:51:00 Sub-AC 3 runlog_mirror_sink
+
+- Summary: Implemented append-only runlog bookkeeping sink for benchmark/rollout AC evidence without TODO or Beads parameters.
+- Evidence:
+  - files changed: scripts/mirror_mimo_mtp_rollout_seed.py, scripts/test_mirror_mimo_mtp_rollout_seed.py
+  - RED: uv run pytest scripts/test_mirror_mimo_mtp_rollout_seed.py::test_append_runlog_bookkeeping_record_appends_without_rewriting_existing_runlog scripts/test_mirror_mimo_mtp_rollout_seed.py::test_append_runlog_bookkeeping_record_does_not_touch_todo_or_beads -q -> 2 failed with missing append_runlog_bookkeeping_record
+  - GREEN: same targeted pytest -> 2 passed in 0.01s
+  - Fresh scoped verification: targeted/full mirror seed tests + rollout_seed_mirroring tests -> 12 passed in 0.02s; ruff check passed; ruff format --check already formatted; basedpyright 0 errors; git diff --check passed
+  - benchmark rows: not applicable; this Sub-AC is bookkeeping sink plumbing and does not claim tok/s, MTP speedup, or Slice 5 eligibility
+- Remaining risk: Adjacent Beads CLI guard tests in scripts/test_mirror_rollout_seed_to_beads.py remain outside this runlog-sink slice; Slice 5 remains blocked until same-cluster AR-vs-MTP evidence proves a real speed win.
+
+## 2026-06-07 AC-P9 Strict Slice 5 Gate
+
+AC-P9 tightened the Slice 5 budget gate without enabling MTP by default.
+Default exo generation remains AR; guarded MiMo MTP remains an explicit
+experimental request/runtime path only.
+
+Slice 5 status is **blocked** in this worktree. No live same-cluster AR-vs-guarded-MTP
+benchmark rows were collected, and no >=30 tok/s, >=40 tok/s, MTP speedup, or
+production/default integration claim is made.
+
+The calculator now reports Slice 5 review eligibility separately from raw speedup
+claims. Guarded production integration review is allowed only when all of these
+are true:
+
+1. same-cluster AR and live guarded MTP rows are present,
+2. guarded MTP median tok/s beats AR and either reaches at least 1.10x (10%; 10-15% is the review band) or reaches the explicit >=30 tok/s target,
+3. 40+ tok/s remains the preferred target,
+4. no correctness/fallback concern is present; rows with `fallback_too_high` keep Slice 5 blocked.
+
+Focused AC-P9 tests cover small-speedup blocking and fallback-concern blocking.
+The existing default AR behavior was not changed.
+
+## 2026-06-07 AC-P10 Verification and Closeout
+
+AC-P10 closed the optimized MiMo V2.5 Pro MTP rollout slice with fresh focused
+verification across the touched scripts/API/shared/worker surfaces and local
+bookkeeping artifacts.
+
+Closeout artifacts updated:
+
+- `.goose-ultrawork/evidence/ac-p10-verification-closeout.md`
+- `.goose-ultrawork/reports/final_stabilization.md`
+- `.goose-ultrawork/evidence/sub-ac-4-beads-mirror-sink.md`
+- `TODO.md`
+- this runlog
+
+Verification evidence:
+
+- Focused pytest across touched rollout surfaces: `225 passed in 4.28s`.
+- Ruff check over touched code/test surfaces: `All checks passed!`.
+- Ruff format check initially reported `Would reformat: scripts/test_git_cleanliness.py`; after `uv run ruff format scripts/test_git_cleanliness.py`, rerun reported `41 files already formatted`.
+- Basedpyright over touched code/test surfaces: `0 errors, 0 warnings, 0 notes`.
+- `git diff --check`: clean / no output.
+
+AC status summary:
+
+- AC-P0 through AC-P10 have local evidence artifacts and are complete for the guarded rollout slice.
+- Live same-cluster benchmark collection remains blocked by the lack of an available cluster API in this execution environment.
+- Slice 5 remains blocked. No live same-cluster AR-vs-guarded-MTP rows exist, no >=30 tok/s or >=40 tok/s claim is made, no MTP speedup claim is made, and MTP is not enabled as production/default generation.
+
+Beads status:
+
+- No live Beads rows were mutated during AC-P10.
+- Beads mirroring remains explicitly opt-in through `uv run python3 scripts/mirror_rollout_seed_to_beads.py .goose-ultrawork/seed.yaml --enable-beads-mirror`.
+- The Beads-facing closeout status is recorded in `.goose-ultrawork/evidence/sub-ac-4-beads-mirror-sink.md` for guarded mirroring.
+
+Next best step: run the matrix commands from `.goose-ultrawork/evidence/ac-p7-benchmark-matrix-commands.jsonl` against a healthy exo tensor-parallel cluster API with the official MiMo MTP sidecar, then analyze the same-cluster rows with the budget and bottleneck scripts before any Slice 5 production/default review.
+
+AC-P10 final post-format pytest rerun: after `scripts/test_git_cleanliness.py`
+was formatted, the same focused touched-surface pytest command was rerun and
+reported `225 passed in 4.23s`.
+
+### MiMo MTP rollout tracking: sub-ac-3-runlog-artifact-synchronization
+
+- Last updated: 2026-06-07T01:51:00Z
+- Acceptance criterion: Sub-AC 3
+- Summary: Implemented canonical-payload runlog artifact synchronization with append/update semantics, timestamped gate status, and bottleneck-analysis fields while preserving prior runlog history.
+- Benchmark rows:
+  - same_cluster_ar_rows: 0
+  - same_cluster_mtp_rows: 0
+  - live_rows_status: not_collected_for_runlog_sync_only
+- Gate status:
+  - default_generation: ar
+  - slice_5_gate: blocked_missing_same_cluster_ar_vs_mtp_evidence
+  - speedup_claim_allowed: False
+- Bottleneck analysis:
+  - recommendation_status: bookkeeping_sync_verified_no_live_bottleneck_claim
+  - bottlenecks: missing_same_cluster_ar_vs_mtp_rows
+  - next_step: Use the synced runlog tracking section for future canonical payload updates after live cluster rows are collected.
+- Evidence:
+  - scripts/mirror_mimo_mtp_rollout_seed.py
+  - scripts/test_mirror_mimo_mtp_rollout_seed.py
+  - uv run pytest scripts/test_mirror_mimo_mtp_rollout_seed.py -q
+  - uv run ruff check scripts/mirror_mimo_mtp_rollout_seed.py scripts/test_mirror_mimo_mtp_rollout_seed.py
+  - uv run ruff format --check scripts/mirror_mimo_mtp_rollout_seed.py scripts/test_mirror_mimo_mtp_rollout_seed.py
+  - uv run basedpyright scripts/mirror_mimo_mtp_rollout_seed.py scripts/test_mirror_mimo_mtp_rollout_seed.py
+  - git diff --check -- scripts/mirror_mimo_mtp_rollout_seed.py scripts/test_mirror_mimo_mtp_rollout_seed.py
+- Remaining risk: This Sub-AC validates runlog artifact synchronization only; Slice 5 remains blocked until same-cluster AR-vs-MTP rows prove a real guarded MTP speed win.
+
+## 2026-06-07 AC-P10 Final Verification Refresh
+
+A final closeout refresh was run in
+`/Users/studio2/exo/.worktrees/mimo-v25-pro-mtp-fastpath-single-stream-20260601`
+on branch `feature/mimo-v25-pro-mtp-fastpath-single-stream-20260601` at HEAD
+`6911a9f545f07276516e29b16872622e3357a68a`.
+
+Fresh evidence prefix: `.goose-ultrawork/evidence/ac-p10-final-20260607T080246Z-*`.
+
+Verification evidence:
+
+- Focused pytest across touched rollout surfaces: `317 passed in 5.18s`.
+- Ruff check over touched code/test surfaces: `All checks passed!`.
+- Ruff format check over touched code/test surfaces: `49 files already formatted`.
+- Basedpyright over touched code/test surfaces: `0 errors, 0 warnings, 0 notes`.
+- `git diff --check`: no output / exit 0.
+- Matrix command generation emitted the canonical 8-row AR + guarded MTP D1/D2/D3 matrix for max_tokens 16 and 64.
+- Budget fixture and bottleneck classifier fixture completed with exit 0.
+
+Live row blocker:
+
+- The local cluster probe against `http://127.0.0.1:52415` failed with
+  `<urlopen error [Errno 61] Connection refused>` and emitted
+  `status=blocked_with_command` plus an exact rerun command in
+  `.goose-ultrawork/evidence/ac-p10-final-20260607T080246Z-cluster-probe.log`.
+
+AC status and gate:
+
+- AC-P0 through AC-P10 are evidenced for the guarded rollout slice.
+- No live same-cluster AR-vs-guarded-MTP rows exist in this worktree.
+- No >=30 tok/s, >=40 tok/s, MTP speedup, or Slice 5 production/default
+  eligibility claim is made.
+- Default generation remains AR; MiMo MTP remains explicit/experimental only.
+- Next best step remains running the saved matrix commands against a healthy exo
+  tensor-parallel cluster API with the official MiMo MTP sidecar, then analyzing
+  those same-cluster rows with the budget and bottleneck scripts before any
+  Slice 5 review.

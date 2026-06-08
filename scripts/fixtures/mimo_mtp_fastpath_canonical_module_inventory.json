@@ -1,0 +1,47 @@
+{
+  "schema_version": "mimo_mtp_fastpath_inventory.v1",
+  "fixture_description": "Canonical module list and git index blob SHAs for the MiMo MTP fastpath vertical slice. The inventory enumeration function's output must match this fixture exactly (module_name, relative_path, blob_sha per row, same order).",
+  "performance_claim": "none",
+  "modules": [
+    {
+      "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.benchmark",
+      "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/benchmark.py",
+      "blob_sha": "03e61b4d0477dfb64e47621b08cf92cd46936a3f"
+    },
+    {
+      "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.one_cycle",
+      "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/one_cycle.py",
+      "blob_sha": "63a985b55bfa12a9ad773ff23a59fbeb290d028a"
+    },
+    {
+      "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.providers",
+      "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/providers.py",
+      "blob_sha": "1468ce099b9930c5feb406ddfabbf53cbd68b93e"
+    },
+    {
+      "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract",
+      "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/sidecar_contract.py",
+      "blob_sha": "a9577ee0f744c0e8fc0128b5d6727dc6de661fdb"
+    },
+    {
+      "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.sidecar_loader",
+      "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/sidecar_loader.py",
+      "blob_sha": "d90c3e9c6da59696f8528ccb5cd0259e1b869cca"
+    },
+    {
+      "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.sidecar_module",
+      "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/sidecar_module.py",
+      "blob_sha": "2de57ade72bef1f560344cf51e5060b4e5c64125"
+    },
+    {
+      "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.speculative_loop",
+      "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/speculative_loop.py",
+      "blob_sha": "f6bf879e984b6466845bfc75bf213044443d1597"
+    },
+    {
+      "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.worker_fastpath",
+      "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/worker_fastpath.py",
+      "blob_sha": "26714f1d39c0c4ac75fc8c7ebdf6efde20b9d45b"
+    }
+  ]
+}

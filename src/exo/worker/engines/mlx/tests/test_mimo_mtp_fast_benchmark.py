@@ -146,6 +146,261 @@ def test_metric_row_records_accepted_execution_path_for_rollout_telemetry() -> N
     assert mtp_row["accepted_execution_path"] == "mimo_mtp_fastpath"
 
 
+def test_bottleneck_classifier_emits_acceptance_rate_low_when_below_threshold() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        acceptance_rate_value=0.3,
+        low_acceptance_threshold=0.5,
+        fallback_rate=0.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "acceptance_rate_low" in classifications
+
+
+def test_bottleneck_classifier_suppresses_acceptance_rate_low_without_acceptance_telemetry() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        acceptance_rate_value=None,
+        low_acceptance_threshold=0.5,
+        fallback_rate=0.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "acceptance_rate_low" not in classifications
+
+
+def test_bottleneck_classifier_suppresses_acceptance_rate_low_without_threshold() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        acceptance_rate_value=0.3,
+        low_acceptance_threshold=None,
+        fallback_rate=0.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "acceptance_rate_low" not in classifications
+
+
+def test_bottleneck_classifier_suppresses_acceptance_rate_low_at_or_above_threshold() -> (
+    None,
+):
+    classifications_at = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        acceptance_rate_value=0.5,
+        low_acceptance_threshold=0.5,
+        fallback_rate=0.0,
+        high_fallback_threshold=0.25,
+    )
+    classifications_above = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        acceptance_rate_value=0.8,
+        low_acceptance_threshold=0.5,
+        fallback_rate=0.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "acceptance_rate_low" not in classifications_at
+    assert "acceptance_rate_low" not in classifications_above
+
+
+def test_bottleneck_classifier_suppresses_acceptance_rate_low_for_ar_mode() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.AR,
+        decode_tok_s=22.0,
+        ar_baseline_tok_s=None,
+        acceptance_rate_value=0.1,
+        low_acceptance_threshold=0.5,
+        fallback_rate=0.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "acceptance_rate_low" not in classifications
+
+
+def test_bottleneck_classifier_emits_proposal_too_slow_when_dominant_phase() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        proposal_seconds=0.6,
+        total_cycle_seconds=1.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "proposal_too_slow" in classifications
+
+
+def test_bottleneck_classifier_suppresses_proposal_too_slow_without_proposal_telemetry() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        proposal_seconds=None,
+        total_cycle_seconds=1.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "proposal_too_slow" not in classifications
+
+
+def test_bottleneck_classifier_suppresses_proposal_too_slow_without_total_cycle_telemetry() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        proposal_seconds=0.6,
+        total_cycle_seconds=None,
+        high_fallback_threshold=0.25,
+    )
+    assert "proposal_too_slow" not in classifications
+
+
+def test_bottleneck_classifier_suppresses_proposal_too_slow_below_threshold() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        proposal_seconds=0.4,
+        total_cycle_seconds=1.0,
+        slow_phase_threshold=0.5,
+        high_fallback_threshold=0.25,
+    )
+    assert "proposal_too_slow" not in classifications
+
+
+def test_bottleneck_classifier_suppresses_proposal_too_slow_with_zero_cycle_time() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        proposal_seconds=0.6,
+        total_cycle_seconds=0.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "proposal_too_slow" not in classifications
+
+
+def test_bottleneck_classifier_suppresses_proposal_too_slow_for_ar_mode() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.AR,
+        decode_tok_s=22.0,
+        ar_baseline_tok_s=None,
+        proposal_seconds=0.6,
+        total_cycle_seconds=1.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "proposal_too_slow" not in classifications
+
+
+def test_bottleneck_classifier_emits_verifier_too_slow_when_dominant_phase() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        verification_seconds=0.55,
+        total_cycle_seconds=1.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "verifier_too_slow" in classifications
+
+
+def test_bottleneck_classifier_suppresses_verifier_too_slow_without_verification_telemetry() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        verification_seconds=None,
+        total_cycle_seconds=1.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "verifier_too_slow" not in classifications
+
+
+def test_bottleneck_classifier_suppresses_verifier_too_slow_without_total_cycle_telemetry() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        verification_seconds=0.55,
+        total_cycle_seconds=None,
+        high_fallback_threshold=0.25,
+    )
+    assert "verifier_too_slow" not in classifications
+
+
+def test_bottleneck_classifier_suppresses_verifier_too_slow_below_threshold() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        verification_seconds=0.3,
+        total_cycle_seconds=1.0,
+        slow_phase_threshold=0.5,
+        high_fallback_threshold=0.25,
+    )
+    assert "verifier_too_slow" not in classifications
+
+
+def test_bottleneck_classifier_suppresses_verifier_too_slow_with_zero_cycle_time() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.D3,
+        decode_tok_s=24.0,
+        ar_baseline_tok_s=22.0,
+        verification_seconds=0.55,
+        total_cycle_seconds=0.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "verifier_too_slow" not in classifications
+
+
+def test_bottleneck_classifier_suppresses_verifier_too_slow_for_ar_mode() -> (
+    None,
+):
+    classifications = classify_bottlenecks(
+        mode=MimoMtpBenchmarkMode.AR,
+        decode_tok_s=22.0,
+        ar_baseline_tok_s=None,
+        verification_seconds=0.55,
+        total_cycle_seconds=1.0,
+        high_fallback_threshold=0.25,
+    )
+    assert "verifier_too_slow" not in classifications
+
+
 def test_bottleneck_classifier_emits_fallback_too_high_when_rate_crosses_threshold() -> (
     None
 ):

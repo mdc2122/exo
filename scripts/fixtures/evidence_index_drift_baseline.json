@@ -1,0 +1,184 @@
+{
+  "gate": {
+    "default_generation_mode": "ar",
+    "guardrail": "Slice 5 remains blocked until same-cluster AR-vs-MTP rows prove a real MTP speed win; default exo generation remains AR.",
+    "preferred_tok_s": 40.0,
+    "required_evidence": [
+      "same_cluster_ar_vs_mtp_rows",
+      "no_correctness_or_fallback_concern"
+    ],
+    "requires_real_mtp_speed_win": true,
+    "requires_same_cluster_rows": true,
+    "slice_5_status": "blocked",
+    "target_tok_s": 30.0
+  },
+  "items": [
+    {
+      "acceptance_id": "AC-P0",
+      "concepts": [
+        "cluster_baseline",
+        "mtp_vertical_slice",
+        "benchmark_telemetry",
+        "speedup_budget",
+        "slice_5_gate"
+      ],
+      "evidence_contract_notes": [
+        "exo cluster tensor parallelization is the live model path, not single-Studio full-model loading"
+      ],
+      "evidence_paths": [],
+      "gate_tags": [
+        "slice_5_blocked"
+      ],
+      "order": 0,
+      "stable_id": "mimo_mtp_optimized_rollout_20260606T203800:AC-P0",
+      "status": "pending",
+      "title": "Optimized rollout seed and repo context are validated",
+      "verification_command_index": [
+        {
+          "category": "api",
+          "command": "uv run pytest src/exo/api/tests/test_mimo_mtp_request_schema.py src/exo/api/tests/test_mimo_v25_pro_chat_adapter.py src/exo/api/tests/test_mimo_mtp_normal_execution_path.py src/exo/api/tests/test_mimo_v25_pro_preview_path.py scripts/test_validate_mimo_mtp_request_docs.py -q",
+          "index": 0,
+          "purpose": "Run focused API tests for request/response contract changes.",
+          "requires_live_cluster": false
+        },
+        {
+          "category": "task_type",
+          "command": "uv run pytest src/exo/shared/tests/test_mimo_mtp_task_params.py src/exo/shared/tests/test_state_serialization.py -q",
+          "index": 1,
+          "purpose": "Run focused shared task parameter serialization tests.",
+          "requires_live_cluster": false
+        },
+        {
+          "category": "worker",
+          "command": "uv run pytest src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_module_validation.py src/exo/worker/tests/unittests/test_runner/test_batch_selection.py src/exo/worker/tests/unittests/test_mlx/test_kv_prefix_cache.py src/exo/worker/tests/unittests/test_mlx/test_warmup_inference.py -q",
+          "index": 2,
+          "purpose": "Run focused worker tests for execution-path changes.",
+          "requires_live_cluster": false
+        },
+        {
+          "category": "benchmark_telemetry",
+          "command": "uv run pytest scripts/test_bench_mimo_mtp_cluster.py scripts/test_bench_mimo_mtp_fastpath.py scripts/test_mimo_mtp_benchmark_ingest.py scripts/test_mimo_mtp_budget_calculator.py scripts/test_mimo_mtp_bottleneck_classifier.py src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_benchmark.py -q",
+          "index": 3,
+          "purpose": "Run benchmark telemetry, budget, and bottleneck tests.",
+          "requires_live_cluster": false
+        }
+      ]
+    },
+    {
+      "acceptance_id": "AC-P1",
+      "concepts": [
+        "cluster_baseline",
+        "benchmark_telemetry",
+        "speedup_budget",
+        "slice_5_gate"
+      ],
+      "evidence_contract_notes": [],
+      "evidence_paths": [
+        ".goose-ultrawork/evidence/ac-p1-summary.md"
+      ],
+      "gate_tags": [
+        "cluster_baseline",
+        "same_cluster_evidence",
+        "slice_5_blocked"
+      ],
+      "order": 1,
+      "stable_id": "mimo_mtp_optimized_rollout_20260606T203800:AC-P1",
+      "status": "blocked",
+      "title": "Cluster AR baseline harness is canonical and budget-ready",
+      "verification_command_index": []
+    },
+    {
+      "acceptance_id": "AC-P2",
+      "concepts": [
+        "cluster_baseline",
+        "benchmark_telemetry",
+        "speedup_budget",
+        "slice_5_gate"
+      ],
+      "evidence_contract_notes": [],
+      "evidence_paths": [],
+      "gate_tags": [
+        "benchmark_telemetry",
+        "speedup_budget",
+        "slice_5_blocked"
+      ],
+      "order": 2,
+      "stable_id": "mimo_mtp_optimized_rollout_20260606T203800:AC-P2",
+      "status": "pending",
+      "title": "MTP speedup budget model exists before optimization claims",
+      "verification_command_index": []
+    },
+    {
+      "acceptance_id": "AC-P9",
+      "concepts": [
+        "cluster_baseline",
+        "speedup_budget",
+        "slice_5_gate"
+      ],
+      "evidence_contract_notes": [],
+      "evidence_paths": [
+        ".goose-ultrawork/evidence/ac-p9-slice-5-strict-gate.md"
+      ],
+      "gate_tags": [
+        "default_ar",
+        "production_gate",
+        "same_cluster_evidence",
+        "slice_5_blocked",
+        "speedup_budget"
+      ],
+      "order": 9,
+      "stable_id": "mimo_mtp_optimized_rollout_20260606T203800:AC-P9",
+      "status": "pending",
+      "title": "Slice 5 gate remains strict",
+      "verification_command_index": []
+    },
+    {
+      "acceptance_id": "AC-P10",
+      "concepts": [
+        "slice_5_gate"
+      ],
+      "evidence_contract_notes": [],
+      "evidence_paths": [],
+      "gate_tags": [
+        "slice_5_blocked"
+      ],
+      "order": 10,
+      "stable_id": "mimo_mtp_optimized_rollout_20260606T203800:AC-P10",
+      "status": "complete",
+      "title": "Verification and closeout",
+      "verification_command_index": [
+        {
+          "category": "api",
+          "command": "uv run pytest src/exo/api/tests/test_mimo_mtp_request_schema.py src/exo/api/tests/test_mimo_v25_pro_chat_adapter.py src/exo/api/tests/test_mimo_mtp_normal_execution_path.py src/exo/api/tests/test_mimo_v25_pro_preview_path.py scripts/test_validate_mimo_mtp_request_docs.py -q",
+          "index": 0,
+          "purpose": "Run focused API tests for request/response contract changes.",
+          "requires_live_cluster": false
+        },
+        {
+          "category": "task_type",
+          "command": "uv run pytest src/exo/shared/tests/test_mimo_mtp_task_params.py src/exo/shared/tests/test_state_serialization.py -q",
+          "index": 1,
+          "purpose": "Run focused shared task parameter serialization tests.",
+          "requires_live_cluster": false
+        },
+        {
+          "category": "worker",
+          "command": "uv run pytest src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_module_validation.py src/exo/worker/tests/unittests/test_runner/test_batch_selection.py src/exo/worker/tests/unittests/test_mlx/test_kv_prefix_cache.py src/exo/worker/tests/unittests/test_mlx/test_warmup_inference.py -q",
+          "index": 2,
+          "purpose": "Run focused worker tests for execution-path changes.",
+          "requires_live_cluster": false
+        },
+        {
+          "category": "benchmark_telemetry",
+          "command": "uv run pytest scripts/test_bench_mimo_mtp_cluster.py scripts/test_bench_mimo_mtp_fastpath.py scripts/test_mimo_mtp_benchmark_ingest.py scripts/test_mimo_mtp_budget_calculator.py scripts/test_mimo_mtp_bottleneck_classifier.py src/exo/worker/engines/mlx/tests/test_mimo_mtp_fast_benchmark.py -q",
+          "index": 3,
+          "purpose": "Run benchmark telemetry, budget, and bottleneck tests.",
+          "requires_live_cluster": false
+        }
+      ]
+    }
+  ],
+  "ontology_name": "MimoMtpOptimizedRollout",
+  "schema_version": "mimo-mtp-rollout-sync/v1",
+  "seed_id": "mimo_mtp_optimized_rollout_20260606T203800"
+}

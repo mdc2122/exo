@@ -6,13 +6,17 @@ import json
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, cast
 
+from scripts.rollout_seed_mirroring import RolloutTodoChecklistEntry, RolloutTodoPayload
+
 JsonObject = dict[str, object]
 BeadsRunner = Callable[[list[str]], "CommandResult"]
-BeadMirrorAction = Literal["created", "updated"]
+BeadMirrorAction = Literal[
+    "created", "updated", "skipped_unconfigured", "skipped_unavailable"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +44,11 @@ class BeadMirrorResult:
     seed_mirror_key: str
     action: BeadMirrorAction
     bead_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BeadsMirrorConfig:
+    enabled: bool
 
 
 class BeadMirrorError(RuntimeError):
@@ -128,6 +137,105 @@ def _run_checked(runner: BeadsRunner, command: list[str]) -> CommandResult:
     return result
 
 
+def _is_beads_available(runner: BeadsRunner) -> bool:
+    try:
+        return runner(["bd", "--version"]).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def _skipped_results(
+    entries: Iterable[BeadMirrorEntry], action: BeadMirrorAction
+) -> list[BeadMirrorResult]:
+    return [
+        BeadMirrorResult(
+            seed_mirror_key=_seed_mirror_key(entry),
+            action=action,
+            bead_id=None,
+        )
+        for entry in entries
+    ]
+
+
+def _write_result_artifact(
+    result_path: Path | None, results: Iterable[BeadMirrorResult]
+) -> None:
+    if result_path is None:
+        return
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(
+        "".join(
+            f"{json.dumps(asdict(result), sort_keys=True)}\n" for result in results
+        ),
+        encoding="utf-8",
+    )
+
+
+def _entry_concepts_text(entry: RolloutTodoChecklistEntry) -> str:
+    return ", ".join(entry.concepts)
+
+
+def _entry_evidence_text(entry: RolloutTodoChecklistEntry) -> str:
+    return " | ".join(entry.evidence)
+
+
+def entry_from_rollout_payload_entry(
+    *,
+    payload: RolloutTodoPayload,
+    entry: RolloutTodoChecklistEntry,
+    acceptance_index: int,
+    labels: Sequence[str] = ("mimo", "mtp", "rollout", "payload-mirror"),
+    priority: str = "P1",
+    issue_type: str = "task",
+    parent_id: str | None = None,
+) -> BeadMirrorEntry:
+    """Convert one canonical rollout status entry into a Beads item payload."""
+
+    title = f"{entry.acceptance_id} {entry.title}"
+    description = (
+        f"status={entry.status}; "
+        f"concepts={_entry_concepts_text(entry)}; "
+        f"evidence={_entry_evidence_text(entry)}; "
+        f"remaining_risk={entry.remaining_risk}; "
+        f"slice_5_gate={payload.slice_5_gate}"
+    )
+    return BeadMirrorEntry(
+        seed_id=payload.seed_id,
+        acceptance_index=acceptance_index,
+        title=title,
+        description=description,
+        acceptance_criteria=title,
+        labels=tuple(labels),
+        priority=priority,
+        issue_type=issue_type,
+        parent_id=parent_id,
+    )
+
+
+def entries_from_rollout_payload(
+    payload: RolloutTodoPayload,
+    *,
+    labels: Sequence[str] = ("mimo", "mtp", "rollout", "payload-mirror"),
+    priority: str = "P1",
+    issue_type: str = "task",
+    parent_id: str | None = None,
+) -> list[BeadMirrorEntry]:
+    """Convert canonical rollout payload entries into Beads mirror entries."""
+
+    return [
+        entry_from_rollout_payload_entry(
+            payload=payload,
+            entry=entry,
+            acceptance_index=index,
+            labels=labels,
+            priority=priority,
+            issue_type=issue_type,
+            parent_id=parent_id,
+        )
+        for index, entry in enumerate(payload.entries)
+    ]
+
+
 def _decode_beads_list(raw_output: str) -> list[JsonObject]:
     decoded = cast(object, json.loads(raw_output))
     if not isinstance(decoded, list):
@@ -151,6 +259,54 @@ def _require_bead_id(bead: JsonObject) -> str:
 def _find_existing_beads(seed_mirror_key: str, runner: BeadsRunner) -> list[JsonObject]:
     result = _run_checked(runner, _query_command(seed_mirror_key))
     return _decode_beads_list(result.stdout)
+
+
+def mirror_entries_to_configured_beads(
+    entries: Iterable[BeadMirrorEntry],
+    *,
+    config: BeadsMirrorConfig,
+    runner: BeadsRunner = _run_command,
+) -> list[BeadMirrorResult]:
+    materialized_entries = tuple(entries)
+    if not config.enabled:
+        return _skipped_results(materialized_entries, "skipped_unconfigured")
+    if not _is_beads_available(runner):
+        return _skipped_results(materialized_entries, "skipped_unavailable")
+    return mirror_entries_to_beads(materialized_entries, runner=runner)
+
+
+def sync_rollout_payload_to_configured_beads(
+    payload: RolloutTodoPayload,
+    *,
+    config: BeadsMirrorConfig,
+    runner: BeadsRunner = _run_command,
+    result_path: Path | None = None,
+    labels: Sequence[str] = ("mimo", "mtp", "rollout", "payload-mirror"),
+    priority: str = "P1",
+    issue_type: str = "task",
+    parent_id: str | None = None,
+) -> list[BeadMirrorResult]:
+    """Synchronize canonical rollout payload entries into optional Beads items.
+
+    Beads remains opt-in through ``config.enabled``. When disabled or unavailable,
+    the function performs no Beads writes and returns/records deterministic skip
+    results for every canonical payload entry.
+    """
+
+    entries = entries_from_rollout_payload(
+        payload,
+        labels=labels,
+        priority=priority,
+        issue_type=issue_type,
+        parent_id=parent_id,
+    )
+    results = mirror_entries_to_configured_beads(
+        entries,
+        config=config,
+        runner=runner,
+    )
+    _write_result_artifact(result_path, results)
+    return results
 
 
 def mirror_entries_to_beads(
@@ -273,10 +429,15 @@ def _parser() -> argparse.ArgumentParser:
         default="mimo,mtp,rollout,seed-mirror",
         help="Comma-separated labels to set on mirrored Beads.",
     )
+    parser.add_argument(
+        "--enable-beads-mirror",
+        action="store_true",
+        help="Create or update Beads items when the bd CLI is available.",
+    )
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, runner: BeadsRunner = _run_command) -> int:
     namespace = _parser().parse_args(argv)
     labels = tuple(
         label.strip()
@@ -290,9 +451,13 @@ def main(argv: list[str] | None = None) -> int:
         issue_type=cast(str, namespace.issue_type),
         parent_id=cast(str | None, namespace.parent_id),
     )
-    results = mirror_entries_to_beads(entries)
+    results = mirror_entries_to_configured_beads(
+        entries,
+        config=BeadsMirrorConfig(enabled=cast(bool, namespace.enable_beads_mirror)),
+        runner=runner,
+    )
     for result in results:
-        print(json.dumps(result.__dict__, sort_keys=True))
+        print(json.dumps(asdict(result), sort_keys=True))
     return 0
 
 

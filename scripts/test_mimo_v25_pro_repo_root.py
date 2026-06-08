@@ -55,6 +55,33 @@ def test_validate_repo_root_detects_expected_root_from_nested_path(
     assert validation.start_path == nested_path.resolve()
 
 
+def test_main_reports_repo_root_from_arbitrary_current_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    expected_root = tmp_path / "exo"
+    arbitrary_working_directory = (
+        expected_root / ".goose-ultrawork" / "waves" / "worker-1"
+    )
+    arbitrary_working_directory.mkdir(parents=True)
+    (expected_root / "src" / "exo").mkdir(parents=True)
+    (expected_root / "pyproject.toml").write_text(
+        '[project]\nname = "exo"\n', encoding="utf-8"
+    )
+    (expected_root / "Cargo.toml").write_text(
+        "[workspace]\nmembers = []\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(arbitrary_working_directory)
+
+    exit_code = repo_root.main([])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == f"{expected_root.resolve()}\n"
+    assert captured.err == ""
+
+
 def test_validate_repo_root_rejects_non_exo_directory(tmp_path: Path) -> None:
     wrong_root = tmp_path / "not-exo"
     wrong_root.mkdir()
@@ -64,6 +91,26 @@ def test_validate_repo_root_rejects_non_exo_directory(tmp_path: Path) -> None:
 
     assert "could not find expected exo repository root" in str(exc_info.value)
     assert str(wrong_root.resolve()) in str(exc_info.value)
+
+
+def test_main_reports_clear_diagnostic_when_outside_repo_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    wrong_root = tmp_path / "not-exo"
+    wrong_root.mkdir()
+    monkeypatch.chdir(wrong_root)
+
+    exit_code = repo_root.main([])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "error: could not find expected exo repository root" in captured.err
+    assert str(wrong_root.resolve()) in captured.err
+    assert "required markers: pyproject.toml, Cargo.toml, src/exo" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_validate_repo_root_rejects_mismatched_expected_root(tmp_path: Path) -> None:

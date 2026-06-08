@@ -28,7 +28,7 @@
   "parallel_workers": 4,
   "repo": "/Users/studio2/exo/.worktrees/mimo-v25-pro-mtp-fastpath-single-stream-20260601",
   "seed": ".goose-ultrawork/seed.yaml",
-  "status": "stabilized_after_failed_run",
+  "status": "completed",
   "waves": [
     {
       "ac_markers": {
@@ -47,6 +47,27 @@
       "seed": "/Users/studio2/exo/.worktrees/mimo-v25-pro-mtp-fastpath-single-stream-20260601/.goose-ultrawork/seed.yaml",
       "session_id": null,
       "status": "failed"
+    },
+    {
+      "name": "gou-run-20260607T053038Z",
+      "status": "completed",
+      "result": "RUN_EXIT=0",
+      "classification": "completed",
+      "transport_incomplete": false,
+      "run_exit_marker_present": true,
+      "seed": "/Users/studio2/exo/.worktrees/mimo-v25-pro-mtp-fastpath-single-stream-20260601/.goose-ultrawork/seed.yaml",
+      "log": "/Users/studio2/exo/.worktrees/mimo-v25-pro-mtp-fastpath-single-stream-20260601/.goose-ultrawork/evidence/gou-run-restart-unbounded-20260607T034446Z.log",
+      "session_id": "orch_9bf44bf4fb90",
+      "qa_verdict": "revise",
+      "runtime": "goose",
+      "llm_backend": "goose",
+      "parallel_workers": 4,
+      "max_decomposition_depth": null,
+      "max_decomposition_nodes": null,
+      "ac_markers": {
+        "started": [],
+        "completed": []
+      }
     }
   ]
 }

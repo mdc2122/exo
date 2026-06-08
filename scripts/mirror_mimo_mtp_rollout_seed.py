@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -20,6 +21,19 @@ _DEFAULT_RUNLOG_PATH = Path("docs/plans/MIMO_V25_PRO_MTP_FOUNDATION_RUNLOG.md")
 class MirrorPersistenceResult:
     todo_action: PersistenceAction
     runlog_action: PersistenceAction
+
+
+@dataclass(frozen=True, slots=True)
+class RunlogBookkeepingAppendResult:
+    runlog_action: PersistenceAction
+    appended_heading: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunlogTrackingSyncResult:
+    runlog_action: PersistenceAction
+    tracking_id: str
+    heading: str
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -140,6 +154,190 @@ def _read_optional(path: Path) -> str | None:
 def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _payload_string(payload: Mapping[str, object], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or value == "":
+        raise ValueError(f"canonical runlog payload requires non-empty {key}")
+    return value
+
+
+def _payload_mapping(payload: Mapping[str, object], key: str) -> Mapping[str, object]:
+    value = payload.get(key)
+    if not isinstance(value, Mapping):
+        raise ValueError(f"canonical runlog payload requires {key} mapping")
+    return cast(Mapping[str, object], value)
+
+
+def _payload_sequence(payload: Mapping[str, object], key: str) -> tuple[object, ...]:
+    value = payload.get(key)
+    if not isinstance(value, Sequence) or isinstance(value, str):
+        raise ValueError(f"canonical runlog payload requires {key} sequence")
+    return tuple(cast(Sequence[object], value))
+
+
+def _render_mapping_lines(mapping: Mapping[str, object]) -> list[str]:
+    lines: list[str] = []
+    for key, value in mapping.items():
+        if isinstance(value, Sequence) and not isinstance(value, str):
+            rendered_sequence = cast(Sequence[object], value)
+            rendered_value = ", ".join(str(item) for item in rendered_sequence)
+        else:
+            rendered_value = str(value)
+        lines.append(f"- {key}: {rendered_value}")
+    return lines
+
+
+def _tracking_section_pattern(tracking_id: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"(?ms)^### MiMo MTP rollout tracking: {re.escape(tracking_id)}\n.*?(?=^###\s|^##\s|\Z)",
+    )
+
+
+def _render_runlog_tracking_entry(payload: Mapping[str, object]) -> tuple[str, str]:
+    tracking_id = _payload_string(payload, "tracking_id")
+    acceptance_criterion = _payload_string(payload, "acceptance_criterion")
+    timestamp = _payload_string(payload, "timestamp")
+    summary = _payload_string(payload, "summary")
+    remaining_risk = _payload_string(payload, "remaining_risk")
+    evidence = _payload_sequence(payload, "evidence")
+    benchmark_rows = _payload_mapping(payload, "benchmark_rows")
+    gate_status = _payload_mapping(payload, "gate_status")
+    bottleneck_analysis = _payload_mapping(payload, "bottleneck_analysis")
+
+    heading = f"### MiMo MTP rollout tracking: {tracking_id}"
+    lines = [
+        heading,
+        "",
+        f"- Last updated: {timestamp}",
+        f"- Acceptance criterion: {acceptance_criterion}",
+        f"- Summary: {summary}",
+        "- Benchmark rows:",
+    ]
+    lines.extend(f"  {line}" for line in _render_mapping_lines(benchmark_rows))
+    lines.append("- Gate status:")
+    lines.extend(f"  {line}" for line in _render_mapping_lines(gate_status))
+    lines.append("- Bottleneck analysis:")
+    lines.extend(f"  {line}" for line in _render_mapping_lines(bottleneck_analysis))
+    lines.append("- Evidence:")
+    lines.extend(f"  - {item}" for item in evidence)
+    lines.append(f"- Remaining risk: {remaining_risk}")
+    return heading, "\n".join(lines).rstrip() + "\n"
+
+
+def sync_runlog_tracking_entry_from_payload(
+    *,
+    runlog_path: Path,
+    payload: Mapping[str, object],
+) -> RunlogTrackingSyncResult:
+    """Append or update one canonical benchmark-grade rollout tracking entry.
+
+    The canonical payload owns only the section identified by `tracking_id`; all
+    prior runlog history and unrelated sections are preserved. Re-running with
+    the same payload is idempotent, while re-running with the same tracking id
+    and newer gate/bottleneck telemetry updates the existing tracking section.
+    """
+
+    tracking_id = _payload_string(payload, "tracking_id")
+    heading, section_text = _render_runlog_tracking_entry(payload)
+    existing_text = _read_optional(runlog_path)
+    if existing_text is None:
+        _write_text(runlog_path, section_text)
+        return RunlogTrackingSyncResult(
+            runlog_action="created",
+            tracking_id=tracking_id,
+            heading=heading,
+        )
+
+    pattern = _tracking_section_pattern(tracking_id)
+    match = pattern.search(existing_text)
+    if match is None:
+        separator = "\n" if existing_text.endswith("\n") else "\n\n"
+        _write_text(runlog_path, f"{existing_text}{separator}{section_text}")
+        return RunlogTrackingSyncResult(
+            runlog_action="updated",
+            tracking_id=tracking_id,
+            heading=heading,
+        )
+
+    if match.group(0).rstrip() == section_text.rstrip():
+        return RunlogTrackingSyncResult(
+            runlog_action="unchanged",
+            tracking_id=tracking_id,
+            heading=heading,
+        )
+
+    new_text = (
+        f"{existing_text[: match.start()]}{section_text}{existing_text[match.end() :]}"
+    )
+    _write_text(runlog_path, new_text)
+    return RunlogTrackingSyncResult(
+        runlog_action="updated",
+        tracking_id=tracking_id,
+        heading=heading,
+    )
+
+
+def _render_bookkeeping_record(
+    *,
+    acceptance_criterion: str,
+    timestamp: str,
+    record_kind: str,
+    summary: str,
+    evidence: tuple[str, ...],
+    remaining_risk: str,
+) -> tuple[str, str]:
+    heading = f"### {timestamp} {acceptance_criterion} {record_kind}"
+    lines = [
+        heading,
+        "",
+        f"- Summary: {summary}",
+        "- Evidence:",
+    ]
+    lines.extend(f"  - {item}" for item in evidence)
+    lines.append(f"- Remaining risk: {remaining_risk}")
+    return heading, "\n".join(lines).rstrip() + "\n"
+
+
+def append_runlog_bookkeeping_record(
+    *,
+    runlog_path: Path,
+    acceptance_criterion: str,
+    timestamp: str,
+    record_kind: str,
+    summary: str,
+    evidence: tuple[str, ...],
+    remaining_risk: str,
+) -> RunlogBookkeepingAppendResult:
+    """Append a benchmark/rollout bookkeeping record to the runlog only.
+
+    This sink intentionally has no TODO or Beads parameters. It is append-only
+    so benchmark evidence and blocker records remain chronological.
+    """
+
+    heading, record_text = _render_bookkeeping_record(
+        acceptance_criterion=acceptance_criterion,
+        timestamp=timestamp,
+        record_kind=record_kind,
+        summary=summary,
+        evidence=evidence,
+        remaining_risk=remaining_risk,
+    )
+    existing_text = _read_optional(runlog_path)
+    if existing_text is None:
+        _write_text(runlog_path, record_text)
+        return RunlogBookkeepingAppendResult(
+            runlog_action="created",
+            appended_heading=heading,
+        )
+
+    separator = "\n" if existing_text.endswith("\n") else "\n\n"
+    _write_text(runlog_path, f"{existing_text}{separator}{record_text}")
+    return RunlogBookkeepingAppendResult(
+        runlog_action="updated",
+        appended_heading=heading,
+    )
 
 
 def mirror_rollout_seed(

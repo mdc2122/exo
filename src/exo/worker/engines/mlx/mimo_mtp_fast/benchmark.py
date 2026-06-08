@@ -263,12 +263,40 @@ def classify_bottlenecks(
     decode_tok_s: float,
     ar_baseline_tok_s: float | None,
     acceptance_rate_value: float | None = None,
+    low_acceptance_threshold: float | None = None,
     fallback_rate: float | None = None,
     high_fallback_threshold: float,
     rollout_depth: int | None = None,
     aggressive_depth_threshold: int | None = None,
+    proposal_seconds: float | None = None,
+    verification_seconds: float | None = None,
+    total_cycle_seconds: float | None = None,
+    slow_phase_threshold: float = 0.5,
 ) -> tuple[BottleneckClassification, ...]:
     classifications: list[BottleneckClassification] = []
+    if (
+        mode != MimoMtpBenchmarkMode.AR
+        and acceptance_rate_value is not None
+        and low_acceptance_threshold is not None
+        and acceptance_rate_value < low_acceptance_threshold
+    ):
+        classifications.append("acceptance_rate_low")
+    if (
+        mode != MimoMtpBenchmarkMode.AR
+        and proposal_seconds is not None
+        and total_cycle_seconds is not None
+        and total_cycle_seconds > 0.0
+        and (proposal_seconds / total_cycle_seconds) >= slow_phase_threshold
+    ):
+        classifications.append("proposal_too_slow")
+    if (
+        mode != MimoMtpBenchmarkMode.AR
+        and verification_seconds is not None
+        and total_cycle_seconds is not None
+        and total_cycle_seconds > 0.0
+        and (verification_seconds / total_cycle_seconds) >= slow_phase_threshold
+    ):
+        classifications.append("verifier_too_slow")
     if (
         mode != MimoMtpBenchmarkMode.AR
         and fallback_rate is not None

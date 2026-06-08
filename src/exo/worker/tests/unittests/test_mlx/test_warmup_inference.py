@@ -1,7 +1,15 @@
+import os
+
+import pytest
 from pytest import MonkeyPatch
 
 from exo.shared.types.common import ModelId
 from exo.worker.engines.mlx.generator import generate as generate_module
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("EXO_TEST_TURBOQUANT") != "1",
+    reason="TurboQuant optional accelerator tests require EXO_TEST_TURBOQUANT=1",
+)
 
 
 def test_warmup_inference_skips_generation_when_turboquant_active(

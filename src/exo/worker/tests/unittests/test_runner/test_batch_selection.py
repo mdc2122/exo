@@ -1,3 +1,4 @@
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -29,6 +30,10 @@ def _builder_with_group(*, group: object | None) -> Builder:
     )
 
 
+@pytest.mark.skipif(
+    os.environ.get("EXO_TEST_TURBOQUANT") != "1",
+    reason="TurboQuant optional accelerator tests require EXO_TEST_TURBOQUANT=1",
+)
 def test_builder_uses_sequential_generator_for_clustered_turboquant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -42,6 +47,10 @@ def test_builder_uses_sequential_generator_for_clustered_turboquant(
     assert isinstance(generator, runner_module.SequentialGenerator)
 
 
+@pytest.mark.skipif(
+    os.environ.get("EXO_TEST_TURBOQUANT") != "1",
+    reason="TurboQuant optional accelerator tests require EXO_TEST_TURBOQUANT=1",
+)
 def test_builder_keeps_batch_generator_for_single_node_turboquant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

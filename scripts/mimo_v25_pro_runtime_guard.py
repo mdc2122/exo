@@ -53,6 +53,10 @@ REQUIRED_MIMO_MTP_COMMITS: Final[tuple[RequiredGitCommit, ...]] = (
         sha="e88444fd575d02be3ef116d6d73d31c830d2d46d",
         description="feat: add MiMo MTP cluster benchmark harness",
     ),
+    RequiredGitCommit(
+        sha="6911a9f545f07276516e29b16872622e3357a68a",
+        description="feat: scaffold guarded MiMo MTP cluster rollout",
+    ),
 )
 
 

@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from collections.abc import AsyncGenerator, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 import pytest
 from fastapi import HTTPException
+from loguru import logger
 from starlette.requests import Request
 
-from exo.api.main import API
 from exo.api.types.api import (
     BenchChatCompletionRequest,
     ChatCompletionMessage,
@@ -25,14 +27,29 @@ from exo.shared.models.model_cards import (
     ModelId,
 )
 from exo.shared.types.chunks import TokenChunk
+from exo.shared.types.commands import TextGeneration
 from exo.shared.types.common import CommandId
 from exo.shared.types.memory import Memory
 from exo.shared.types.profiling import MemoryUsage
 from exo.shared.types.state import State
+from exo.shared.types.worker.runners import RunnerReady
 from exo.shared.types.worker.shards import PipelineShardMetadata, TensorShardMetadata
 
+if TYPE_CHECKING:
+    from exo.api.main import API
 
-def _api_with_empty_topology() -> API:
+
+def _install_bootstrap_logger_stub() -> None:
+    """Avoid importing MLX patches while this API-boundary test imports API."""
+    bootstrap_stub = types.ModuleType("exo.worker.runner.bootstrap")
+    cast(Any, bootstrap_stub).logger = logger
+    sys.modules.setdefault("exo.worker.runner.bootstrap", bootstrap_stub)
+
+
+def _api_with_empty_topology() -> "API":
+    _install_bootstrap_logger_stub()
+    from exo.api.main import API
+
     api = object.__new__(API)
     api.state = State()
     return api
@@ -134,7 +151,13 @@ async def test_bench_response_reports_tensor_parallel_execution_path() -> None:
     )
     assert preview.instance is not None
     api.state = api.state.model_copy(
-        update={"instances": {preview.instance.instance_id: preview.instance}}
+        update={
+            "instances": {preview.instance.instance_id: preview.instance},
+            "runners": {
+                runner_id: RunnerReady()
+                for runner_id in preview.instance.shard_assignments.runner_to_shard
+            },
+        }
     )
 
     async def stream(_command_id: CommandId) -> AsyncGenerator[TokenChunk, None]:
@@ -169,13 +192,131 @@ async def test_bench_response_reports_tensor_parallel_execution_path() -> None:
         )
     )
 
-    assert bench_response.execution_path == {
-        "path": "exo_cluster_tensor_parallel",
-        "sharding": "Tensor",
-        "world_size": 2,
-        "model_path": str(build_model_path(MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID)),
-        "instance_id": str(preview.instance.instance_id),
-    }
+    assert bench_response.execution_path is not None
+    assert bench_response.execution_path["path"] == "exo_cluster_tensor_parallel"
+    assert bench_response.execution_path["sharding"] == "Tensor"
+    assert bench_response.execution_path["world_size"] == 2
+    assert bench_response.execution_path["model_path"] == str(
+        build_model_path(MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID)
+    )
+    assert bench_response.execution_path["instance_id"] == str(
+        preview.instance.instance_id
+    )
+    assert bench_response.execution_path["backend_source"] == "mlx_ring"
+    assert bench_response.execution_path["loaded_model_ids"] == [
+        str(MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID),
+        str(MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID),
+    ]
+    assert bench_response.execution_path["cluster_nodes"] == [
+        {
+            "node_id": str(node_id),
+            "runner_id": str(runner_id),
+            "runner_status": "RunnerReady",
+        }
+        for node_id, runner_id in preview.instance.shard_assignments.node_to_runner.items()
+    ]
+    assert bench_response.execution_path["tensor_parallel_shards"] == [
+        {
+            "node_id": str(node_id),
+            "runner_id": str(runner_id),
+            "model_id": str(MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID),
+            "device_rank": preview.instance.shard_assignments.runner_to_shard[
+                runner_id
+            ].device_rank,
+            "world_size": 2,
+            "start_layer": 0,
+            "end_layer": 70,
+            "n_layers": 70,
+        }
+        for node_id, runner_id in preview.instance.shard_assignments.node_to_runner.items()
+    ]
+
+
+async def test_bench_response_rejects_single_participant_tensor_metadata_as_cluster_path() -> (
+    None
+):
+    api = _api_with_empty_topology()
+    response = await api.get_placement_previews(MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID)
+    preview = next(
+        preview
+        for preview in response.previews
+        if preview.instance is not None and preview.sharding.value == "Tensor"
+    )
+    assert preview.instance is not None
+    node_id, runner_id = next(
+        iter(preview.instance.shard_assignments.node_to_runner.items())
+    )
+    single_participant_assignments = preview.instance.shard_assignments.model_copy(
+        update={
+            "node_to_runner": {node_id: runner_id},
+            "runner_to_shard": {
+                runner_id: preview.instance.shard_assignments.runner_to_shard[runner_id]
+            },
+        }
+    )
+    single_participant_instance = preview.instance.model_copy(
+        update={"shard_assignments": single_participant_assignments}
+    )
+    api.state = api.state.model_copy(
+        update={
+            "instances": {
+                single_participant_instance.instance_id: single_participant_instance
+            },
+            "runners": {runner_id: RunnerReady()},
+        }
+    )
+
+    async def stream(_command_id: CommandId) -> AsyncGenerator[TokenChunk, None]:
+        yield TokenChunk(
+            model=MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+            text="ok",
+            token_id=1,
+            usage=None,
+            finish_reason="stop",
+            stats=GenerationStats(
+                prompt_tps=10.0,
+                generation_tps=20.0,
+                prompt_tokens=3,
+                generation_tokens=1,
+                peak_memory_usage=Memory.from_bytes(0),
+            ),
+        )
+
+    async def fake_send(_command: object) -> None:
+        return None
+
+    cast(Any, api)._token_chunk_stream = stream
+    cast(Any, api)._send = fake_send
+
+    bench_response = await api.bench_chat_completions(
+        BenchChatCompletionRequest(
+            model=MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+            messages=[ChatCompletionMessage(role="user", content="hello")],
+            max_tokens=1,
+        )
+    )
+
+    assert bench_response.execution_path is not None
+    assert bench_response.execution_path["path"] == "single_studio_full_model_load"
+    assert bench_response.execution_path["sharding"] == "Tensor"
+    assert bench_response.execution_path["world_size"] == 2
+    assert bench_response.execution_path["disable_reason"] == (
+        "tensor metadata is not hosted by multiple cluster participants"
+    )
+    assert bench_response.execution_path["tensor_parallel_shards"] == [
+        {
+            "node_id": str(node_id),
+            "runner_id": str(runner_id),
+            "model_id": str(MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID),
+            "device_rank": single_participant_assignments.runner_to_shard[
+                runner_id
+            ].device_rank,
+            "world_size": 2,
+            "start_layer": 0,
+            "end_layer": 70,
+            "n_layers": 70,
+        }
+    ]
 
 
 async def test_bench_mtp_request_fail_open_reports_ar_disabled_telemetry(
@@ -232,6 +373,11 @@ async def test_bench_mtp_request_fail_open_reports_ar_disabled_telemetry(
     )
 
     assert len(sent_commands) == 1
+    command = sent_commands[0]
+    assert isinstance(command, TextGeneration)
+    assert command.task_params.mimo_mtp_fastpath is None
+    task_param_payload = command.task_params.model_dump()
+    assert "mimo_mtp_fastpath" not in task_param_payload
     assert bench_response.accepted_execution_path == "ar"
     assert bench_response.mtp_enabled is False
     assert bench_response.mtp_depth is None
@@ -411,3 +557,102 @@ def test_http_exception_handler_preserves_structured_memory_detail() -> None:
 
     assert response.status_code == 400
     assert json.loads(bytes(response.body)) == {"error": detail}
+
+
+async def test_bench_mtp_runtime_guard_preserves_worker_mtp_intent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("EXO_MIMO_MTP_NATIVE_RUNTIME", "1")
+    sidecar_path = tmp_path / "model_mtp.safetensors"
+    sidecar_path.write_bytes(b"runtime guard enabled; worker validates real sidecar")
+    api = _api_with_empty_topology()
+    response = await api.get_placement_previews(MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID)
+    preview = next(
+        preview
+        for preview in response.previews
+        if preview.instance is not None and preview.sharding.value == "Tensor"
+    )
+    assert preview.instance is not None
+    api.state = api.state.model_copy(
+        update={"instances": {preview.instance.instance_id: preview.instance}}
+    )
+
+    async def stream(_command_id: CommandId) -> AsyncGenerator[TokenChunk, None]:
+        yield TokenChunk(
+            model=MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+            text="ok",
+            token_id=1,
+            usage=None,
+            finish_reason="stop",
+            stats=GenerationStats(
+                prompt_tps=1.0,
+                generation_tps=2.0,
+                prompt_tokens=1,
+                generation_tokens=1,
+                peak_memory_usage=Memory.from_bytes(1),
+                accepted_execution_path="mimo_mtp_fastpath",
+                mtp_enabled=True,
+                requested_mtp_depth=1,
+                mtp_depth=1,
+                mtp_sidecar_status="ready",
+                attempted_depth_counts={"1": 1},
+                accepted_depth_counts={"1": 1},
+                acceptance_rate=1.0,
+                fallback_count=0,
+                timing_breakdown_seconds={
+                    "proposal": 0.1,
+                    "verification": 0.2,
+                    "acceptance": 0.03,
+                    "fallback": 0.0,
+                },
+            ),
+        )
+
+    sent_commands: list[object] = []
+
+    async def fake_send(command: object) -> None:
+        sent_commands.append(command)
+
+    cast(Any, api)._token_chunk_stream = stream
+    cast(Any, api)._send = fake_send
+
+    bench_response = await api.bench_chat_completions(
+        BenchChatCompletionRequest(
+            model=MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID,
+            messages=[ChatCompletionMessage(role="user", content="hello")],
+            max_tokens=1,
+            mimo_mtp_fastpath=True,
+            mimo_mtp_depth=1,
+            mimo_mtp_sidecar_path=str(sidecar_path),
+            mimo_mtp_fail_closed=False,
+        )
+    )
+
+    assert len(sent_commands) == 1
+    command = sent_commands[0]
+    assert isinstance(command, TextGeneration)
+    assert command.task_params.bench is True
+    mtp_params = command.task_params.mimo_mtp_fastpath
+    assert mtp_params is not None
+    assert mtp_params.enabled is True
+    assert mtp_params.depth == 1
+    assert mtp_params.sidecar_path == str(sidecar_path)
+    assert mtp_params.fail_closed is False
+    assert bench_response.generation_stats is not None
+    assert bench_response.accepted_execution_path == "mimo_mtp_fastpath"
+    assert bench_response.mtp_enabled is True
+    assert bench_response.requested_mtp_depth == 1
+    assert bench_response.mtp_depth == 1
+    assert bench_response.mtp_sidecar_status == "ready"
+    assert bench_response.attempted_depth_counts == {"1": 1}
+    assert bench_response.accepted_depth_counts == {"1": 1}
+    assert bench_response.acceptance_rate == 1.0
+    assert bench_response.fallback_count == 0
+    assert bench_response.timing_breakdown_seconds == {
+        "proposal": 0.1,
+        "verification": 0.2,
+        "acceptance": 0.03,
+        "fallback": 0.0,
+    }
+    assert bench_response.mtp_disable_reason is None

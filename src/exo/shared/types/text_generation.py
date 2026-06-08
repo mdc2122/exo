@@ -5,15 +5,27 @@ are converted to TextGenerationTaskParams at the API boundary via adapters.
 """
 
 from collections.abc import Mapping
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, Self, cast
 
-from pydantic import BaseModel, Field, model_serializer
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+)
 from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
 from exo.shared.types.common import ModelId
 
 MessageRole = Literal["user", "assistant", "system", "developer"]
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+SUPPORTED_MIMO_MTP_FASTPATH_DEPTHS: Final[tuple[int, ...]] = (1, 2, 3)
+
+
+def _supported_mimo_mtp_fastpath_depths_text() -> str:
+    return ",".join(str(depth) for depth in SUPPORTED_MIMO_MTP_FASTPATH_DEPTHS)
 
 
 def resolve_reasoning_params(
@@ -70,10 +82,92 @@ class MimoMtpFastpathParams(BaseModel, frozen=True):
     stays unchanged unless callers explicitly opt in at the API boundary.
     """
 
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     enabled: bool = True
     depth: int | None = None
     sidecar_path: str | None = None
     fail_closed: bool = True
+
+    @field_validator("depth")
+    @classmethod
+    def _validate_supported_depth(cls, depth: int | None) -> int | None:
+        if depth is None or depth in SUPPORTED_MIMO_MTP_FASTPATH_DEPTHS:
+            return depth
+        supported_depths = _supported_mimo_mtp_fastpath_depths_text()
+        raise ValueError(
+            f"unsupported MTP depth {depth}; supported depths: {supported_depths}; "
+            "disable_reason=unsupported_depth"
+        )
+
+
+class MimoMtpRequestFields(BaseModel, frozen=True):
+    """Guarded MTP request fields extracted from a ChatCompletionRequest.
+
+    These are the API boundary fields that gate MTP intent. They map
+    1:1 to MimoMtpFastpathParams attributes when the enabled flag is true,
+    or produce None (disabled_default) when the enabled flag is false.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    mimo_mtp_fastpath: bool
+    mimo_mtp_depth: int | None
+    mimo_mtp_sidecar_path: str | None
+    mimo_mtp_fail_closed: bool
+
+
+def map_request_mtp_fields_to_fastpath_params(
+    fields: MimoMtpRequestFields,
+) -> MimoMtpFastpathParams | None:
+    """Map guarded API request fields to MimoMtpFastpathParams.
+
+    This is a pure function that converts the API-boundary MTP request
+    fields into the internal MimoMtpFastpathParams model. When
+    ``mimo_mtp_fastpath`` is False (the default), returns None so normal
+    autoregressive generation stays unchanged. When True, returns a
+    MimoMtpFastpathParams instance with enabled=True and the remaining
+    fields mapped 1:1.
+
+    Field mapping contract:
+      - mimo_mtp_fastpath (bool) → gates None vs MimoMtpFastpathParams
+      - mimo_mtp_depth (int | None) → depth (int | None)
+      - mimo_mtp_sidecar_path (str | None) → sidecar_path (str | None)
+      - mimo_mtp_fail_closed (bool) → fail_closed (bool)
+    """
+    if not fields.mimo_mtp_fastpath:
+        return None
+    return MimoMtpFastpathParams(
+        enabled=True,
+        depth=fields.mimo_mtp_depth,
+        sidecar_path=fields.mimo_mtp_sidecar_path,
+        fail_closed=fields.mimo_mtp_fail_closed,
+    )
+
+
+def assign_mimo_mtp_fastpath_params(
+    task_params: "TextGenerationTaskParams",
+    mtp_params: MimoMtpFastpathParams | None,
+) -> "TextGenerationTaskParams":
+    """Assign MimoMtpFastpathParams into TextGenerationTaskParams.
+
+    This is the canonical merge/assignment function for propagating guarded
+    MTP intent from the API boundary into the internal task params. It is a
+    pure function that returns a new TextGenerationTaskParams with the MTP
+    field set or cleared, preserving all other fields unchanged.
+
+    Merge strategy:
+    - When mtp_params is None, returns task_params with
+      mimo_mtp_fastpath_params set to None (default autoregressive generation).
+    - When mtp_params is a valid MimoMtpFastpathParams, returns task_params
+      with mimo_mtp_fastpath_params set to the provided instance.
+    - Uses model_copy to preserve immutability; no in-place mutation.
+    - The caller is responsible for validation (e.g., depth range, model
+      eligibility) before calling this function.
+    """
+    return task_params.model_copy(
+        update={"mimo_mtp_fastpath_params": mtp_params},
+    )
 
 
 class TextGenerationTaskParams(BaseModel, frozen=True):
@@ -82,6 +176,8 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
     Every API adapter converts its wire type into this before handing
     off to the master/worker pipeline.
     """
+
+    model_config = ConfigDict(populate_by_name=True)
 
     model: ModelId
     input: list[InputMessage]
@@ -110,7 +206,28 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
     image_hashes: dict[int, str] = Field(default_factory=dict)
     total_input_chunks: int = 0
     image_count: int = 0
-    mimo_mtp_fastpath: MimoMtpFastpathParams | None = None
+    mimo_mtp_fastpath_params: MimoMtpFastpathParams | None = Field(
+        default=None,
+        validation_alias=AliasChoices("mimo_mtp_fastpath_params", "mimo_mtp_fastpath"),
+        serialization_alias="mimo_mtp_fastpath",
+    )
+
+    @property
+    def mimo_mtp_fastpath(self) -> MimoMtpFastpathParams | None:
+        return self.mimo_mtp_fastpath_params
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        if update is not None and "mimo_mtp_fastpath" in update:
+            normalized_update: dict[str, Any] = dict(update)
+            mimo_mtp_fastpath_update = cast(
+                object, normalized_update.pop("mimo_mtp_fastpath")
+            )
+            if "mimo_mtp_fastpath_params" not in normalized_update:
+                normalized_update["mimo_mtp_fastpath_params"] = mimo_mtp_fastpath_update
+            update = normalized_update
+        return super().model_copy(update=update, deep=deep)
 
     @model_serializer(mode="wrap")
     def _serialize_without_disabled_mtp(
@@ -119,6 +236,9 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
         raw_serialized = cast(object, handler(self))
         assert isinstance(raw_serialized, dict)
         serialized: dict[str, Any] = dict(cast(Mapping[str, Any], raw_serialized))
-        if self.mimo_mtp_fastpath is None:
+        serialized.pop("mimo_mtp_fastpath_params", None)
+        if self.mimo_mtp_fastpath_params is None or not self.mimo_mtp_fastpath_params.enabled:
             serialized.pop("mimo_mtp_fastpath", None)
+        else:
+            serialized["mimo_mtp_fastpath"] = self.mimo_mtp_fastpath_params.model_dump()
         return serialized

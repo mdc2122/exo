@@ -1,4 +1,5 @@
 # type: ignore
+import os
 import sys
 import time
 import types
@@ -179,6 +180,11 @@ def _make_tiny_glm_moe_dsa_model(
 
 
 class TestTurboQuantCacheSelection:
+    pytestmark = pytest.mark.skipif(
+        os.environ.get("EXO_TEST_TURBOQUANT") != "1",
+        reason="TurboQuant optional accelerator tests require EXO_TEST_TURBOQUANT=1",
+    )
+
     def test_make_kv_cache_uses_turboquant_for_glm_moe_dsa(self, monkeypatch):
         turboquant_module = types.ModuleType("turboquant_mlx.cache")
         turboquant_module.TurboQuantKVCache = FakeTurboQuantKVCache

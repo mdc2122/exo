@@ -239,10 +239,16 @@ Executes a chat completion request using an OpenAI-compatible schema. Supports s
 
 These fields are exo extensions for the guarded MiMo V2.5 Pro MTP vertical slice. They are disabled by default and must not be used for default or production generation unless the explicit rollout gate has same-cluster AR-vs-MTP evidence that proves a real speed win.
 
+Fail-closed contract: when `EXO_MIMO_MTP_NATIVE_RUNTIME` is unset or falsey, a request that supplies `mimo_mtp_fastpath: true` and keeps the default `mimo_mtp_fail_closed: true` is rejected with HTTP 400 (`mimo_mtp_execution_backend_unwired`) before generation dispatch. The request is not silently converted to autoregressive generation. To verify this default-disabled behavior, run:
+
+```bash
+uv run pytest src/exo/api/tests/test_mimo_mtp_normal_execution_path.py::test_experimental_mtp_request_fields_are_rejected_by_default_when_native_runtime_guard_disabled
+```
+
 * `mimo_mtp_fastpath`: Experimental. Disabled by default (`false`). Opts a request into the guarded MiMo V2.5 Pro MTP fastpath; omitted or `false` requests remain normal autoregressive generation.
-* `mimo_mtp_depth`: Experimental. Disabled by default (`null`). Requests an MTP draft depth only when `mimo_mtp_fastpath` is `true`; omitted or `null` has no effect.
+* `mimo_mtp_depth`: Experimental. Disabled by default (`null`). Requests an MTP draft depth only when `mimo_mtp_fastpath` is `true`; supported depths are `1`, `2`, and `3`. Omitted, `null`, or unsupported depths disable/fail the guarded MTP path rather than pretending MTP ran.
 * `mimo_mtp_sidecar_path`: Experimental. Disabled by default (`null`). Provides an explicit path to MiMo V2.5 Pro MTP sidecar artifacts only for an opted-in request; omitted or `null` means no sidecar is used.
-* `mimo_mtp_fail_closed`: Experimental. Disabled by default for production/default MTP rollout; the request-field default is `true` so explicitly opted-in MTP requests fail closed instead of silently falling back when the guarded fastpath cannot run.
+* `mimo_mtp_fail_closed`: Experimental. Disabled by default (`true`). This does not enable MTP; it only makes explicitly opted-in MTP requests fail closed instead of silently falling back when the guarded fastpath cannot run.
 
 Runnable documentation validation check:
 

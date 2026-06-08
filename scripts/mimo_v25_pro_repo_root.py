@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -82,3 +83,20 @@ def validate_repo_root(
         start_path=resolved_start_path,
         markers=REQUIRED_REPO_ROOT_MARKERS,
     )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Report the detected exo repository root for the current working directory."""
+
+    del argv
+    try:
+        validation = validate_repo_root()
+    except RepoRootValidationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    print(validation.root)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

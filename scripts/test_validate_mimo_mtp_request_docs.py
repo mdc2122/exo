@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,11 +17,47 @@ DOC_WITH_ALL_FIELDS = """
 
 ## Experimental MiMo MTP request fields
 
-* `mimo_mtp_fastpath`: Experimental. Disabled by default.
-* `mimo_mtp_depth`: Experimental. Disabled by default.
-* `mimo_mtp_sidecar_path`: Experimental. Disabled by default.
-* `mimo_mtp_fail_closed`: Experimental. Disabled by default.
+* `mimo_mtp_fastpath`: Experimental. Disabled by default (`false`).
+* `mimo_mtp_depth`: Experimental. Disabled by default (`null`).
+* `mimo_mtp_sidecar_path`: Experimental. Disabled by default (`null`).
+* `mimo_mtp_fail_closed`: Experimental. Disabled by default (`true`).
 """
+
+
+@pytest.mark.parametrize(
+    ("field_name", "wrong_documented_default"),
+    [
+        ("mimo_mtp_fastpath", "true"),
+        ("mimo_mtp_depth", "1"),
+        ("mimo_mtp_sidecar_path", '"/tmp/model_mtp.safetensors"'),
+        ("mimo_mtp_fail_closed", "false"),
+    ],
+)
+def test_validation_fails_when_documented_default_does_not_match_schema_default(
+    tmp_path: Path, field_name: str, wrong_documented_default: str
+) -> None:
+    docs_path = tmp_path / "api.md"
+    schema_defaults = {
+        "mimo_mtp_fastpath": "false",
+        "mimo_mtp_depth": "null",
+        "mimo_mtp_sidecar_path": "null",
+        "mimo_mtp_fail_closed": "true",
+    }
+    docs_path.write_text(
+        DOC_WITH_ALL_FIELDS.replace(
+            f"`{field_name}`: Experimental. Disabled by default "
+            f"(`{schema_defaults[field_name]}`)",
+            f"`{field_name}`: Experimental. Disabled by default "
+            f"(`{wrong_documented_default}`)",
+        )
+    )
+
+    failures = validate_mimo_mtp_request_docs(docs_path)
+
+    assert any(
+        field_name in failure and wrong_documented_default in failure
+        for failure in failures
+    )
 
 
 def test_discovers_mtp_request_fields_from_chat_completion_schema() -> None:
@@ -73,3 +111,17 @@ def test_validation_passes_when_every_mtp_field_has_required_markers(
     docs_path.write_text(DOC_WITH_ALL_FIELDS)
 
     assert validate_mimo_mtp_request_docs(docs_path) == []
+
+
+def test_documented_validator_command_runs_from_ultrawork_directory() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(repo_root / "scripts/validate_mimo_mtp_request_docs.py")],
+        cwd=repo_root / ".goose-ultrawork",
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "MiMo MTP request documentation validation passed" in result.stdout
