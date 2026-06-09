@@ -347,6 +347,7 @@ class SequentialGenerator(InferenceGenerator):
                         should_use_mtp=False,
                         accepted_execution_path="rejected",
                         mtp_enabled=False,
+                        model_id=decision.model_id,
                         requested_depth=decision.requested_depth,
                         mtp_depth=None,
                         sidecar_status=decision.sidecar_status,
