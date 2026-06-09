@@ -649,7 +649,7 @@ class BatchGenerator(InferenceGenerator):
             decision = evaluate_mimo_mtp_worker_fastpath(
                 generation_task_params,
                 cache=self._mimo_mtp_fastpath_cache,
-                execution_path_wired=True,
+                execution_path_wired=False,
             )
             _log_mimo_mtp_worker_decision(task_id=task.task_id, decision=decision)
             if decision.accepted_execution_path == "rejected":
@@ -659,18 +659,9 @@ class BatchGenerator(InferenceGenerator):
                     f"disable_reason={reason}"
                 )
             if decision.should_use_mtp:
-                # MTP is not yet supported in the batch generator path.
-                # Fall back to AR by stripping MTP intent so the request
-                # proceeds through the normal batch AR dispatch.
-                logger.warning(
-                    "MiMo MTP fastpath requested in batch generator but "
-                    "batch MTP is not yet supported; falling back to AR "
-                    "for task_id={} model={}",
-                    task.task_id,
-                    decision.model_id,
-                )
-                generation_task_params = _strip_mimo_mtp_fastpath_intent(
-                    generation_task_params
+                raise RuntimeError(
+                    "MiMo MTP fastpath rejected before batch AR dispatch: "
+                    "disable_reason=mimo_mtp_batch_generator_unwired"
                 )
             if decision.disable_reason is not None:
                 generation_task_params = _strip_mimo_mtp_fastpath_intent(
