@@ -774,7 +774,7 @@ class TestApiBoundaryMissingSidecarFailClosed:
         assert detail["mtp_execution_state"] == "missing_sidecar"
         assert detail["mtp_sidecar_status"] == "missing"
         _assert_no_silent_mtp_claim(
-            mtp_enabled=detail.get("mtp_enabled"),
+            mtp_enabled=cast(bool | None, detail.get("mtp_enabled")),
             accepted_execution_path=cast(
                 str | None, detail.get("accepted_execution_path")
             ),
@@ -1214,6 +1214,134 @@ class TestWorkerGeneratorRoutingMissingSidecarFailClosed:
         assert len(fake_engine.submitted_params) == 1
         assert fake_engine.submitted_params[0].mimo_mtp_fastpath is None
 
+    def test_batch_fail_closed_ready_sidecar_rejects_unwired_batch_mtp(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Batch generation has no real MTP execution path; a guarded
+        ready-sidecar MTP request must fail closed instead of silently AR routing."""
+        import exo.worker.runner.llm_inference.batch_generator as bg_module
+        from exo.shared.types.tasks import TextGeneration
+        from exo.shared.types.worker.instances import InstanceId
+        from exo.worker.engines.mlx.tests.test_mimo_mtp_fast_worker_fastpath import (
+            _write_synthetic_official_sidecar,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        def _noop_check(_params: TextGenerationTaskParams) -> None:
+            return None
+
+        def _fake_chat_template(
+            _tokenizer: object,
+            _params: TextGenerationTaskParams,
+        ) -> str:
+            return "prompt"
+
+        monkeypatch.setenv("EXO_MIMO_MTP_NATIVE_RUNTIME", "1")
+        monkeypatch.setattr(
+            bg_module, "_check_for_debug_prompts", _noop_check
+        )
+        monkeypatch.setattr(
+            bg_module, "apply_chat_template", _fake_chat_template
+        )
+
+        sidecar_path = tmp_path / "model_mtp.safetensors"
+        _write_synthetic_official_sidecar(sidecar_path)
+        task = TextGeneration(
+            task_id=TaskId("12345678-1234-1234-1234-123456789abc"),
+            command_id=CommandId("cmd-1"),
+            instance_id=InstanceId("instance-1"),
+            task_params=_mtp_task_params(
+                sidecar_path=str(sidecar_path), fail_closed=True
+            ),
+        )
+
+        fake_engine = _FakeBatchEngine()
+        batch_gen = bg_module.BatchGenerator(
+            model=MagicMock(),
+            tokenizer=MagicMock(),
+            group=None,
+            kv_prefix_cache=None,
+            tool_parser=None,
+            model_id=_MIMO_MODEL,
+            device_rank=0,
+            cancel_receiver=_CancelReceiver(),  # type: ignore[arg-type]
+            event_sender=_EventSender(),  # type: ignore[arg-type]
+        )
+        batch_gen._mlx_gen = cast(Any, fake_engine)  # pyright: ignore[reportPrivateUsage]
+
+        with pytest.raises(RuntimeError) as exc_info:
+            batch_gen._start_task(task)  # pyright: ignore[reportPrivateUsage]
+
+        assert "mimo_mtp_distributed_generator_unwired" in str(exc_info.value)
+        assert len(fake_engine.submitted_params) == 0
+        assert batch_gen._mimo_mtp_fastpath_cache.load_count_for_path(  # pyright: ignore[reportPrivateUsage]
+            sidecar_path
+        ) == 0
+
+    def test_batch_fail_open_ready_sidecar_falls_back_without_loading_mtp(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Explicit fail-open may AR fallback in batch mode, but it must not
+        claim or initialize the real MTP path when batch MTP is unwired."""
+        import exo.worker.runner.llm_inference.batch_generator as bg_module
+        from exo.shared.types.tasks import TextGeneration
+        from exo.shared.types.worker.instances import InstanceId
+        from exo.worker.engines.mlx.tests.test_mimo_mtp_fast_worker_fastpath import (
+            _write_synthetic_official_sidecar,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        def _noop_check(_params: TextGenerationTaskParams) -> None:
+            return None
+
+        def _fake_chat_template(
+            _tokenizer: object,
+            _params: TextGenerationTaskParams,
+        ) -> str:
+            return "prompt"
+
+        monkeypatch.setenv("EXO_MIMO_MTP_NATIVE_RUNTIME", "1")
+        monkeypatch.setattr(
+            bg_module, "_check_for_debug_prompts", _noop_check
+        )
+        monkeypatch.setattr(
+            bg_module, "apply_chat_template", _fake_chat_template
+        )
+
+        sidecar_path = tmp_path / "model_mtp.safetensors"
+        _write_synthetic_official_sidecar(sidecar_path)
+        task = TextGeneration(
+            task_id=TaskId("12345678-1234-1234-1234-123456789abc"),
+            command_id=CommandId("cmd-1"),
+            instance_id=InstanceId("instance-1"),
+            task_params=_mtp_task_params(
+                sidecar_path=str(sidecar_path), fail_closed=False
+            ),
+        )
+
+        fake_engine = _FakeBatchEngine()
+        batch_gen = bg_module.BatchGenerator(
+            model=MagicMock(),
+            tokenizer=MagicMock(),
+            group=None,
+            kv_prefix_cache=None,
+            tool_parser=None,
+            model_id=_MIMO_MODEL,
+            device_rank=0,
+            cancel_receiver=_CancelReceiver(),  # type: ignore[arg-type]
+            event_sender=_EventSender(),  # type: ignore[arg-type]
+        )
+        batch_gen._mlx_gen = cast(Any, fake_engine)  # pyright: ignore[reportPrivateUsage]
+        batch_gen._start_task(task)  # pyright: ignore[reportPrivateUsage]
+
+        assert len(fake_engine.submitted_params) == 1
+        assert fake_engine.submitted_params[0].mimo_mtp_fastpath is None
+        assert batch_gen._mimo_mtp_fastpath_cache.load_count_for_path(  # pyright: ignore[reportPrivateUsage]
+            sidecar_path
+        ) == 0
+
 
 # ===========================================================================
 # Cross-layer invariant: no layer ever claims MTP for missing-sidecar
@@ -1359,7 +1487,7 @@ class TestMimoModelWithSidecarNotMissingSidecar:
         """With a real sidecar file, the worker fastpath does not trigger
         missing_sidecar — it proceeds to subsequent guard checks."""
         from exo.worker.engines.mlx.tests.test_mimo_mtp_fast_worker_fastpath import (
-            _write_synthetic_official_sidecar,
+            _write_synthetic_official_sidecar,  # pyright: ignore[reportPrivateUsage]
         )
 
         sidecar_path = tmp_path / "model_mtp.safetensors"
