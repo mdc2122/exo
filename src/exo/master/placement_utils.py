@@ -452,13 +452,16 @@ def _find_ip_prioritised(
             "maybe_ethernet": 3,
             "thunderbolt": 4,
         }
-    return min(
-        ips,
-        key=lambda ip: (
-            0 if _is_tailscale_ip(ip) else 1,
-            priority.get(ip_to_type.get(ip, "unknown"), 2),
-        ),
-    )
+    def _ip_rank(ip: str) -> tuple[int, int]:
+        is_tailscale = _is_tailscale_ip(ip)
+        # Ring is the data plane: a Tailscale IP may be routed or even
+        # DERP-relayed, so prefer direct interfaces there. The JACCL
+        # coordinator socket is control-plane TCP where Tailscale-first is the
+        # known-good behaviour.
+        overlay_rank = (1 if is_tailscale else 0) if ring else (0 if is_tailscale else 1)
+        return (overlay_rank, priority.get(ip_to_type.get(ip, "unknown"), 2))
+
+    return min(ips, key=_ip_rank)
 
 
 def get_mlx_ring_hosts_by_node(

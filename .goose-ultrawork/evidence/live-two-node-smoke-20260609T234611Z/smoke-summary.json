@@ -1,0 +1,61 @@
+{
+  "acceptance_result": {
+    "acceptance_rate": null,
+    "accepted_depth_counts": null,
+    "attempted_depth_counts": null,
+    "mtp_accepted_execution_path": null,
+    "mtp_execution_state": null,
+    "pass": false
+  },
+  "cluster_state": {
+    "api_base": "http://127.0.0.1:52415",
+    "checked_at_utc": "2026-06-09T23:46:11.414140+00:00",
+    "errors": [],
+    "last_seen_keys": [
+      "12D3KooWEhNLTJDZTiPWWiw9PW1FCAWUsXTzUeDSdTqC65QrvjQd",
+      "12D3KooWG6uUAtHxbPMey6UzYepYRbvA8g2pkHLw2KHc2eCXomeM"
+    ],
+    "node_count": 2,
+    "nodes": [
+      "12D3KooWEhNLTJDZTiPWWiw9PW1FCAWUsXTzUeDSdTqC65QrvjQd",
+      "12D3KooWG6uUAtHxbPMey6UzYepYRbvA8g2pkHLw2KHc2eCXomeM"
+    ],
+    "two_node_ready": true
+  },
+  "qa_verdict": {
+    "pass": false,
+    "telemetry_present": {
+      "acceptance_rate": false,
+      "accepted_depth_counts": false,
+      "accepted_execution_path": false,
+      "ar_generation_tps": false,
+      "attempted_depth_counts": false,
+      "mtp_execution_state": false,
+      "mtp_generation_tps": false,
+      "mtp_sidecar_status": false,
+      "timing_breakdown_seconds": false
+    }
+  },
+  "runner_result": {
+    "ar_http_status": null,
+    "ar_row_status": null,
+    "mtp_http_status": null,
+    "mtp_row_status": null,
+    "pass": false
+  },
+  "smoke_result": {
+    "acceptance_pass": false,
+    "pass": false,
+    "qa_pass": false,
+    "runner_pass": false,
+    "throughput_pass": false
+  },
+  "throughput_result": {
+    "ar_generation_tps": null,
+    "mtp_generation_tps": null,
+    "mtp_min_tok_s": 25.0,
+    "pass": false,
+    "preferred_40_tok_s_met": false,
+    "target_30_tok_s_met": false
+  }
+}
