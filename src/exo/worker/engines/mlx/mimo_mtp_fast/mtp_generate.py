@@ -21,7 +21,19 @@ from collections.abc import Callable, Generator
 from typing import cast
 
 import mlx.core as mx
-from mlx_lm.sample_utils import make_logits_processors, make_sampler
+from mlx_lm.sample_utils import (
+    apply_min_p as _apply_min_p,  # pyright: ignore[reportUnknownVariableType]
+)
+from mlx_lm.sample_utils import (
+    apply_top_k as _apply_top_k,  # pyright: ignore[reportUnknownVariableType]
+)
+from mlx_lm.sample_utils import (
+    apply_top_p as _apply_top_p,  # pyright: ignore[reportUnknownVariableType]
+)
+from mlx_lm.sample_utils import (
+    make_logits_processors,
+    make_sampler,
+)
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.api.types import (
@@ -73,12 +85,105 @@ def _token_batch(token_id: int) -> mx.array:
     return mx.array([[token_id]], dtype=mx.int32)
 
 
-def _greedy_sampler(logits: mx.array) -> mx.array:
-    """Greedy argmax sampler returning a single-column token ID array."""
-    token_ids = mx.argmax(logits, axis=-1)
-    if token_ids.ndim == 1:
-        token_ids = token_ids[:, None]
-    return token_ids.astype(mx.int32)
+def _sampling_probabilities(
+    logits: mx.array,
+    *,
+    temperature: float,
+    top_p: float,
+    min_p: float,
+    top_k: int,
+) -> mx.array:
+    """Return the normalized sampling distribution for logits."""
+    logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+    if top_p > 0.0 and top_p < 1.0:
+        logprobs = cast(mx.array, _apply_top_p(logprobs, top_p))
+    if min_p != 0.0:
+        logprobs = cast(mx.array, _apply_min_p(logprobs, min_p))
+    if top_k > 0:
+        logprobs = cast(mx.array, _apply_top_k(logprobs, top_k))
+
+    if temperature == 0.0:
+        greedy_token = mx.argmax(logprobs, axis=-1, keepdims=True)
+        return mx.where(
+            mx.arange(logprobs.shape[-1])[None, :] == greedy_token,
+            mx.ones_like(logprobs),
+            mx.zeros_like(logprobs),
+        )
+    return mx.softmax(logprobs / temperature, axis=-1)
+
+
+def _token_probability(probabilities: mx.array, token_id: int) -> mx.array:
+    token_index = mx.array([[token_id]], dtype=mx.int32)
+    return mx.take_along_axis(probabilities, token_index, axis=-1)[0, 0]
+
+
+def _speculative_acceptance_probability(
+    *,
+    target_logits: mx.array,
+    draft_logits: mx.array,
+    draft_token: int,
+    temperature: float,
+    top_p: float,
+    min_p: float,
+    top_k: int,
+) -> mx.array:
+    """Compute min(1, p_target(draft_token) / q_draft(draft_token))."""
+    target_probabilities = _sampling_probabilities(
+        target_logits,
+        temperature=temperature,
+        top_p=top_p,
+        min_p=min_p,
+        top_k=top_k,
+    )
+    draft_probabilities = _sampling_probabilities(
+        draft_logits,
+        temperature=temperature,
+        top_p=top_p,
+        min_p=min_p,
+        top_k=top_k,
+    )
+    p_target = _token_probability(target_probabilities, draft_token)
+    q_draft = _token_probability(draft_probabilities, draft_token)
+    return mx.minimum(mx.array(1.0), p_target / mx.maximum(q_draft, mx.array(1e-20)))
+
+
+def _sample_residual_correction_token(
+    *,
+    target_logits: mx.array,
+    draft_logits: mx.array,
+    temperature: float,
+    top_p: float,
+    min_p: float,
+    top_k: int,
+) -> int:
+    """Sample from normalized positive residual max(p_target - q_draft, 0)."""
+    target_probabilities = _sampling_probabilities(
+        target_logits,
+        temperature=temperature,
+        top_p=top_p,
+        min_p=min_p,
+        top_k=top_k,
+    )
+    draft_probabilities = _sampling_probabilities(
+        draft_logits,
+        temperature=temperature,
+        top_p=top_p,
+        min_p=min_p,
+        top_k=top_k,
+    )
+    residual = mx.maximum(target_probabilities - draft_probabilities, mx.zeros_like(target_probabilities))
+    residual_total = mx.sum(residual, axis=-1, keepdims=True)
+    corrected_probabilities = mx.where(
+        residual_total > 0.0,
+        residual / residual_total,
+        target_probabilities,
+    )
+    corrected_logits = mx.where(
+        corrected_probabilities > 0.0,
+        mx.log(corrected_probabilities),
+        mx.array(-float("inf"), dtype=corrected_probabilities.dtype),
+    )
+    return int(mx.random.categorical(corrected_logits).item())
 
 
 def _check_stop_sequence(accumulated_text: str, stop_sequences: list[str]) -> bool:
@@ -137,6 +242,11 @@ def _encode_text(text: str, tokenizer: TokenizerWrapper) -> list[int]:
         return tokenizer.encode(text, add_special_tokens=False)
     except Exception:
         return []
+
+
+def _decode_tokens(token_ids: list[int], tokenizer: TokenizerWrapper) -> str:
+    """Decode token IDs while preserving a strict string type for pyright."""
+    return tokenizer.decode(token_ids)
 
 
 def mlx_generate_mtp(
@@ -226,7 +336,7 @@ def mlx_generate_mtp(
                 processed_logits = processor(history_tokens, processed_logits)
             primary_token = int(sampler(processed_logits).item())
 
-        text = tokenizer.decode([primary_token])
+        text = _decode_tokens([primary_token], tokenizer)
         accumulated_text += text
         generated_tokens += 1
         _increment_count(attempted_depth_counts, 0)
@@ -265,18 +375,39 @@ def mlx_generate_mtp(
         mtp_cache = mtp_stack.make_cache()
         draft_token: int | None = None
 
+        draft_logits_for_acceptance: mx.array | None = None
         if mtp_depth >= 1:
             try:
                 primary_batch = _token_batch(primary_token)
-                draft_logits, _ = mtp_stack.propose(
+                processed_draft_logits: list[mx.array] = []
+
+                def draft_sampler(
+                    draft_logits: mx.array,
+                    *,
+                    accumulated_text_snapshot: str = accumulated_text,
+                    processed_draft_logits_sink: list[mx.array] = processed_draft_logits,
+                ) -> mx.array:
+                    processed_logits = draft_logits
+                    for processor in logits_processors:
+                        draft_history = mx.array(list(all_prompt_tokens) + _encode_text(accumulated_text_snapshot, tokenizer))
+                        processed_logits = processor(draft_history, processed_logits)
+                    processed_draft_logits_sink.append(processed_logits)
+                    return sampler(processed_logits)
+
+                draft_tokens, raw_draft_logits = mtp_stack.propose(
                     previous_hidden_state=current_hidden,
                     latest_token_ids=primary_batch,
                     max_draft_tokens=mtp_depth,
-                    sampler=_greedy_sampler,
+                    sampler=draft_sampler,
                     cache=mtp_cache,
                 )
-                mx.eval(draft_logits)
-                draft_token = int(draft_logits[0, 0].item())
+                mx.eval(draft_tokens)
+                draft_token = int(draft_tokens[0, 0].item())
+                draft_logits_for_acceptance = (
+                    processed_draft_logits[0]
+                    if processed_draft_logits
+                    else raw_draft_logits[0]
+                )
             except Exception as exc:
                 logger.warning("MTP draft proposal failed, AR fallback: {}", exc)
                 draft_token = None
@@ -299,10 +430,26 @@ def mlx_generate_mtp(
         )
         mx.eval(verify_logits, verify_hidden)
         target_logits_for_draft = verify_logits[:, -1, :]
+        processed_target_logits_for_draft = target_logits_for_draft
+        for processor in logits_processors:
+            draft_history = mx.array(list(all_prompt_tokens) + _encode_text(accumulated_text, tokenizer))
+            processed_target_logits_for_draft = processor(draft_history, processed_target_logits_for_draft)
 
-        # --- COMPUTE_ACCEPTANCE (greedy) ---
-        target_token = int(mx.argmax(target_logits_for_draft[0]).item())
-        accepted = draft_token == target_token
+        # --- COMPUTE_ACCEPTANCE (p/q speculative sampling) ---
+        if draft_logits_for_acceptance is None:
+            accepted = False
+        else:
+            acceptance_probability = _speculative_acceptance_probability(
+                target_logits=processed_target_logits_for_draft,
+                draft_logits=draft_logits_for_acceptance,
+                draft_token=draft_token,
+                temperature=temperature,
+                top_p=top_p,
+                min_p=min_p,
+                top_k=top_k,
+            )
+            acceptance_draw = float(mx.random.uniform(shape=()).item())
+            accepted = acceptance_draw <= float(acceptance_probability.item())
 
         if accepted:
             # --- ACCEPT_BRANCH ---
@@ -310,7 +457,7 @@ def mlx_generate_mtp(
             _increment_count(attempted_depth_counts, 1)
             _increment_count(accepted_depth_counts, 1)
 
-            draft_text = tokenizer.decode([draft_token])
+            draft_text = _decode_tokens([draft_token], tokenizer)
             accumulated_text += draft_text
             generated_tokens += 1
 
@@ -363,8 +510,17 @@ def mlx_generate_mtp(
             # --- REJECT ---
             rejected_drafts += 1
             _increment_count(attempted_depth_counts, 1)
-            current_logits = target_logits_for_draft
+            current_logits = processed_target_logits_for_draft
             current_hidden = verify_hidden[:, -1:, :]
+            if draft_logits_for_acceptance is not None:
+                pending_primary = _sample_residual_correction_token(
+                    target_logits=processed_target_logits_for_draft,
+                    draft_logits=draft_logits_for_acceptance,
+                    temperature=temperature,
+                    top_p=top_p,
+                    min_p=min_p,
+                    top_k=top_k,
+                )
 
         if max_stop_len > 0 and len(accumulated_text) > max_stop_len:
             accumulated_text = accumulated_text[-max_stop_len:]
