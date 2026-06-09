@@ -15,6 +15,7 @@ from exo.worker.engines.mlx.mimo_mtp_fast.module_validation import (
 def test_required_fastpath_modules_match_existing_vertical_slice_modules() -> None:
     assert REQUIRED_MIMO_MTP_FASTPATH_MODULES == (
         "exo.worker.engines.mlx.mimo_mtp_fast.benchmark",
+        "exo.worker.engines.mlx.mimo_mtp_fast.mtp_generate",
         "exo.worker.engines.mlx.mimo_mtp_fast.one_cycle",
         "exo.worker.engines.mlx.mimo_mtp_fast.providers",
         "exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract",
@@ -31,7 +32,7 @@ def test_fastpath_inventory_contract_hash_pins_unchanged_module_inventory() -> N
     )
     assert (
         MIMO_MTP_FASTPATH_INVENTORY_SHA256
-        == "0ece0d7c8d0f7fe50cdcd988a5aae2c2b45805f66f2328ffabfb274ad94d9984"
+        == "8f78fba22cd26d99362b9cd1976f1055856fe36c3521e40dfb3ece1e7ba6a93f"
     )
 
 
@@ -83,6 +84,7 @@ def test_validate_fastpath_modules_confirms_required_modules_exist_at_expected_p
     assert report.ready is True
     assert tuple(result.relative_path for result in report.results) == (
         "src/exo/worker/engines/mlx/mimo_mtp_fast/benchmark.py",
+        "src/exo/worker/engines/mlx/mimo_mtp_fast/mtp_generate.py",
         "src/exo/worker/engines/mlx/mimo_mtp_fast/one_cycle.py",
         "src/exo/worker/engines/mlx/mimo_mtp_fast/providers.py",
         "src/exo/worker/engines/mlx/mimo_mtp_fast/sidecar_contract.py",

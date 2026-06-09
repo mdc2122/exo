@@ -25,6 +25,9 @@ from exo.worker.engines.mlx.generator.generate import (
     mlx_generate,
     warmup_inference,
 )
+from exo.worker.engines.mlx.mimo_mtp_fast.mtp_generate import (
+    mlx_generate_mtp,
+)
 from exo.worker.engines.mlx.mimo_mtp_fast.worker_fastpath import (
     MimoMtpWorkerFastpathCache,
     MimoMtpWorkerFastpathDecision,
@@ -336,38 +339,62 @@ class SequentialGenerator(InferenceGenerator):
             decision = evaluate_mimo_mtp_worker_fastpath(
                 generation_task_params,
                 cache=self._mimo_mtp_fastpath_cache,
+                execution_path_wired=True,
             )
             _log_mimo_mtp_worker_decision(task_id=task.task_id, decision=decision)
             if decision.accepted_execution_path == "rejected":
                 yield _error_response_for_mimo_mtp_rejection(decision)
                 return
             if decision.should_use_mtp:
-                yield _error_response_for_mimo_mtp_rejection(
-                    MimoMtpWorkerFastpathDecision(
-                        should_use_mtp=False,
-                        accepted_execution_path="rejected",
-                        mtp_enabled=False,
-                        model_id=decision.model_id,
-                        requested_depth=decision.requested_depth,
-                        mtp_depth=None,
-                        sidecar_status=decision.sidecar_status,
-                        disable_reason="mimo_mtp_distributed_generator_unwired",
-                        reject_reason="mimo_mtp_distributed_generator_unwired",
-                        fallback_reason=None,
-                        error_message=(
-                            "MiMo MTP fastpath rejected before execution: native sidecar "
-                            "loaded but distributed generator seam is not wired; "
-                            "disable_reason=mimo_mtp_distributed_generator_unwired"
-                        ),
-                        telemetry={
-                            "accepted_execution_path": "rejected",
-                            "mtp_enabled": False,
-                            "requested_mtp_depth": decision.requested_depth,
-                            "mtp_sidecar_status": decision.sidecar_status,
-                            "mtp_disable_reason": "mimo_mtp_distributed_generator_unwired",
-                            "mtp_reject_reason": "mimo_mtp_distributed_generator_unwired",
-                        },
+                # --- WIRED MTP EXECUTION PATH ---
+                # The fastpath evaluation authorised MTP; execute speculative
+                # decoding via the MTP generation function.
+                logger.info(
+                    "mimo mtp worker: executing MTP speculative decoding path "
+                    "for task_id={} model={} mtp_depth={}",
+                    task.task_id,
+                    decision.model_id,
+                    decision.mtp_depth,
+                )
+                prompt = apply_chat_template(self.tokenizer, generation_task_params)
+
+                def on_prefill_progress(processed: int, total: int) -> None:
+                    if self.device_rank == 0:
+                        self.event_sender.send(
+                            ChunkGenerated(
+                                command_id=task.command_id,
+                                chunk=PrefillProgressChunk(
+                                    model=self.model_id,
+                                    processed_tokens=processed,
+                                    total_tokens=total,
+                                ),
+                            )
+                        )
+
+                tokens_since_cancel_check = self.check_for_cancel_every
+
+                def on_generation_token() -> None:
+                    nonlocal tokens_since_cancel_check
+                    tokens_since_cancel_check, should_check = (
+                        advance_coordination_counter(
+                            tokens_since_cancel_check,
+                            self.check_for_cancel_every,
+                        )
                     )
+                    if should_check:
+                        self.agree_on_cancellations()
+                        if self.should_cancel(task.task_id):
+                            raise PrefillCancelled()
+                        self.agree_on_tasks()
+
+                yield from mlx_generate_mtp(
+                    model=self.model,
+                    tokenizer=self.tokenizer,
+                    task=generation_task_params,
+                    prompt=prompt,
+                    decision=decision,
+                    on_prefill_progress=on_prefill_progress,
+                    on_generation_token=on_generation_token,
                 )
                 return
             if decision.disable_reason is not None:
@@ -622,18 +649,28 @@ class BatchGenerator(InferenceGenerator):
             decision = evaluate_mimo_mtp_worker_fastpath(
                 generation_task_params,
                 cache=self._mimo_mtp_fastpath_cache,
+                execution_path_wired=True,
             )
             _log_mimo_mtp_worker_decision(task_id=task.task_id, decision=decision)
-            if (
-                decision.accepted_execution_path == "rejected"
-                or decision.should_use_mtp
-            ):
-                reason = decision.disable_reason
-                if decision.should_use_mtp:
-                    reason = "mimo_mtp_batch_generator_unwired"
+            if decision.accepted_execution_path == "rejected":
+                reason = decision.disable_reason or "unknown"
                 raise RuntimeError(
                     "MiMo MTP fastpath rejected before batch AR dispatch: "
                     f"disable_reason={reason}"
+                )
+            if decision.should_use_mtp:
+                # MTP is not yet supported in the batch generator path.
+                # Fall back to AR by stripping MTP intent so the request
+                # proceeds through the normal batch AR dispatch.
+                logger.warning(
+                    "MiMo MTP fastpath requested in batch generator but "
+                    "batch MTP is not yet supported; falling back to AR "
+                    "for task_id={} model={}",
+                    task.task_id,
+                    decision.model_id,
+                )
+                generation_task_params = _strip_mimo_mtp_fastpath_intent(
+                    generation_task_params
                 )
             if decision.disable_reason is not None:
                 generation_task_params = _strip_mimo_mtp_fastpath_intent(

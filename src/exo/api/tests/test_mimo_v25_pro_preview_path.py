@@ -424,10 +424,12 @@ async def test_bench_mtp_request_fails_before_send_when_backend_is_unwired(
     raw_detail = cast(object, exc_info.value.detail)
     assert isinstance(raw_detail, dict)
     detail = cast(Mapping[str, object], raw_detail)
-    assert detail["error"] == "mimo_mtp_execution_backend_unwired"
+    # With the execution path now wired, the invalid-sidecar API guard
+    # fires before the unwired-backend guard (which no longer blocks).
+    assert detail["error"] == "mimo_mtp_sidecar_invalid"
     assert detail["mtp_enabled"] is False
     assert detail["requested_mtp_depth"] == 1
-    assert "no MTP execution backend" in str(detail["message"])
+    assert "invalid" in str(detail["message"]).lower()
 
 
 def test_create_instance_failure_reports_selected_worker_memory_evidence() -> None:

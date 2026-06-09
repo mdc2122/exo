@@ -14,11 +14,12 @@ MIMO_MTP_FASTPATH_INVENTORY_SCHEMA_VERSION: Final[str] = (
     "mimo_mtp_fastpath_inventory.v1"
 )
 MIMO_MTP_FASTPATH_INVENTORY_SHA256: Final[str] = (
-    "0ece0d7c8d0f7fe50cdcd988a5aae2c2b45805f66f2328ffabfb274ad94d9984"
+    "8f78fba22cd26d99362b9cd1976f1055856fe36c3521e40dfb3ece1e7ba6a93f"
 )
 
 REQUIRED_MIMO_MTP_FASTPATH_MODULES: Final[tuple[str, ...]] = (
     "exo.worker.engines.mlx.mimo_mtp_fast.benchmark",
+    "exo.worker.engines.mlx.mimo_mtp_fast.mtp_generate",
     "exo.worker.engines.mlx.mimo_mtp_fast.one_cycle",
     "exo.worker.engines.mlx.mimo_mtp_fast.providers",
     "exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract",
