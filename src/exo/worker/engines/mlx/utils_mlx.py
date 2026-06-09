@@ -478,6 +478,10 @@ def load_mlx_items(
 
     else:
         logger.info("Starting distributed init")
+        # Wire buffers during load, not only after: an unwired multi-hundred-GB
+        # load lands in pageable memory and macOS 26.5 compresses it until the
+        # vm compressor fills and jetsam kills the runner.
+        set_wired_limit_for_model(get_weights_size(bound_instance.bound_shard))
         start_time = time.perf_counter()
         model, tokenizer = shard_and_load(
             bound_instance.bound_shard,
