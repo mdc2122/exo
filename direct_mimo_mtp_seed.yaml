@@ -1,0 +1,39 @@
+goal: >
+  Implement the first real MiMo V2.5 Pro MTP vertical slice in exo's MLX/tensor-parallel
+  generation path, then prepare it for live cluster throughput work toward 30+ tok/s
+  (preferably 40+ tok/s). This is a code-first implementation task, not a tracing or
+  evidence-framework task.
+
+constraints:
+  - "Do not create trace modules, mapping docs, broad benchmark frameworks, dashboards, evidence frameworks, or process scaffolding."
+  - "Do not add or expand mtp_trace/ or similar trace-only directories."
+  - "Do not fake MTP by reporting AR as MTP; if invariants are not met, fail closed to AR/reject with explicit reason."
+  - "Do not change default AR behavior unless guarded MiMo MTP is explicitly requested."
+  - "Use MTPLX only as semantic reference: /Users/studio2/reference-repos/MTPLX/mtplx/generation.py, sampling.py, mimo_mtp_patch.py."
+  - "Prioritize code in exo's MLX generator/sidecar/cache path: src/exo/worker/engines/mlx and src/exo/worker/runner/llm_inference."
+  - "Add only minimal targeted tests/probes that directly protect draft/propose, p/q accept/reject, residual correction, and KV/cache commit/rollback invariants."
+  - "No depth=2/3 work until depth=1 is semantically correct and live-smokeable."
+  - "Keep changes coherent and commit the result locally on the active branch when a real correctness milestone is reached."
+
+acceptance_criteria:
+  - >
+    Fix the existing direct-branch candidate so MiMo MTP depth=1 performs real MLX draft/propose,
+    target verification, MTPLX-style p/q acceptance, residual correction on reject, and correct
+    KV/cache commit/rollback/repair semantics. Specifically replace any argmax-equality acceptance
+    shortcut in mtp_generate.py with the p_target/q_draft rule and residual distribution logic.
+  - >
+    Wire the guarded MiMo MTP request path through exo's MLX generator without changing default AR:
+    guarded MTP requests either execute the real MTP path or fail closed/reject with a precise invariant
+    reason; normal AR requests remain unchanged.
+  - >
+    Run the smallest useful local correctness gate: targeted tests or a local smoke that proves no
+    unverified draft token is emitted, rejection uses residual correction/fallback safely, and cache
+    state is not committed for rejected draft tokens. Do not create broad scaffolding.
+  - >
+    Produce a concise implementation note in the final response and/or commit message listing touched
+    runtime files, exact local tests/smokes run, remaining blockers for live two-node cluster smoke,
+    and next throughput step toward 30+/40+ tok/s.
+
+metadata:
+  seed_id: mimo-v25-pro-mtp-direct-20260609T142051Z
+  ambiguity_score: 0.05
