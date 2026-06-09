@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Generator
+from typing import cast
 
 import mlx.core as mx
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
@@ -48,11 +49,23 @@ from exo.worker.engines.mlx.mimo_mtp_fast.worker_fastpath import (
 from exo.worker.runner.bootstrap import logger
 
 
-def _inner_model_forward(model: Model, token_ids: mx.array, cache: KVCacheType) -> mx.array:
-    """Forward through the inner model to get hidden states (pre-lm_head)."""
+def _forward_hidden_and_logits(
+    model: Model, token_ids: mx.array, cache: KVCacheType
+) -> tuple[mx.array, mx.array]:
+    """Commit token_ids to cache once and return both hidden states and logits.
+
+    The top-level MLX language model call is usually equivalent to
+    ``model.lm_head(model.model(token_ids, cache))``. Calling the top-level
+    model and then calling ``model.model`` again with the same cache would append
+    the same tokens twice. MTP verification uses this helper so the primary,
+    accepted draft, rejected draft boundary, and following correction token each
+    advance the target KV cache exactly once when they are actually committed.
+    """
     inner = model.model  # type: ignore[reportAttributeAccessIssue]
-    # inner() returns mx.array but pyright can't resolve the dynamic attribute
-    return inner(token_ids, cache)  # pyright: ignore[reportUnknownVariableType]
+    lm_head = model.lm_head  # type: ignore[reportAttributeAccessIssue]
+    hidden = cast(mx.array, inner(token_ids, cache))
+    logits = cast(mx.array, lm_head(hidden))
+    return hidden, logits
 
 
 def _token_batch(token_id: int) -> mx.array:
@@ -183,10 +196,10 @@ def mlx_generate_mtp(
 
     # Forward last prompt tokens to get logits AND hidden state
     last_prompt_tokens = all_prompt_tokens[-2:]
-    logits = model(last_prompt_tokens[None], cache=target_cache)
-    mx.eval(logits)
-    hidden_state = _inner_model_forward(model, last_prompt_tokens[None], target_cache)
-    mx.eval(hidden_state)
+    hidden_state, logits = _forward_hidden_and_logits(
+        model, last_prompt_tokens[None], target_cache
+    )
+    mx.eval(hidden_state, logits)
     current_hidden = hidden_state[:, -1:, :]
     current_logits = logits[:, -1, :]
 
@@ -271,18 +284,19 @@ def mlx_generate_mtp(
         if draft_token is None:
             # AR fallback: forward primary through target model
             primary_batch = _token_batch(primary_token)
-            ar_logits = model(primary_batch, cache=target_cache)
-            mx.eval(ar_logits)
-            ar_hidden = _inner_model_forward(model, primary_batch, target_cache)
-            mx.eval(ar_hidden)
+            ar_hidden, ar_logits = _forward_hidden_and_logits(
+                model, primary_batch, target_cache
+            )
+            mx.eval(ar_hidden, ar_logits)
             current_logits = ar_logits[:, -1, :]
             current_hidden = ar_hidden[:, -1:, :]
             continue
 
         # --- VERIFY_FORWARD (sequential strategy) ---
         primary_batch = _token_batch(primary_token)
-        verify_logits = model(primary_batch, cache=target_cache)
-        verify_hidden = _inner_model_forward(model, primary_batch, target_cache)
+        verify_hidden, verify_logits = _forward_hidden_and_logits(
+            model, primary_batch, target_cache
+        )
         mx.eval(verify_logits, verify_hidden)
         target_logits_for_draft = verify_logits[:, -1, :]
 
@@ -330,8 +344,9 @@ def mlx_generate_mtp(
 
             # Forward draft token through target to update KV cache
             draft_batch = _token_batch(draft_token)
-            next_logits = model(draft_batch, cache=target_cache)
-            next_hidden = _inner_model_forward(model, draft_batch, target_cache)
+            next_hidden, next_logits = _forward_hidden_and_logits(
+                model, draft_batch, target_cache
+            )
             mx.eval(next_logits, next_hidden)
             current_logits = next_logits[:, -1, :]
             current_hidden = next_hidden[:, -1:, :]
