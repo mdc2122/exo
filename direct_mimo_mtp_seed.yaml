@@ -34,6 +34,20 @@ acceptance_criteria:
     runtime files, exact local tests/smokes run, remaining blockers for live two-node cluster smoke,
     and next throughput step toward 30+/40+ tok/s.
 
+ontology_schema:
+  name: "MiMoMTPDirectImplementation"
+  description: "Direct real exo MLX MiMo V2.5 Pro MTP implementation slice for tensor-parallel cluster throughput."
+  fields:
+    - name: "runtime_path"
+      field_type: "string"
+      description: "The exo MLX generator/sidecar/cache path implementing MTP."
+    - name: "speculative_semantics"
+      field_type: "string"
+      description: "MTPLX p/q accept, residual correction, and KV/cache commit/rollback invariants."
+    - name: "throughput_target"
+      field_type: "string"
+      description: "30+ tok/s target, preferably 40+ tok/s, after correctness and live smoke."
+
 metadata:
   seed_id: mimo-v25-pro-mtp-direct-20260609T142051Z
   ambiguity_score: 0.05
