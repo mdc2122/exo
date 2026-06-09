@@ -16,6 +16,7 @@ from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_loader import (
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_module import (
     Fp8BlockLinear,
     MimoMtpCache,
+    QuantizedAffineLinear,
     build_mimo_mtp_stack,
 )
 
@@ -65,9 +66,6 @@ class _TinyBaseModel:
         return logits
 
 
-def _fp8_weight(shape: tuple[int, int], value: float = 0.0) -> mx.array:
-    return MX_TO_FP8(mx.full(shape, value, dtype=mx.float32))
-
 
 def _tiny_layer(layer_index: int) -> MimoMtpLayerTensors:
     del layer_index
@@ -81,15 +79,23 @@ def _tiny_layer(layer_index: int) -> MimoMtpLayerTensors:
         "input_layernorm.weight": mx.ones((2,), dtype=mx.bfloat16),
         "pre_mlp_layernorm.weight": mx.ones((2,), dtype=mx.bfloat16),
         "self_attn.attention_sink_bias": mx.zeros((1,), dtype=mx.bfloat16),
+        "eh_proj.weight.scales": mx.ones((1, 1), dtype=mx.float32),
+        "eh_proj.weight.biases": mx.zeros((1, 1), dtype=mx.float32),
         "self_attn.o_proj.weight": mx.zeros((2, 2), dtype=mx.bfloat16),
-        "self_attn.qkv_proj.weight": _fp8_weight((6, 2)),
-        "self_attn.qkv_proj.weight_scale_inv": mx.ones((1, 1), dtype=mx.float32),
-        "mlp.down_proj.weight": _fp8_weight((2, 4)),
-        "mlp.down_proj.weight_scale_inv": mx.ones((1, 1), dtype=mx.float32),
-        "mlp.gate_proj.weight": _fp8_weight((4, 2)),
-        "mlp.gate_proj.weight_scale_inv": mx.ones((1, 1), dtype=mx.float32),
-        "mlp.up_proj.weight": _fp8_weight((4, 2)),
-        "mlp.up_proj.weight_scale_inv": mx.ones((1, 1), dtype=mx.float32),
+        "self_attn.o_proj.weight.scales": mx.ones((1, 1), dtype=mx.float32),
+        "self_attn.o_proj.weight.biases": mx.zeros((1, 1), dtype=mx.float32),
+        "self_attn.qkv_proj.weight": mx.zeros((6, 2), dtype=mx.float32),
+        "self_attn.qkv_proj.weight.scales": mx.ones((1, 1), dtype=mx.float32),
+        "self_attn.qkv_proj.weight.biases": mx.zeros((1, 1), dtype=mx.float32),
+        "mlp.down_proj.weight": mx.zeros((2, 4)),
+        "mlp.down_proj.weight.scales": mx.ones((1, 1), dtype=mx.float32),
+        "mlp.down_proj.weight.biases": mx.zeros((1, 1), dtype=mx.float32),
+        "mlp.gate_proj.weight": mx.zeros((4, 2)),
+        "mlp.gate_proj.weight.scales": mx.ones((1, 1), dtype=mx.float32),
+        "mlp.gate_proj.weight.biases": mx.zeros((1, 1), dtype=mx.float32),
+        "mlp.up_proj.weight": mx.zeros((4, 2)),
+        "mlp.up_proj.weight.scales": mx.ones((1, 1), dtype=mx.float32),
+        "mlp.up_proj.weight.biases": mx.zeros((1, 1), dtype=mx.float32),
     }
     return MimoMtpLayerTensors(layer_index=0, tensors=tensors)
 
@@ -127,6 +133,45 @@ def test_fp8_block_linear_dequantizes_once_at_construction(
     layer(mx.ones((1, 1, 3), dtype=mx.float32))
 
     assert calls == 1
+
+
+def test_quantized_affine_linear_uses_mimo_mtp_6bit_affine_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    x = mx.ones((1, 1, 384), dtype=mx.float32)
+    weight = mx.zeros((2, 72), dtype=mx.uint32)
+    scales = mx.ones((2, 6), dtype=mx.float32)
+    biases = mx.zeros((2, 6), dtype=mx.float32)
+    expected = mx.zeros((1, 1, 2), dtype=mx.float32)
+
+    def counted_quantized_matmul(
+        input_value: mx.array,
+        weight_value: mx.array,
+        **kwargs: object,
+    ) -> mx.array:
+        calls.append({"input": input_value, "weight": weight_value, **kwargs})
+        return expected
+
+    monkeypatch.setattr(
+        sidecar_module, "MX_QUANTIZED_MATMUL", counted_quantized_matmul
+    )
+    layer = QuantizedAffineLinear(weight=weight, scales=scales, biases=biases)
+
+    output = layer(x)
+
+    assert output is expected
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["input"] is x
+    assert call["weight"] is weight
+    assert call["scales"] is scales
+    assert call["biases"] is biases
+    assert call["transpose"] is True
+    assert call["group_size"] == 64
+    assert call["bits"] == 6
+    assert call["mode"] == "affine"
 
 
 def test_grouped_qkv_split_preserves_official_kv_group_order() -> None:

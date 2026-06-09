@@ -20,8 +20,15 @@ MX_FROM_FP8 = cast(
     Callable[[mx.array, mx.Dtype], mx.array],
     mx.from_fp8,  # pyright: ignore[reportAttributeAccessIssue]
 )
+MX_QUANTIZED_MATMUL = cast(
+    Callable[..., mx.array],
+    mx.quantized_matmul,
+)
 
 _FP8_BLOCK_SIZE = 128
+_MIMO_MTP_QUANTIZED_GROUP_SIZE = 64
+_MIMO_MTP_QUANTIZED_BITS = 6
+_MIMO_MTP_QUANTIZED_MODE = "affine"
 
 
 class _TokenEmbedding(Protocol):
@@ -110,6 +117,32 @@ class Fp8BlockLinear(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         return mx.matmul(x.astype(self.weight.dtype), self.weight.T)
+
+
+class QuantizedAffineLinear(nn.Module):
+    def __init__(
+        self,
+        *,
+        weight: mx.array,
+        scales: mx.array,
+        biases: mx.array,
+    ) -> None:
+        super().__init__()
+        self.weight = weight
+        self.scales = scales
+        self.biases = biases
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return MX_QUANTIZED_MATMUL(
+            x,
+            self.weight,
+            scales=self.scales,
+            biases=self.biases,
+            transpose=True,
+            group_size=_MIMO_MTP_QUANTIZED_GROUP_SIZE,
+            bits=_MIMO_MTP_QUANTIZED_BITS,
+            mode=_MIMO_MTP_QUANTIZED_MODE,
+        )
 
 
 def _ceil_div(value: int, divisor: int) -> int:
@@ -434,7 +467,7 @@ def _build_layer(
             hidden_size,
             float(args.layernorm_epsilon),
         ),
-        eh_proj=DenseLinear(layer_tensors.get("eh_proj.weight")),
+        eh_proj=_make_quantized_linear(layer_tensors, "eh_proj"),
         self_attn=MimoMtpAttention(
             num_attention_heads=int(args.num_attention_heads),
             num_key_value_heads=int(args.num_key_value_heads),
@@ -442,13 +475,8 @@ def _build_layer(
             value_head_dim=int(args.v_head_dim),
             rope_theta=float(args.rope_theta),
             partial_rotary_factor=float(args.partial_rotary_factor),
-            qkv_proj=Fp8BlockLinear(
-                weight=layer_tensors.get("self_attn.qkv_proj.weight"),
-                weight_scale_inv=layer_tensors.get(
-                    "self_attn.qkv_proj.weight_scale_inv"
-                ),
-            ),
-            o_proj=DenseLinear(layer_tensors.get("self_attn.o_proj.weight")),
+            qkv_proj=_make_quantized_linear(layer_tensors, "self_attn.qkv_proj"),
+            o_proj=_make_quantized_linear(layer_tensors, "self_attn.o_proj"),
             attention_sink_bias=layer_tensors.get("self_attn.attention_sink_bias"),
         ),
         input_layernorm=_make_rmsnorm(
@@ -462,18 +490,9 @@ def _build_layer(
             float(args.layernorm_epsilon),
         ),
         mlp=MimoMtpMLP(
-            gate_proj=Fp8BlockLinear(
-                weight=layer_tensors.get("mlp.gate_proj.weight"),
-                weight_scale_inv=layer_tensors.get("mlp.gate_proj.weight_scale_inv"),
-            ),
-            up_proj=Fp8BlockLinear(
-                weight=layer_tensors.get("mlp.up_proj.weight"),
-                weight_scale_inv=layer_tensors.get("mlp.up_proj.weight_scale_inv"),
-            ),
-            down_proj=Fp8BlockLinear(
-                weight=layer_tensors.get("mlp.down_proj.weight"),
-                weight_scale_inv=layer_tensors.get("mlp.down_proj.weight_scale_inv"),
-            ),
+            gate_proj=_make_quantized_linear(layer_tensors, "mlp.gate_proj"),
+            up_proj=_make_quantized_linear(layer_tensors, "mlp.up_proj"),
+            down_proj=_make_quantized_linear(layer_tensors, "mlp.down_proj"),
         ),
         final_layernorm=_make_rmsnorm(
             layer_tensors.get("final_layernorm.weight"),
@@ -481,6 +500,15 @@ def _build_layer(
             float(args.layernorm_epsilon),
         ),
     )
+
+
+def _make_quantized_linear(
+    layer_tensors: MimoMtpLayerTensors, prefix: str
+) -> _LinearLike:
+    weight, scales, biases = layer_tensors.quantized_linear_tensors(prefix)
+    if weight.dtype != mx.uint32:
+        return DenseLinear(weight)
+    return QuantizedAffineLinear(weight=weight, scales=scales, biases=biases)
 
 
 def _make_rmsnorm(weight: mx.array, hidden_size: int, eps: float) -> nn.RMSNorm:

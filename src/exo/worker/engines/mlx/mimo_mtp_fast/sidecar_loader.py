@@ -42,7 +42,11 @@ class MimoMtpLayerTensors:
 
     @property
     def qkv_proj_scale_inv(self) -> mx.array:
-        return self.get("self_attn.qkv_proj.weight_scale_inv")
+        return self.get("self_attn.qkv_proj.weight.scales")
+
+    @property
+    def qkv_proj_biases(self) -> mx.array:
+        return self.get("self_attn.qkv_proj.weight.biases")
 
     @property
     def gate_proj_weight(self) -> mx.array:
@@ -55,6 +59,13 @@ class MimoMtpLayerTensors:
     @property
     def down_proj_weight(self) -> mx.array:
         return self.get("mlp.down_proj.weight")
+
+    def quantized_linear_tensors(self, prefix: str) -> tuple[mx.array, mx.array, mx.array]:
+        return (
+            self.get(f"{prefix}.weight"),
+            self.get(f"{prefix}.weight.scales"),
+            self.get(f"{prefix}.weight.biases"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
