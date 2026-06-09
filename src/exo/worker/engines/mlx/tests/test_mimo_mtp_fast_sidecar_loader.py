@@ -32,7 +32,7 @@ _save_file = cast(_SaveFileFn, _safetensors_numpy.save_file)
 
 def _tiny_tensor_for_suffix(layer_index: int, suffix: str) -> np.ndarray:
     base_value = float(layer_index + 1)
-    if suffix.endswith(".weight_scale_inv"):
+    if suffix.endswith((".weight.scales", ".weight.biases")):
         return np.full((1, 1), base_value, dtype=np.float32)
     if suffix.endswith(".weight") and suffix not in {
         "enorm.weight",
@@ -71,6 +71,7 @@ def test_loads_three_official_layout_layer_records(tmp_path: Path) -> None:
     assert layer_one.eh_proj_weight.shape == (2, 2)
     assert layer_one.qkv_proj_weight.shape == (2, 2)
     assert layer_one.qkv_proj_scale_inv.shape == (1, 1)
+    assert layer_one.qkv_proj_biases.shape == (1, 1)
     assert layer_one.gate_proj_weight.shape == (2, 2)
     assert layer_one.up_proj_weight.shape == (2, 2)
     assert layer_one.down_proj_weight.shape == (2, 2)
@@ -83,7 +84,7 @@ def test_get_returns_tensor_by_official_suffix(tmp_path: Path) -> None:
 
     sidecar = load_mimo_mtp_sidecar_tensors(sidecar_path)
 
-    tensor = sidecar.layers[2].get("mlp.down_proj.weight_scale_inv")
+    tensor = sidecar.layers[2].get("mlp.down_proj.weight.scales")
     assert tensor.shape == (1, 1)
     assert float(mx.array(tensor)[0, 0]) == 3.0
 

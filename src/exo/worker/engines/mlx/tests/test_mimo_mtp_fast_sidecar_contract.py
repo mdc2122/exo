@@ -27,7 +27,7 @@ _save_file = cast(_SaveFileFn, _safetensors_numpy.save_file)
 
 
 def _tiny_tensor_for_suffix(suffix: str) -> np.ndarray:
-    if suffix.endswith(".weight_scale_inv"):
+    if suffix.endswith((".weight.scales", ".weight.biases")):
         return np.ones((1, 1), dtype=np.float32)
     if suffix.endswith(".weight") and suffix not in {
         "enorm.weight",
@@ -92,7 +92,7 @@ def test_synthetic_official_layout_sidecar_passes(tmp_path: Path) -> None:
 
 def test_missing_required_tensor_reports_exact_key(tmp_path: Path) -> None:
     sidecar_path = tmp_path / "model_mtp.safetensors"
-    omitted_key = official_mimo_mtp_key(1, "mlp.down_proj.weight_scale_inv")
+    omitted_key = official_mimo_mtp_key(1, "mlp.down_proj.weight.scales")
     _write_synthetic_official_sidecar(sidecar_path, omit_key=omitted_key)
 
     probe = probe_mimo_mtp_sidecar(sidecar_path)
@@ -108,7 +108,7 @@ def test_invalid_required_tensor_dtype_reports_actionable_contract_error(
     tmp_path: Path,
 ) -> None:
     sidecar_path = tmp_path / "model_mtp.safetensors"
-    bad_key = official_mimo_mtp_key(0, "self_attn.qkv_proj.weight_scale_inv")
+    bad_key = official_mimo_mtp_key(0, "self_attn.qkv_proj.weight.scales")
     _write_synthetic_official_sidecar(
         sidecar_path,
         override_tensors={bad_key: np.ones((1, 1), dtype=np.float16)},
@@ -119,7 +119,7 @@ def test_invalid_required_tensor_dtype_reports_actionable_contract_error(
     assert not probe.ready
     assert probe.status == "invalid"
     assert probe.contract_errors == (
-        f"{bad_key}: role=fp8_scale_inv expected dtype F32, got F16; shape=(1, 1)",
+        f"{bad_key}: role=quantized_scales expected dtype BF16/F32, got F16; shape=(1, 1)",
     )
     assert probe.error == "MiMo MTP sidecar has invalid required tensor contract"
 
@@ -139,6 +139,6 @@ def test_invalid_required_tensor_shape_reports_actionable_contract_error(
     assert not probe.ready
     assert probe.status == "invalid"
     assert probe.contract_errors == (
-        f"{bad_key}: role=fp8_weight expected rank 2, got shape=(2,); dtype=F32",
+        f"{bad_key}: role=quantized_weight expected rank 2, got shape=(2,); dtype=F32",
     )
     assert probe.error == "MiMo MTP sidecar has invalid required tensor contract"

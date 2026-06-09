@@ -50,7 +50,7 @@ _save_file = cast(_SaveFileFn, _safetensors_numpy.save_file)
 
 def _tiny_tensor_for_suffix(layer_index: int, suffix: str) -> np.ndarray:
     base_value = float(layer_index + 1)
-    if suffix.endswith(".weight_scale_inv"):
+    if suffix.endswith((".weight.scales", ".weight.biases")):
         return np.full((1, 1), base_value, dtype=np.float32)
     if suffix.endswith(".weight") and suffix not in {
         "enorm.weight",

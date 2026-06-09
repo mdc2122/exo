@@ -8,6 +8,8 @@ from typing import Final, Literal, Protocol, cast
 MIMO_MTP_LAYER_COUNT: Final[int] = 3
 MIMO_MTP_REQUIRED_SUFFIXES: Final[tuple[str, ...]] = (
     "eh_proj.weight",
+    "eh_proj.weight.biases",
+    "eh_proj.weight.scales",
     "enorm.weight",
     "hnorm.weight",
     "final_layernorm.weight",
@@ -15,14 +17,20 @@ MIMO_MTP_REQUIRED_SUFFIXES: Final[tuple[str, ...]] = (
     "pre_mlp_layernorm.weight",
     "self_attn.attention_sink_bias",
     "self_attn.o_proj.weight",
+    "self_attn.o_proj.weight.biases",
+    "self_attn.o_proj.weight.scales",
     "self_attn.qkv_proj.weight",
-    "self_attn.qkv_proj.weight_scale_inv",
+    "self_attn.qkv_proj.weight.biases",
+    "self_attn.qkv_proj.weight.scales",
     "mlp.down_proj.weight",
-    "mlp.down_proj.weight_scale_inv",
+    "mlp.down_proj.weight.biases",
+    "mlp.down_proj.weight.scales",
     "mlp.gate_proj.weight",
-    "mlp.gate_proj.weight_scale_inv",
+    "mlp.gate_proj.weight.biases",
+    "mlp.gate_proj.weight.scales",
     "mlp.up_proj.weight",
-    "mlp.up_proj.weight_scale_inv",
+    "mlp.up_proj.weight.biases",
+    "mlp.up_proj.weight.scales",
 )
 
 MimoMtpSidecarStatus = Literal["ready", "missing", "invalid"]
@@ -30,7 +38,8 @@ MimoMtpSidecarStatus = Literal["ready", "missing", "invalid"]
 
 _BF16_DTYPE: Final[str] = "BF16"
 _F32_DTYPE: Final[str] = "F32"
-_FP8_DTYPE: Final[str] = "F8_E4M3"
+_BF16_DTYPE_OR_F32: Final[frozenset[str]] = frozenset({_BF16_DTYPE, _F32_DTYPE})
+_PACKED_INT_DTYPE: Final[str] = "U32"
 _SYNTHETIC_FIXTURE_DTYPE: Final[str] = "F32"
 
 
@@ -81,35 +90,40 @@ def required_mimo_mtp_keys() -> tuple[str, ...]:
 
 
 def _role_for_suffix(suffix: str) -> str:
-    if suffix.endswith(".weight_scale_inv"):
-        return "fp8_scale_inv"
+    if suffix.endswith(".weight.scales"):
+        return "quantized_scales"
+    if suffix.endswith(".weight.biases"):
+        return "quantized_biases"
     if suffix in {
+        "eh_proj.weight",
+        "self_attn.o_proj.weight",
         "self_attn.qkv_proj.weight",
         "mlp.down_proj.weight",
         "mlp.gate_proj.weight",
         "mlp.up_proj.weight",
     }:
-        return "fp8_weight"
-    if suffix in {
-        "eh_proj.weight",
-        "self_attn.o_proj.weight",
-    }:
-        return "bf16_weight"
+        return "quantized_weight"
     return "bf16_vector"
 
 
-def _expected_dtype_for_role(role: str) -> str:
-    if role == "fp8_scale_inv":
-        return _F32_DTYPE
-    if role == "fp8_weight":
-        return _FP8_DTYPE
-    return _BF16_DTYPE
+def _expected_dtypes_for_role(role: str) -> frozenset[str]:
+    if role == "quantized_scales":
+        return _BF16_DTYPE_OR_F32
+    if role == "quantized_biases":
+        return _BF16_DTYPE_OR_F32
+    if role == "quantized_weight":
+        return frozenset({_PACKED_INT_DTYPE})
+    return frozenset({_BF16_DTYPE})
 
 
 def _expected_rank_for_role(role: str) -> int:
-    if role in {"fp8_weight", "fp8_scale_inv", "bf16_weight"}:
+    if role in {"quantized_weight", "quantized_scales", "quantized_biases"}:
         return 2
     return 1
+
+
+def _format_expected_dtypes(dtypes: frozenset[str]) -> str:
+    return "/".join(sorted(dtypes))
 
 
 def _validate_required_tensor_contract(
@@ -124,10 +138,10 @@ def _validate_required_tensor_contract(
                 continue
             tensor = tensor_by_key[key]
             role = _role_for_suffix(suffix)
-            expected_dtype = _expected_dtype_for_role(role)
-            if tensor.dtype not in {expected_dtype, _SYNTHETIC_FIXTURE_DTYPE}:
+            expected_dtypes = _expected_dtypes_for_role(role)
+            if tensor.dtype not in expected_dtypes | {_SYNTHETIC_FIXTURE_DTYPE}:
                 errors.append(
-                    f"{key}: role={role} expected dtype {expected_dtype}, "
+                    f"{key}: role={role} expected dtype {_format_expected_dtypes(expected_dtypes)}, "
                     f"got {tensor.dtype}; shape={tensor.shape}"
                 )
             expected_rank = _expected_rank_for_role(role)
