@@ -1,6 +1,7 @@
 import importlib
 import json
 import os
+import socket
 import re
 import resource
 import subprocess
@@ -389,6 +390,22 @@ def mlx_distributed_init(
                 os.environ["MLX_HOSTFILE"] = coordination_file
                 os.environ["MLX_RANK"] = str(rank)
                 os.environ["MLX_RING_VERBOSE"] = "1"
+                # Diagnostic: probe each peer from inside this runner process
+                # so ring connect failures can be split into process-context
+                # vs MLX-socket-layer causes.
+                for peer_index, peer in enumerate(hosts_for_node):
+                    if peer.ip == "0.0.0.0" or peer.port == 0:
+                        continue
+                    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    probe.settimeout(3)
+                    try:
+                        probe_error = probe.connect_ex((peer.ip, peer.port))
+                        logger.info(
+                            f"ring peer probe rank={rank} -> index={peer_index} "
+                            f"{peer.ip}:{peer.port} connect_ex={probe_error}"
+                        )
+                    finally:
+                        probe.close()
                 group = mx.distributed.init(backend="ring", strict=True)
 
             case MlxJacclInstance(
