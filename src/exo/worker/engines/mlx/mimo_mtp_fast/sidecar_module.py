@@ -49,6 +49,7 @@ class _LayerArgs(Protocol):
     v_head_dim: int
     layernorm_epsilon: float
     rope_theta: float
+    swa_rope_theta: float
     partial_rotary_factor: float
 
 
@@ -520,7 +521,12 @@ def _build_layer(
             num_key_value_heads=int(args.num_key_value_heads),
             head_dim=int(args.head_dim),
             value_head_dim=int(args.v_head_dim),
-            rope_theta=float(args.rope_theta),
+            # MTP layers carry attention_sink_bias, an SWA-only feature in
+            # this checkpoint (add_full_attention_sink_bias=False), so they
+            # use the sliding-window rope base. Invisible at depth 1 (fresh
+            # length-1 cache makes rope cancel) but wrong for any positional
+            # use at depth > 1.
+            rope_theta=float(args.swa_rope_theta),
             partial_rotary_factor=float(args.partial_rotary_factor),
             qkv_proj=_make_quantized_linear(layer_tensors, "self_attn.qkv_proj"),
             o_proj=_make_quantized_linear(layer_tensors, "self_attn.o_proj"),

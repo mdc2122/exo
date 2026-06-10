@@ -38,6 +38,7 @@ class _TinyArgs:
     v_head_dim: int = 2
     layernorm_epsilon: float = 1e-5
     rope_theta: float = 10_000.0
+    swa_rope_theta: float = 10_000.0
     partial_rotary_factor: float = 1.0
 
 

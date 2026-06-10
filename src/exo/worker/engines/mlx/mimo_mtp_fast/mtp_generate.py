@@ -14,6 +14,10 @@ Algorithm (depth=1, sequential verify strategy):
   7. On reject: use verify logits/hidden for next iteration.
   8. EOS/stop/max_tokens handled consistently with AR semantics.
 """
+# Unknown-type propagation from the untyped mlx_lm sampler/processor boundary
+# oscillates across this generator's loop-carried state; suppress just the
+# Unknown-class diagnostics for this module.
+# pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
 from __future__ import annotations
 
 import time
@@ -23,13 +27,13 @@ from typing import cast
 import mlx.core as mx
 from mlx_lm.models.cache import KVCache, RotatingKVCache
 from mlx_lm.sample_utils import (
-    apply_min_p as _apply_min_p,  # pyright: ignore[reportUnknownVariableType]
+    apply_min_p as _apply_min_p,
 )
 from mlx_lm.sample_utils import (
-    apply_top_k as _apply_top_k,  # pyright: ignore[reportUnknownVariableType]
+    apply_top_k as _apply_top_k,
 )
 from mlx_lm.sample_utils import (
-    apply_top_p as _apply_top_p,  # pyright: ignore[reportUnknownVariableType]
+    apply_top_p as _apply_top_p,
 )
 from mlx_lm.sample_utils import (
     make_logits_processors,
@@ -272,7 +276,7 @@ def mlx_generate_mtp(
     assert decision.mtp_depth is not None and decision.mtp_depth >= 1
 
     mtp_stack = build_mimo_mtp_stack(decision.sidecar, base_model=model)
-    mtp_depth: int = min(decision.mtp_depth, 1)  # Cap at 1 for MiMo
+    mtp_depth: int = min(decision.mtp_depth, len(mtp_stack.layers))
 
     all_prompt_tokens = encode_prompt(tokenizer, prompt)
     target_cache = make_kv_cache(model=model)
@@ -365,9 +369,9 @@ def mlx_generate_mtp(
             pending_primary = None
         else:
             processed_logits = current_logits
-            for processor in logits_processors:  # pyright: ignore[reportUnknownVariableType]
+            for processor in logits_processors:
                 history_tokens = mx.array(list(all_prompt_tokens) + _encode_text(accumulated_text, tokenizer))
-                processed_logits = processor(history_tokens, processed_logits)  # pyright: ignore[reportUnknownVariableType]
+                processed_logits = processor(history_tokens, processed_logits)
             primary_token = int(sampler(processed_logits).item())
 
         text = _decode_tokens([primary_token], tokenizer)
@@ -411,10 +415,9 @@ def mlx_generate_mtp(
 
         # --- DRAFT_PROPOSE ---
         mtp_cache = mtp_stack.make_cache()
-        draft_token: int | None = None
-        draft_token_array: mx.array | None = None
-
-        draft_logits_for_acceptance: mx.array | None = None
+        draft_token_ids: list[int] | None = None
+        draft_tokens_array: mx.array | None = None
+        draft_logits_per_position: list[mx.array] | None = None
         draft_section_start = time.perf_counter()
         if mtp_depth >= 1 and can_batch_verify:
             try:
@@ -437,30 +440,35 @@ def mlx_generate_mtp(
                 draft_tokens, raw_draft_logits = mtp_stack.propose(
                     previous_hidden_state=current_hidden,
                     latest_token_ids=primary_batch,
-                    max_draft_tokens=mtp_depth,  # pyright: ignore[reportUnknownArgumentType]
+                    max_draft_tokens=mtp_depth,
                     sampler=draft_sampler,
                     cache=mtp_cache,
                 )
-                # Keep the draft token lazy: it feeds the verify batch as an
+                # Keep the draft tokens lazy: they feed the verify batch as an
                 # array, so the draft and verify graphs evaluate together in
                 # the single per-iteration mx.eval. Only the (uncommon)
-                # logits-processor path needs the token id on the CPU early,
+                # logits-processor path needs the token ids on the CPU early,
                 # because processor history must include the draft text.
-                draft_token_array = draft_tokens[:, :1]
+                draft_tokens_array = draft_tokens
                 if logits_processors:
                     mx.eval(draft_tokens)
-                draft_token = int(draft_tokens[0, 0].item()) if logits_processors else None
-                draft_logits_for_acceptance = (
-                    processed_draft_logits[0]
+                    draft_token_ids = [
+                        int(draft_tokens[0, i].item())
+                        for i in range(int(draft_tokens.shape[1]))
+                    ]
+                draft_logits_per_position = (
+                    processed_draft_logits
                     if processed_draft_logits
-                    else raw_draft_logits[0]
+                    else raw_draft_logits
                 )
+                if len(draft_logits_per_position) < int(draft_tokens.shape[1]):
+                    raise RuntimeError("draft logits missing for proposed tokens")
             except Exception as exc:
                 logger.warning("MTP draft proposal failed, AR fallback: {}", exc)
-                draft_token_array = None
+                draft_tokens_array = None
         timing_accumulators["draft_seconds"] += time.perf_counter() - draft_section_start
 
-        if draft_token_array is None or draft_logits_for_acceptance is None:
+        if draft_tokens_array is None or draft_logits_per_position is None:
             # AR fallback: forward primary through target model
             fallback_count += 1
             primary_batch = _token_batch(primary_token)
@@ -472,87 +480,131 @@ def mlx_generate_mtp(
             current_hidden = ar_hidden[:, -1:, :]
             continue
 
+        num_drafts = int(draft_tokens_array.shape[1])
+
         # --- BATCHED VERIFY_FORWARD ---
-        # One target forward commits BOTH primary and draft to the KV cache.
-        # Position 0's logits verify the draft; position 1's logits supply the
-        # bonus distribution on acceptance. On rejection the draft is trimmed
-        # back out of the cache. This is what makes speculation pay: 1 + accept
-        # tokens per target forward instead of one forward per token.
+        # One target forward commits the primary and ALL drafts to the KV
+        # cache. Position i's logits verify draft i; the final position's
+        # logits supply the bonus distribution when every draft is accepted.
+        # Unaccepted drafts are trimmed back out of the cache. This is what
+        # makes speculation pay: 1 + accepted tokens per target forward.
         verify_build_start = time.perf_counter()
         verify_batch = mx.concatenate(
-            [_token_batch(primary_token), draft_token_array.astype(mx.int32)], axis=1
+            [_token_batch(primary_token), draft_tokens_array.astype(mx.int32)], axis=1
         )
         verify_hidden, verify_logits = _forward_hidden_and_logits(
             model, verify_batch, target_cache
         )
-        target_logits_for_draft = verify_logits[:, 0, :]
-        bonus_logits = verify_logits[:, 1, :]
-        processed_target_logits_for_draft: mx.array = target_logits_for_draft
-        for processor in logits_processors:
-            draft_history = mx.array(list(all_prompt_tokens) + _encode_text(accumulated_text, tokenizer))
-            processed_target_logits_for_draft = processor(draft_history, processed_target_logits_for_draft)
+        bonus_logits = verify_logits[:, num_drafts, :]
 
-        # --- COMPUTE_ACCEPTANCE (p/q speculative sampling) ---
-        # The draft, verify, and both branch outcomes (bonus token on accept,
-        # residual correction on reject) form one lazy graph materialized by a
-        # single mx.eval — one GPU sync per iteration.
-        target_probabilities = _sampling_probabilities(
-            processed_target_logits_for_draft,
-            temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
-        )
-        draft_probabilities = _sampling_probabilities(
-            draft_logits_for_acceptance,
-            temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
-        )
-        acceptance_probability = _acceptance_probability_from_probabilities(
-            target_probabilities=target_probabilities,
-            draft_probabilities=draft_probabilities,
-            draft_token=draft_token if draft_token is not None else draft_token_array,
-        )
-        acceptance_draw = mx.random.uniform(shape=())
+        processed_target_logits: list[mx.array] = []
+        for position in range(num_drafts):
+            position_logits: mx.array = verify_logits[:, position, :]
+            for processor in logits_processors:
+                # draft_token_ids is materialized on this path (see DRAFT_PROPOSE)
+                assert draft_token_ids is not None
+                position_history = mx.array(
+                    list(all_prompt_tokens)
+                    + _encode_text(
+                        accumulated_text
+                        + _decode_tokens(draft_token_ids[:position], tokenizer),
+                        tokenizer,
+                    )
+                )
+                position_logits = processor(position_history, position_logits)
+            processed_target_logits.append(position_logits)
+
+        # --- COMPUTE_ACCEPTANCE (chained p/q speculative sampling) ---
+        # The draft, verify, and every branch outcome (bonus token on full
+        # acceptance, per-position residual corrections on rejection) form one
+        # lazy graph materialized by a single mx.eval — one GPU sync per
+        # iteration.
+        acceptance_probabilities: list[mx.array] = []
+        correction_candidates: list[mx.array] = []
+        for position in range(num_drafts):
+            position_target_probabilities = _sampling_probabilities(
+                processed_target_logits[position],
+                temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
+            )
+            position_draft_probabilities = _sampling_probabilities(
+                draft_logits_per_position[position],
+                temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
+            )
+            acceptance_probabilities.append(
+                _acceptance_probability_from_probabilities(
+                    target_probabilities=position_target_probabilities,
+                    draft_probabilities=position_draft_probabilities,
+                    draft_token=(
+                        draft_token_ids[position]
+                        if draft_token_ids is not None
+                        else draft_tokens_array[:, position : position + 1]
+                    ),
+                )
+            )
+            correction_candidates.append(
+                _residual_correction_from_probabilities(
+                    target_probabilities=position_target_probabilities,
+                    draft_probabilities=position_draft_probabilities,
+                )
+            )
+        acceptance_draws = mx.random.uniform(shape=(num_drafts,))
 
         processed_bonus: mx.array = bonus_logits
         for processor in logits_processors:
-            # draft_token is materialized on this path (see DRAFT_PROPOSE)
-            assert draft_token is not None
+            # draft_token_ids is materialized on this path (see DRAFT_PROPOSE)
+            assert draft_token_ids is not None
             bonus_history = mx.array(
                 list(all_prompt_tokens)
                 + _encode_text(
-                    accumulated_text + _decode_tokens([draft_token], tokenizer),
+                    accumulated_text + _decode_tokens(draft_token_ids, tokenizer),
                     tokenizer,
                 )
             )
             processed_bonus = processor(bonus_history, processed_bonus)
         bonus_token_array = sampler(processed_bonus)
 
-        correction_token_array = _residual_correction_from_probabilities(
-            target_probabilities=target_probabilities,
-            draft_probabilities=draft_probabilities,
-        )
-
         verify_eval_start = time.perf_counter()
         timing_accumulators["verify_build_seconds"] += verify_eval_start - verify_build_start
         mx.eval(
-            draft_token_array,
-            acceptance_probability,
-            acceptance_draw,
+            draft_tokens_array,
+            acceptance_draws,
             bonus_token_array,
-            correction_token_array,
             verify_hidden,
-            processed_target_logits_for_draft,
+            *acceptance_probabilities,
+            *correction_candidates,
+            *processed_target_logits,
         )
         timing_accumulators["verify_eval_seconds"] += time.perf_counter() - verify_eval_start
-        if draft_token is None:
-            draft_token = int(draft_token_array[0, 0].item())
-        draft_text = _decode_tokens([draft_token], tokenizer)
-        accepted = float(acceptance_draw.item()) <= float(acceptance_probability.item())
+        if draft_token_ids is None:
+            draft_token_ids = [
+                int(draft_tokens_array[0, i].item()) for i in range(num_drafts)
+            ]
 
-        if accepted:
-            # --- ACCEPT_BRANCH ---
-            accepted_drafts += 1
-            _increment_count(attempted_depth_counts, 1)
-            _increment_count(accepted_depth_counts, 1)
+        accepted_count = 0
+        for position in range(num_drafts):
+            draw = float(acceptance_draws[position].item())
+            if draw <= float(acceptance_probabilities[position].item()):
+                accepted_count += 1
+            else:
+                break
 
+        for position in range(accepted_count):
+            _increment_count(attempted_depth_counts, position + 1)
+            _increment_count(accepted_depth_counts, position + 1)
+        if accepted_count < num_drafts:
+            _increment_count(attempted_depth_counts, accepted_count + 1)
+            rejected_drafts += 1
+        accepted_drafts += accepted_count
+
+        # Rewind the speculatively committed, unaccepted drafts out of the cache.
+        if accepted_count < num_drafts:
+            trim_cache(target_cache, num_drafts - accepted_count)
+
+        # --- EMIT accepted drafts ---
+        stopped_during_drafts = False
+        for position in range(accepted_count):
+            draft_token = int(draft_token_ids[position])
+            draft_text = _decode_tokens([draft_token], tokenizer)
             accumulated_text += draft_text
             generated_tokens += 1
 
@@ -586,26 +638,24 @@ def mlx_generate_mtp(
             yield GenerationResponse(text=draft_text, token=draft_token, logprob=None, top_logprobs=None, finish_reason=draft_finish_reason, stats=draft_stats, usage=draft_usage)
 
             if is_draft_done:
+                stopped_during_drafts = True
                 break
+        if stopped_during_drafts:
+            break
 
-            # Draft is already committed to the target cache by the batched
-            # verify forward; its hidden state and the pre-sampled bonus token
-            # carry the loop forward with no extra target forward.
-            current_logits = bonus_logits
-            current_hidden = verify_hidden[:, 1:2, :]
-
+        # The last committed cache position is the primary (index 0) plus the
+        # accepted drafts; its hidden state seeds the next draft proposal.
+        last_committed_index = accepted_count
+        current_hidden = verify_hidden[:, last_committed_index : last_committed_index + 1, :]
+        if accepted_count == num_drafts:
             # --- BONUS (pre-sampled during the verify eval) ---
+            current_logits = bonus_logits
             if generated_tokens < max_tokens:
                 pending_primary = int(bonus_token_array.item())
         else:
-            # --- REJECT ---
-            rejected_drafts += 1
-            _increment_count(attempted_depth_counts, 1)
-            # Rewind the speculatively committed draft token out of the cache.
-            trim_cache(target_cache, 1)
-            current_logits = processed_target_logits_for_draft
-            current_hidden = verify_hidden[:, 0:1, :]
-            pending_primary = int(correction_token_array.item())
+            # --- REJECT: residual correction at the first rejected position ---
+            current_logits = processed_target_logits[accepted_count]
+            pending_primary = int(correction_candidates[accepted_count].item())
 
         if max_stop_len > 0 and len(accumulated_text) > max_stop_len:
             accumulated_text = accumulated_text[-max_stop_len:]
