@@ -15,9 +15,10 @@ Classification results align with the Seed's ``mtp_execution_state`` ontology:
 
 - ``disabled_default`` — no MTP intent (``mimo_mtp_fastpath_params`` is None
   or ``enabled`` is False)
-- ``compatible_mtp`` — model is MiMo V2.5 Pro, depth is supported (1–3),
-  sidecar path is provided, fail-closed semantics are explicit
-- ``unsupported_model`` — MTP requested for a non-MiMo model
+- ``compatible_mtp`` — model supports the MTP fastpath (MiMo V2.5 Pro or
+  GLM 5.1), depth is supported (1–3), sidecar path is provided,
+  fail-closed semantics are explicit
+- ``unsupported_model`` — MTP requested for a model without MTP support
 - ``unsupported_depth`` — MTP requested with an unsupported depth value
 - ``missing_sidecar`` — MTP requested without a sidecar path
 - ``unwired_execution`` — MTP intent is present but runtime guard /
@@ -30,7 +31,7 @@ from typing import Final, Literal, final
 
 from pydantic import BaseModel, ConfigDict
 
-from exo.shared.models.model_cards import MIMO_V25_PRO_MODEL_IDS
+from exo.shared.models.model_cards import MTP_FASTPATH_MODEL_IDS
 from exo.shared.types.text_generation import (
     SUPPORTED_MIMO_MTP_FASTPATH_DEPTHS,
     MimoMtpFastpathParams,
@@ -133,16 +134,16 @@ def classify_mimo_mtp_request(
 
     1.  **disabled_default** — ``mimo_mtp_fastpath_params`` is ``None`` or
         ``enabled`` is ``False``.  Normal AR generation; no MTP intent.
-    2.  **unsupported_model** — MTP is requested but the model is not a
-        MiMo V2.5 Pro variant.
-    3.  **unsupported_depth** — MTP is requested for a MiMo model but the
-        depth is not in ``SUPPORTED_MIMO_MTP_FASTPATH_DEPTHS`` (1, 2, 3).
+    2.  **unsupported_model** — MTP is requested but the model is not in
+        ``MTP_FASTPATH_MODEL_IDS`` (MiMo V2.5 Pro variants or GLM 5.1).
+    3.  **unsupported_depth** — MTP is requested for a supported model but
+        the depth is not in ``SUPPORTED_MIMO_MTP_FASTPATH_DEPTHS`` (1, 2, 3).
         ``None`` depth is treated as potentially compatible (the worker
         resolves it to the default depth).
-    4.  **missing_sidecar** — MTP is requested for a MiMo model with a
+    4.  **missing_sidecar** — MTP is requested for a supported model with a
         supported depth but no ``sidecar_path`` is provided.
-    5.  **unwired_execution** — MTP is requested, model is MiMo, depth is
-        supported, and sidecar path is provided, but the classifier cannot
+    5.  **unwired_execution** — MTP is requested, the model is supported,
+        depth is supported, and sidecar path is provided, but the classifier cannot
         verify the runtime guard or execution wiring status (those are
         environment-dependent and checked at the dispatch/worker layer).
         The caller must separately verify the runtime guard and execution
@@ -180,8 +181,8 @@ def classify_mimo_mtp_request(
     sidecar_path_provided = mtp_params.sidecar_path is not None
     fail_closed = mtp_params.fail_closed
 
-    # 2. Non-MiMo model → unsupported_model
-    if task_params.model not in MIMO_V25_PRO_MODEL_IDS:
+    # 2. Model without MTP fastpath support → unsupported_model
+    if task_params.model not in MTP_FASTPATH_MODEL_IDS:
         return MimoMtpRequestClassification(
             label="unsupported_model",
             discriminant="unsupported",

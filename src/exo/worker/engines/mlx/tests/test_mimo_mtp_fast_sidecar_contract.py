@@ -5,9 +5,11 @@ from typing import Protocol, cast
 import numpy as np
 
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract import (
+    GLM_MTP_REQUIRED_KEYS,
     MIMO_MTP_LAYER_COUNT,
     MIMO_MTP_REQUIRED_SUFFIXES,
     official_mimo_mtp_key,
+    probe_glm_mtp_sidecar,
     probe_mimo_mtp_sidecar,
     required_mimo_mtp_keys,
 )
@@ -142,3 +144,75 @@ def test_invalid_required_tensor_shape_reports_actionable_contract_error(
         f"{bad_key}: role=quantized_weight expected rank 2, got shape=(2,); dtype=F32",
     )
     assert probe.error == "MiMo MTP sidecar has invalid required tensor contract"
+
+
+# ---------------------------------------------------------------------------
+# GLM 5.1 sidecar probe
+# ---------------------------------------------------------------------------
+
+
+def _write_synthetic_glm_sidecar(
+    path: Path, *, drop_keys: tuple[str, ...] = ()
+) -> None:
+    tensors = {
+        key: np.full((2, 2), 1.0, dtype=np.float32)
+        for key in GLM_MTP_REQUIRED_KEYS
+        if key not in drop_keys
+    }
+    _save_file(tensors, str(path))
+
+
+def test_glm_probe_missing_file_reports_missing(tmp_path: Path) -> None:
+    probe = probe_glm_mtp_sidecar(tmp_path / "absent.safetensors")
+
+    assert probe.status == "missing"
+    assert probe.ready is False
+    assert probe.layer_count == 0
+    assert probe.missing_keys == GLM_MTP_REQUIRED_KEYS
+
+
+def test_glm_probe_accepts_synthetic_sentinel_inventory(tmp_path: Path) -> None:
+    sidecar_path = tmp_path / "model_mtp-00001-of-00001.safetensors"
+    _write_synthetic_glm_sidecar(sidecar_path)
+
+    probe = probe_glm_mtp_sidecar(sidecar_path)
+
+    assert probe.status == "ready"
+    assert probe.ready is True
+    assert probe.layer_count == 1
+    assert probe.missing_keys == ()
+    assert probe.error is None
+
+
+def test_glm_probe_reports_missing_sentinel_key(tmp_path: Path) -> None:
+    sidecar_path = tmp_path / "model_mtp-00001-of-00001.safetensors"
+    dropped = "mtp.layers.0.eh_proj.weight"
+    _write_synthetic_glm_sidecar(sidecar_path, drop_keys=(dropped,))
+
+    probe = probe_glm_mtp_sidecar(sidecar_path)
+
+    assert probe.status == "invalid"
+    assert probe.ready is False
+    assert dropped in probe.missing_keys
+
+
+def test_glm_probe_rejects_mimo_format_sidecar(tmp_path: Path) -> None:
+    sidecar_path = tmp_path / "model_mtp.safetensors"
+    _write_synthetic_official_sidecar(sidecar_path)
+
+    probe = probe_glm_mtp_sidecar(sidecar_path)
+
+    assert probe.status == "invalid"
+    assert probe.ready is False
+    assert probe.layer_count == 0
+
+
+def test_glm_probe_rejects_unparseable_file(tmp_path: Path) -> None:
+    sidecar_path = tmp_path / "model_mtp.safetensors"
+    sidecar_path.write_bytes(b"not a safetensors file")
+
+    probe = probe_glm_mtp_sidecar(sidecar_path)
+
+    assert probe.status == "invalid"
+    assert probe.ready is False
+    assert probe.error is not None

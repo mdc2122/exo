@@ -153,6 +153,94 @@ def _validate_required_tensor_contract(
     return tuple(errors)
 
 
+GLM_MTP_SIDECAR_PREFIX: Final[str] = "mtp.layers.0."
+# Sentinel keys that distinguish a real GLM 5.1 nextn sidecar (mlx_lm naming:
+# .scales/.biases as sibling tensors) from an arbitrary safetensors file. The
+# full 59-tensor inventory is validated by load_weights(strict=True) in
+# build_glm_mtp_draft_model; the probe only needs cheap, decisive markers.
+GLM_MTP_REQUIRED_KEYS: Final[tuple[str, ...]] = tuple(
+    GLM_MTP_SIDECAR_PREFIX + suffix
+    for suffix in (
+        "eh_proj.weight",
+        "eh_proj.scales",
+        "eh_proj.biases",
+        "enorm.weight",
+        "hnorm.weight",
+        "shared_head.norm.weight",
+        "self_attn.q_a_proj.weight",
+        "self_attn.embed_q.weight",
+        "self_attn.unembed_out.weight",
+        "self_attn.indexer.wk.weight",
+        "mlp.switch_mlp.gate_proj.weight",
+        "mlp.switch_mlp.up_proj.weight",
+        "mlp.switch_mlp.down_proj.weight",
+        "mlp.gate.weight",
+    )
+)
+
+
+def probe_glm_mtp_sidecar(path: str | Path) -> MimoMtpSidecarProbe:
+    """Probe a GLM 5.1 nextn sidecar file (single draft layer, mlx_lm naming).
+
+    Returns the same probe shape as the MiMo probe so decision plumbing and
+    telemetry stay uniform; ``layer_count`` is 1 when ready.
+    """
+    sidecar_path = Path(path).expanduser()
+    if not sidecar_path.exists():
+        return MimoMtpSidecarProbe(
+            path=sidecar_path,
+            status="missing",
+            layer_count=0,
+            tensors=(),
+            missing_keys=GLM_MTP_REQUIRED_KEYS,
+            error=f"GLM MTP sidecar does not exist: {sidecar_path}",
+        )
+
+    try:
+        from safetensors import safe_open
+
+        tensor_specs: list[MimoMtpTensorSpec] = []
+        with safe_open(str(sidecar_path), framework="np") as raw_handle:
+            handle = cast(_SafeTensorReader, cast(object, raw_handle))
+            keys = tuple(handle.keys())
+            for key in keys:
+                tensor_slice = handle.get_slice(key)
+                tensor_specs.append(
+                    MimoMtpTensorSpec(
+                        key=key,
+                        dtype=tensor_slice.get_dtype(),
+                        shape=tuple(int(dim) for dim in tensor_slice.get_shape()),
+                    )
+                )
+    except Exception as exc:
+        return MimoMtpSidecarProbe(
+            path=sidecar_path,
+            status="invalid",
+            layer_count=0,
+            tensors=(),
+            missing_keys=GLM_MTP_REQUIRED_KEYS,
+            error=f"Failed to inspect GLM MTP sidecar {sidecar_path}: {exc}",
+        )
+
+    sorted_tensor_specs = tuple(sorted(tensor_specs, key=lambda spec: spec.key))
+    key_set = {spec.key for spec in sorted_tensor_specs}
+    missing_keys = tuple(key for key in GLM_MTP_REQUIRED_KEYS if key not in key_set)
+    has_layer = any(key.startswith(GLM_MTP_SIDECAR_PREFIX) for key in key_set)
+    ready = not missing_keys and has_layer
+    return MimoMtpSidecarProbe(
+        path=sidecar_path,
+        status="ready" if ready else "invalid",
+        layer_count=1 if has_layer else 0,
+        tensors=sorted_tensor_specs,
+        missing_keys=missing_keys,
+        error=(
+            None
+            if ready
+            else "GLM MTP sidecar is missing required mtp.layers.0 tensors"
+        ),
+    )
+
+
 def probe_mimo_mtp_sidecar(path: str | Path) -> MimoMtpSidecarProbe:
     sidecar_path = Path(path).expanduser()
     required_keys = required_mimo_mtp_keys()

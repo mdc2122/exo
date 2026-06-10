@@ -1,6 +1,6 @@
 import json
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import aiofiles
 import aiofiles.os as aios
@@ -135,6 +135,26 @@ MIMO_V25_PRO_MODEL_IDS = frozenset(
     }
 )
 MIMO_V25_PRO_ARCHITECTURE = "MiMoV2ForCausalLM"
+
+GLM_51_MTP_MODEL_ID = ModelId("mlx-community/GLM-5.1-8b-crit-6b-exp")
+GLM_51_MTP_MODEL_IDS = frozenset({GLM_51_MTP_MODEL_ID})
+
+# Models eligible for the MTP speculative-decoding fastpath, with the draft
+# adapter family that builds their DraftModel (see
+# exo.worker.engines.mlx.mimo_mtp_fast.draft_model).
+MTP_FASTPATH_MODEL_IDS = MIMO_V25_PRO_MODEL_IDS | GLM_51_MTP_MODEL_IDS
+
+MtpDraftAdapter = Literal["mimo", "glm"]
+
+
+def mtp_draft_adapter_for_model(model_id: ModelId) -> MtpDraftAdapter | None:
+    if model_id in MIMO_V25_PRO_MODEL_IDS:
+        return "mimo"
+    if model_id in GLM_51_MTP_MODEL_IDS:
+        return "glm"
+    return None
+
+
 _MEDIA_CAPABILITY_MARKERS = frozenset(
     {
         "audio",

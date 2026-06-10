@@ -7,8 +7,13 @@ from typing import TypedDict, cast
 import mlx.core as mx
 import pytest
 
+from exo.shared.types.mlx import KVCacheType, Model
 from exo.worker.engines.mlx.mimo_mtp_fast.mtp_generate import (
+    GLM_MTP_HIDDEN_TAP_ENV,
+    HiddenTap,
     _acceptance_probability_from_probabilities,  # pyright: ignore[reportPrivateUsage]
+    _forward_hidden_and_logits,  # pyright: ignore[reportPrivateUsage]
+    _glm_hidden_tap_from_environment,  # pyright: ignore[reportPrivateUsage]
     _residual_correction_from_probabilities,  # pyright: ignore[reportPrivateUsage]
     _sampling_probabilities,  # pyright: ignore[reportPrivateUsage]
 )
@@ -279,3 +284,70 @@ def test_determinism_with_fixed_seed() -> None:
  assert all(t == correction_tokens[0] for t in correction_tokens), (
   f"non-deterministic correction: {correction_tokens}"
  )
+
+
+# ---------------------------------------------------------------------------
+# Hidden-state tap selection (GLM 5.1 pre-/post-final-norm A/B)
+# ---------------------------------------------------------------------------
+
+
+def _double(hidden: mx.array) -> mx.array:
+    return hidden * 2.0
+
+
+def _times_ten(hidden: mx.array) -> mx.array:
+    return hidden * 10.0
+
+
+class _FakeInnerModel:
+    """Mimics mlx_lm inner models: applies the final norm before returning."""
+
+    def __init__(self) -> None:
+        self.norm: Callable[[mx.array], mx.array] = _double
+
+    def __call__(self, token_ids: mx.array, cache: object) -> mx.array:
+        raw_hidden = mx.ones((1, int(token_ids.shape[1]), 4))
+        return self.norm(raw_hidden)
+
+
+class _FakeModel:
+    def __init__(self) -> None:
+        self.model = _FakeInnerModel()
+        self.lm_head: Callable[[mx.array], mx.array] = _times_ten
+
+
+def _fake_forward(hidden_tap: HiddenTap) -> tuple[mx.array, mx.array, _FakeModel]:
+    fake_model = _FakeModel()
+    hidden, logits = _forward_hidden_and_logits(
+        cast(Model, cast(object, fake_model)),
+        mx.array([[1, 2]]),
+        cast(KVCacheType, cast(object, [])),
+        hidden_tap=hidden_tap,
+    )
+    mx.eval(hidden, logits)
+    return hidden, logits, fake_model
+
+
+def test_post_norm_tap_returns_normed_hidden() -> None:
+    hidden, logits, _ = _fake_forward("post_norm")
+    assert mx.allclose(hidden, mx.full(hidden.shape, 2.0)).item()
+    assert mx.allclose(logits, mx.full(logits.shape, 20.0)).item()
+
+
+def test_pre_norm_tap_skips_final_norm_for_hidden_but_not_logits() -> None:
+    hidden, logits, fake_model = _fake_forward("pre_norm")
+    assert mx.allclose(hidden, mx.full(hidden.shape, 1.0)).item()
+    assert mx.allclose(logits, mx.full(logits.shape, 20.0)).item()
+    # The temporary identity swap must be undone after the call.
+    assert fake_model.model.norm is _double
+
+
+def test_glm_hidden_tap_environment_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(GLM_MTP_HIDDEN_TAP_ENV, raising=False)
+    assert _glm_hidden_tap_from_environment() == "post_norm"
+    monkeypatch.setenv(GLM_MTP_HIDDEN_TAP_ENV, "pre_norm")
+    assert _glm_hidden_tap_from_environment() == "pre_norm"
+    monkeypatch.setenv(GLM_MTP_HIDDEN_TAP_ENV, "sideways")
+    assert _glm_hidden_tap_from_environment() == "post_norm"

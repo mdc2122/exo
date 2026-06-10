@@ -23,9 +23,11 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable, Generator
-from typing import cast
+from pathlib import Path
+from typing import Literal, cast
 
 import mlx.core as mx
+import mlx.nn as nn
 from mlx_lm.models.cache import KVCache, RotatingKVCache
 from mlx_lm.sample_utils import (
     apply_min_p as _apply_min_p,
@@ -64,6 +66,9 @@ from exo.worker.engines.mlx.generator.generate import (
     prefill,
 )
 from exo.worker.engines.mlx.mimo_mtp_fast.draft_model import DraftModel
+from exo.worker.engines.mlx.mimo_mtp_fast.glm_draft_model import (
+    build_glm_mtp_draft_model,
+)
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_module import (
     build_mimo_mtp_stack,
 )
@@ -72,9 +77,17 @@ from exo.worker.engines.mlx.mimo_mtp_fast.worker_fastpath import (
 )
 from exo.worker.runner.bootstrap import logger
 
+HiddenTap = Literal["post_norm", "pre_norm"]
+
+GLM_MTP_HIDDEN_TAP_ENV = "EXO_GLM_MTP_HIDDEN_TAP"
+
 
 def _forward_hidden_and_logits(
-    model: Model, token_ids: mx.array, cache: KVCacheType
+    model: Model,
+    token_ids: mx.array,
+    cache: KVCacheType,
+    *,
+    hidden_tap: HiddenTap = "post_norm",
 ) -> tuple[mx.array, mx.array]:
     """Commit token_ids to cache once and return both hidden states and logits.
 
@@ -84,12 +97,61 @@ def _forward_hidden_and_logits(
     the same tokens twice. MTP verification uses this helper so the primary,
     accepted draft, rejected draft boundary, and following correction token each
     advance the target KV cache exactly once when they are actually committed.
+
+    hidden_tap selects which hidden state feeds the draft layer. mlx_lm inner
+    models apply the final RMSNorm before returning, so "post_norm" is the
+    natural tap (and what MiMo shipped with). The DeepSeek-V3 MTP recipe is
+    ambiguous about whether its nextn layer saw pre- or post-norm hidden
+    states during training; "pre_norm" temporarily swaps the final norm for
+    an identity so the returned hidden skips it, while logits still see the
+    normed hidden. A/B these on a real prompt before trusting GLM acceptance
+    numbers — the wrong tap reads as catastrophically low acceptance, not an
+    error.
     """
     inner = model.model  # type: ignore[reportAttributeAccessIssue]
     lm_head = model.lm_head  # type: ignore[reportAttributeAccessIssue]
+    if hidden_tap == "pre_norm":
+        final_norm = cast(Callable[[mx.array], mx.array], inner.norm)
+        inner.norm = nn.Identity()
+        try:
+            hidden = cast(mx.array, inner(token_ids, cache))
+        finally:
+            inner.norm = final_norm
+        logits = cast(mx.array, lm_head(final_norm(hidden)))
+        return hidden, logits
     hidden = cast(mx.array, inner(token_ids, cache))
     logits = cast(mx.array, lm_head(hidden))
     return hidden, logits
+
+
+# The GLM draft model loads ~9 GB of sidecar weights and quantizes the layer
+# at build time, so it is cached per (target model, sidecar path) for the
+# runner process lifetime. A runner holds exactly one target model object, so
+# keying on id(model) cannot collide within a process.
+_GLM_DRAFT_MODEL_CACHE: dict[tuple[int, str], DraftModel] = {}
+
+
+def _glm_draft_model_for(*, model: Model, sidecar_path: Path) -> DraftModel:
+    cache_key = (id(model), str(sidecar_path))
+    cached = _GLM_DRAFT_MODEL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    built = build_glm_mtp_draft_model(sidecar_path, model)
+    _GLM_DRAFT_MODEL_CACHE[cache_key] = built
+    return built
+
+
+def _glm_hidden_tap_from_environment() -> HiddenTap:
+    raw_value = os.environ.get(GLM_MTP_HIDDEN_TAP_ENV, "post_norm").strip().lower()
+    if raw_value == "pre_norm":
+        return "pre_norm"
+    if raw_value not in ("", "post_norm"):
+        logger.warning(
+            "{}={} is not a recognised hidden tap; using post_norm",
+            GLM_MTP_HIDDEN_TAP_ENV,
+            raw_value,
+        )
+    return "post_norm"
 
 
 def _token_batch(token_id: int) -> mx.array:
@@ -274,12 +336,21 @@ def mlx_generate_mtp(
     guards have passed. Uses sequential verify strategy for depth=1.
     """
     assert decision.should_use_mtp
-    assert decision.sidecar is not None
     assert decision.mtp_depth is not None and decision.mtp_depth >= 1
 
-    # The decode loop below depends only on the DraftModel protocol; swapping
-    # in another model family means swapping this constructor call.
-    mtp_stack: DraftModel = build_mimo_mtp_stack(decision.sidecar, base_model=model)
+    # The decode loop below depends only on the DraftModel protocol; the
+    # decision's draft_adapter selects which model family's constructor runs.
+    hidden_tap: HiddenTap = "post_norm"
+    mtp_stack: DraftModel
+    if decision.draft_adapter == "glm":
+        assert decision.sidecar_path is not None
+        mtp_stack = _glm_draft_model_for(
+            model=model, sidecar_path=decision.sidecar_path
+        )
+        hidden_tap = _glm_hidden_tap_from_environment()
+    else:
+        assert decision.sidecar is not None
+        mtp_stack = build_mimo_mtp_stack(decision.sidecar, base_model=model)
     mtp_depth: int = min(decision.mtp_depth, mtp_stack.num_draft_layers)
 
     all_prompt_tokens = encode_prompt(tokenizer, prompt)
@@ -365,7 +436,7 @@ def mlx_generate_mtp(
     # Forward last prompt tokens to get logits AND hidden state
     last_prompt_tokens = all_prompt_tokens[-2:]
     hidden_state, logits = _forward_hidden_and_logits(
-        model, last_prompt_tokens[None], target_cache
+        model, last_prompt_tokens[None], target_cache, hidden_tap=hidden_tap
     )
     mx.eval(hidden_state, logits)
     current_hidden: mx.array = hidden_state[:, -1:, :]
@@ -521,7 +592,7 @@ def mlx_generate_mtp(
             fallback_count += 1
             primary_batch = _token_batch(primary_token)
             ar_hidden, ar_logits = _forward_hidden_and_logits(
-                model, primary_batch, target_cache
+                model, primary_batch, target_cache, hidden_tap=hidden_tap
             )
             mx.eval(ar_hidden, ar_logits)
             current_logits = ar_logits[:, -1, :]
@@ -545,7 +616,7 @@ def mlx_generate_mtp(
             [_token_batch(primary_token), draft_tokens_array.astype(mx.int32)], axis=1
         )
         verify_hidden, verify_logits = _forward_hidden_and_logits(
-            model, verify_batch, target_cache
+            model, verify_batch, target_cache, hidden_tap=hidden_tap
         )
         bonus_logits = verify_logits[:, num_drafts, :]
 

@@ -33,7 +33,11 @@ from exo.api.types import (
 )
 from exo.download.download_utils import create_http_session
 from exo.shared.constants import allow_kimi_video, allow_kimi_video_data_urls
-from exo.shared.models.model_cards import MIMO_V25_PRO_MODEL_IDS
+from exo.shared.models.model_cards import (
+    MIMO_V25_PRO_MODEL_IDS,
+    MTP_FASTPATH_MODEL_IDS,
+    mtp_draft_adapter_for_model,
+)
 from exo.shared.types.chunks import (
     ErrorChunk,
     PrefillProgressChunk,
@@ -75,6 +79,7 @@ from exo.shared.types.video_errors import (
     VIDEO_ERROR_CODE_URL_BLOCKED as VIDEO_ERROR_CODE_URL_BLOCKED,
 )
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract import (
+    probe_glm_mtp_sidecar,
     probe_mimo_mtp_sidecar,
 )
 
@@ -768,6 +773,10 @@ def _is_mimo_v25_pro_request(request: ChatCompletionRequest) -> bool:
     return request.model in MIMO_V25_PRO_MODEL_IDS
 
 
+def _is_mtp_fastpath_eligible_request(request: ChatCompletionRequest) -> bool:
+    return request.model in MTP_FASTPATH_MODEL_IDS
+
+
 def _mimo_mtp_non_mimo_disable_detail(
     request: ChatCompletionRequest,
 ) -> dict[str, object]:
@@ -894,7 +903,7 @@ def validate_mimo_mtp_fastpath_eligibility(request: ChatCompletionRequest) -> No
     if not request.mimo_mtp_fastpath:
         return
 
-    if not _is_mimo_v25_pro_request(request):
+    if not _is_mtp_fastpath_eligible_request(request):
         raise HTTPException(
             status_code=400,
             detail=_mimo_mtp_non_mimo_disable_detail(request),
@@ -934,7 +943,11 @@ def validate_mimo_mtp_fastpath_eligibility(request: ChatCompletionRequest) -> No
             ),
         )
 
-    sidecar_probe = probe_mimo_mtp_sidecar(request.mimo_mtp_sidecar_path)
+    sidecar_probe = (
+        probe_glm_mtp_sidecar(request.mimo_mtp_sidecar_path)
+        if mtp_draft_adapter_for_model(request.model) == "glm"
+        else probe_mimo_mtp_sidecar(request.mimo_mtp_sidecar_path)
+    )
     if sidecar_probe.status == "missing":
         message = (
             "MiMo MTP fastpath is disabled: required sidecar is missing at "

@@ -693,3 +693,30 @@ class TestDeterminism:
         a = classify_mimo_mtp_request(params)
         b = classify_mimo_mtp_request(params)
         assert a == b
+
+
+# ---------------------------------------------------------------------------
+# GLM 5.1: MTP fastpath eligible via the glm draft adapter
+# ---------------------------------------------------------------------------
+
+_GLM_MTP_MODEL = ModelId("mlx-community/GLM-5.1-8b-crit-6b-exp")
+
+
+class TestGlmModelEligibility:
+    """GLM 5.1 is MTP-fastpath eligible and must not classify as unsupported_model."""
+
+    def test_glm_mtp_request_with_sidecar_is_unwired_not_unsupported(self) -> None:
+        result = classify_mimo_mtp_request(_mtp_task_params(model=_GLM_MTP_MODEL))
+        assert result.label == "unwired_execution"
+        assert result.discriminant == "unwired"
+        assert result.model_id == str(_GLM_MTP_MODEL)
+
+    def test_glm_mtp_request_without_sidecar_is_missing_sidecar(self) -> None:
+        result = classify_mimo_mtp_request(
+            _mtp_task_params(model=_GLM_MTP_MODEL, sidecar_path=None)
+        )
+        assert result.label == "missing_sidecar"
+
+    def test_glm_ar_request_is_disabled_default(self) -> None:
+        result = classify_mimo_mtp_request(_ar_task_params(model=_GLM_MTP_MODEL))
+        assert result.label == "disabled_default"

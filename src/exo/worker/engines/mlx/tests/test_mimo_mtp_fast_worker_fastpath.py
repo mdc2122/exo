@@ -24,6 +24,7 @@ from exo.shared.types.validate_mtp_intent import (
     validate_mtp_intent,
 )
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract import (
+    GLM_MTP_REQUIRED_KEYS,
     MIMO_MTP_LAYER_COUNT,
     MIMO_MTP_REQUIRED_SUFFIXES,
     official_mimo_mtp_key,
@@ -701,3 +702,117 @@ class TestUnsupportedDepthErrorProperties:
         assert detail["mtp_execution_state"] == "unsupported_depth"
         assert detail["mtp_enabled"] is False
         assert detail["accepted_execution_path"] == "rejected"
+
+
+# ---------------------------------------------------------------------------
+# GLM 5.1 draft adapter decisions
+# ---------------------------------------------------------------------------
+
+_GLM_MODEL_ID = "mlx-community/GLM-5.1-8b-crit-6b-exp"
+
+
+def _write_synthetic_glm_sidecar(path: Path) -> None:
+    tensors = {
+        key: np.full((2, 2), 1.0, dtype=np.float32) for key in GLM_MTP_REQUIRED_KEYS
+    }
+    _save_file(tensors, str(path))
+
+
+class TestGlmDraftAdapterDecision:
+    def test_glm_model_with_ready_sidecar_routes_to_mtp_with_glm_adapter(
+        self, tmp_path: Path
+    ) -> None:
+        sidecar_path = tmp_path / "model_mtp-00001-of-00001.safetensors"
+        _write_synthetic_glm_sidecar(sidecar_path)
+        cache = MimoMtpWorkerFastpathCache()
+
+        decision = evaluate_mimo_mtp_worker_fastpath(
+            _task_params(
+                model=_GLM_MODEL_ID,
+                mtp=MimoMtpFastpathParams(
+                    enabled=True,
+                    depth=1,
+                    sidecar_path=str(sidecar_path),
+                    fail_closed=True,
+                ),
+            ),
+            cache=cache,
+            native_runtime_enabled=True,
+            execution_path_wired=True,
+        )
+
+        assert decision.should_use_mtp is True
+        assert decision.accepted_execution_path == "mimo_mtp_fastpath"
+        assert decision.draft_adapter == "glm"
+        assert decision.sidecar_path == sidecar_path
+        # The GLM builder loads weights itself at generation time; the
+        # decision must not pre-load tensors through the MiMo loader.
+        assert decision.sidecar is None
+        assert cache.load_count_for_path(sidecar_path) == 0
+
+    def test_glm_model_rejects_mimo_format_sidecar_as_invalid(
+        self, tmp_path: Path
+    ) -> None:
+        sidecar_path = tmp_path / "model_mtp.safetensors"
+        _write_synthetic_official_sidecar(sidecar_path)
+
+        decision = evaluate_mimo_mtp_worker_fastpath(
+            _task_params(
+                model=_GLM_MODEL_ID,
+                mtp=MimoMtpFastpathParams(
+                    enabled=True,
+                    depth=1,
+                    sidecar_path=str(sidecar_path),
+                    fail_closed=True,
+                ),
+            ),
+            native_runtime_enabled=True,
+            execution_path_wired=True,
+        )
+
+        assert decision.should_use_mtp is False
+        assert decision.accepted_execution_path == "rejected"
+        assert decision.disable_reason == "invalid_sidecar"
+
+    def test_glm_model_missing_sidecar_fails_closed(self, tmp_path: Path) -> None:
+        decision = evaluate_mimo_mtp_worker_fastpath(
+            _task_params(
+                model=_GLM_MODEL_ID,
+                mtp=MimoMtpFastpathParams(
+                    enabled=True,
+                    depth=1,
+                    sidecar_path=str(tmp_path / "absent.safetensors"),
+                    fail_closed=True,
+                ),
+            ),
+            native_runtime_enabled=True,
+            execution_path_wired=True,
+        )
+
+        assert decision.should_use_mtp is False
+        assert decision.accepted_execution_path == "rejected"
+        assert decision.disable_reason == "missing_sidecar"
+
+    def test_mimo_decision_keeps_mimo_adapter_and_preloaded_sidecar(
+        self, tmp_path: Path
+    ) -> None:
+        sidecar_path = tmp_path / "model_mtp.safetensors"
+        _write_synthetic_official_sidecar(sidecar_path)
+
+        decision = evaluate_mimo_mtp_worker_fastpath(
+            _task_params(
+                mtp=MimoMtpFastpathParams(
+                    enabled=True,
+                    depth=1,
+                    sidecar_path=str(sidecar_path),
+                    fail_closed=True,
+                ),
+            ),
+            native_runtime_enabled=True,
+            execution_path_wired=True,
+        )
+
+        assert decision.should_use_mtp is True
+        assert decision.draft_adapter == "mimo"
+        assert decision.sidecar_path == sidecar_path
+        assert decision.sidecar is not None

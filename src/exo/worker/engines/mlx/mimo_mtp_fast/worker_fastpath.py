@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, final
 
-from exo.shared.models.model_cards import MIMO_V25_PRO_MODEL_IDS
+from exo.shared.models.model_cards import (
+    MtpDraftAdapter,
+    mtp_draft_adapter_for_model,
+)
 from exo.shared.types.mimo_mtp_errors import raise_mimo_mtp_fail_closed_error
 from exo.shared.types.text_generation import (
     SUPPORTED_MIMO_MTP_FASTPATH_DEPTHS,
@@ -15,6 +18,7 @@ from exo.shared.types.text_generation import (
 )
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract import (
     MimoMtpSidecarStatus,
+    probe_glm_mtp_sidecar,
     probe_mimo_mtp_sidecar,
 )
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_loader import (
@@ -50,6 +54,11 @@ class MimoMtpWorkerFastpathDecision:
     sidecar: MimoMtpSidecarTensors | None = None
     backend_type: str | None = None
     native_runtime_enabled: bool | None = None
+    # Which DraftModel adapter serves this model family. "mimo" decisions
+    # carry pre-loaded sidecar tensors; "glm" decisions carry only
+    # sidecar_path (the GLM builder loads weights itself, see mtp_generate).
+    draft_adapter: MtpDraftAdapter | None = None
+    sidecar_path: Path | None = None
 
     def raise_fail_closed_error(self) -> None:
         """Raise the correct typed MTP fail-closed error for this decision.
@@ -285,7 +294,8 @@ def evaluate_mimo_mtp_worker_fastpath(
     guard short-circuits):
 
     1. **disabled_default** — No MTP intent (params absent or enabled=False).
-    2. **unsupported_model** — MTP requested for a non-MiMo model.
+    2. **unsupported_model** — MTP requested for a model with no draft
+       adapter (neither MiMo V2.5 Pro nor GLM 5.1).
     3. **unsupported_depth** — MTP requested with depth outside (1, 2, 3).
     4. **missing_sidecar** — No sidecar_path provided.
     5. **invalid_sidecar** — Sidecar file missing or invalid on disk.
@@ -320,8 +330,9 @@ def evaluate_mimo_mtp_worker_fastpath(
 
     requested_depth = _requested_depth(mtp_params)
 
-    # 2. Non-MiMo model → unsupported_model
-    if task_params.model not in MIMO_V25_PRO_MODEL_IDS:
+    # 2. Model without a draft adapter → unsupported_model
+    draft_adapter = mtp_draft_adapter_for_model(task_params.model)
+    if draft_adapter is None:
         return _fail_or_fallback(
             model_id=model_id,
             params=mtp_params,
@@ -378,7 +389,11 @@ def evaluate_mimo_mtp_worker_fastpath(
         )
 
     # 5. Invalid/missing sidecar file → missing_sidecar / invalid_sidecar
-    probe = probe_mimo_mtp_sidecar(mtp_params.sidecar_path)
+    probe = (
+        probe_glm_mtp_sidecar(mtp_params.sidecar_path)
+        if draft_adapter == "glm"
+        else probe_mimo_mtp_sidecar(mtp_params.sidecar_path)
+    )
     if not probe.ready:
         return _fail_or_fallback(
             model_id=model_id,
@@ -461,23 +476,28 @@ def evaluate_mimo_mtp_worker_fastpath(
             native_runtime_enabled=runtime_enabled,
         )
 
-    # 9. Load sidecar via cache → invalid_sidecar if load fails
-    sidecar_cache = cache if cache is not None else MimoMtpWorkerFastpathCache()
-    try:
-        sidecar = sidecar_cache.load_sidecar(mtp_params.sidecar_path)
-    except MimoMtpSidecarLoadError as exc:
-        return _fail_or_fallback(
-            model_id=model_id,
-            params=mtp_params,
-            requested_depth=requested_depth,
-            sidecar_status="invalid",
-            disable_reason="invalid_sidecar",
-            fallback_reason="fail_open_invalid_sidecar",
-            error_message=(
-                "MiMo MTP fastpath rejected before AR dispatch: "
-                f"disable_reason=invalid_sidecar error={exc}"
-            ),
-        )
+    # 9. Load sidecar via cache → invalid_sidecar if load fails. Only the
+    # MiMo adapter pre-loads tensors here (its loader validates the MiMo
+    # naming contract); the GLM builder loads from sidecar_path at
+    # generation time with load_weights(strict=True).
+    sidecar: MimoMtpSidecarTensors | None = None
+    if draft_adapter == "mimo":
+        sidecar_cache = cache if cache is not None else MimoMtpWorkerFastpathCache()
+        try:
+            sidecar = sidecar_cache.load_sidecar(mtp_params.sidecar_path)
+        except MimoMtpSidecarLoadError as exc:
+            return _fail_or_fallback(
+                model_id=model_id,
+                params=mtp_params,
+                requested_depth=requested_depth,
+                sidecar_status="invalid",
+                disable_reason="invalid_sidecar",
+                fallback_reason="fail_open_invalid_sidecar",
+                error_message=(
+                    "MiMo MTP fastpath rejected before AR dispatch: "
+                    f"disable_reason=invalid_sidecar error={exc}"
+                ),
+            )
 
     return MimoMtpWorkerFastpathDecision(
         should_use_mtp=True,
@@ -500,4 +520,6 @@ def evaluate_mimo_mtp_worker_fastpath(
         sidecar=sidecar,
         backend_type=backend_type,
         native_runtime_enabled=runtime_enabled,
+        draft_adapter=draft_adapter,
+        sidecar_path=Path(mtp_params.sidecar_path).expanduser(),
     )

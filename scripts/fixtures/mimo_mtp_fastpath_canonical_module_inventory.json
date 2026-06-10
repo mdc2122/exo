@@ -21,7 +21,7 @@
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.mtp_generate",
       "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/mtp_generate.py",
-      "blob_sha": "fd6d81b79f08e1dde10b7c0553420eeb812cc95d"
+      "blob_sha": "2a9c6a0f9bd01e5a9776e0944e2ebdbf899100d2"
     },
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.one_cycle",
@@ -36,7 +36,7 @@
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract",
       "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/sidecar_contract.py",
-      "blob_sha": "872c70a51893f6c257355715d0401b51dce60835"
+      "blob_sha": "c439fd290cc9702465eb018748773824cd72f1b8"
     },
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.sidecar_loader",
@@ -56,7 +56,7 @@
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.worker_fastpath",
       "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/worker_fastpath.py",
-      "blob_sha": "d2fc99c64a318752c64b65252b8c94d5631fff4a"
+      "blob_sha": "ec9cf8e420406d773c99d7b2faf1ad5642b3081b"
     }
   ]
 }
