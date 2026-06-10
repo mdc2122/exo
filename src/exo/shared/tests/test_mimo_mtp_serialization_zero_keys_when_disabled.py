@@ -5,21 +5,22 @@ verify exact key-set equality against a known AR-only baseline.
 """
 
 import json
-from collections.abc import Mapping
 from typing import Any, cast
 
-import pytest
 from pydantic import TypeAdapter
 
 from exo.api.types import ChatCompletionRequest
 from exo.shared.models.model_cards import MIMO_V25_PRO_KERNELPOOL_6BIT_MODEL_ID
 from exo.shared.types.commands import Command as CommandUnion
-from exo.shared.types.commands import ForwarderCommand, TextGeneration as TextGenCommand
-from exo.shared.types.common import CommandId, ModelId, SystemId
+from exo.shared.types.commands import ForwarderCommand
+from exo.shared.types.commands import TextGeneration as TextGenCommand
+from exo.shared.types.common import CommandId, SystemId
 from exo.shared.types.tasks import Task as TaskUnion
 from exo.shared.types.tasks import (
     TaskId,
     TaskStatus,
+)
+from exo.shared.types.tasks import (
     TextGeneration as TextGenTask,
 )
 from exo.shared.types.text_generation import (
