@@ -412,6 +412,11 @@ def _find_ip_prioritised(
 
     if not ips:
         ips = list(known_ips)
+    elif ring:
+        # The per-direction socket edge may have been established over a slow
+        # overlay network; for the ring data plane consider every interface the
+        # peer advertises so a direct link can win on priority.
+        ips = list({*ips, *known_ips})
 
     usable_ips = [ip for ip in ips if _is_usable_ip(ip)]
     if not usable_ips:
