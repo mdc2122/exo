@@ -426,6 +426,11 @@ def _guard_mimo_mtp_backend_compatibility(
             continue
         if isinstance(instance, MlxRingInstance):
             return
+        if os.environ.get("EXO_MIMO_MTP_ALLOW_JACCL"):
+            # Opt-in: MTP on the JACCL/RDMA backend is unvalidated; this gate
+            # stays closed by default so the fast-interconnect path is only
+            # exercised deliberately.
+            return
         if not mimo_mtp_fastpath.fail_closed:
             return
         raise HTTPException(
