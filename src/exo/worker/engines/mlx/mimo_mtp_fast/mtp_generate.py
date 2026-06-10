@@ -61,6 +61,7 @@ from exo.worker.engines.mlx.cache import (
     make_kv_cache,
     trim_cache,
 )
+from exo.worker.engines.mlx.constants import MAX_TOKENS
 from exo.worker.engines.mlx.generator.generate import (
     eos_ids_from_tokenizer,
     prefill,
@@ -419,7 +420,7 @@ def mlx_generate_mtp(
         if task.stop is not None else []
     )
 
-    max_tokens = task.max_output_tokens or 100
+    max_tokens = task.max_output_tokens or MAX_TOKENS
     total_prompt_tokens = len(all_prompt_tokens)
 
     # --- PREFILL ---
