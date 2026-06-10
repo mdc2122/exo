@@ -121,8 +121,11 @@ def _sampling_probabilities(
     return mx.softmax(logprobs / temperature, axis=-1)
 
 
-def _token_probability(probabilities: mx.array, token_id: int) -> mx.array:
-    token_index = mx.array([[token_id]], dtype=mx.int32)
+def _token_probability(probabilities: mx.array, token_id: int | mx.array) -> mx.array:
+    if isinstance(token_id, mx.array):
+        token_index = token_id.reshape(1, 1).astype(mx.int32)
+    else:
+        token_index = mx.array([[token_id]], dtype=mx.int32)
     return mx.take_along_axis(probabilities, token_index, axis=-1)[0, 0]
 
 
@@ -130,7 +133,7 @@ def _acceptance_probability_from_probabilities(
     *,
     target_probabilities: mx.array,
     draft_probabilities: mx.array,
-    draft_token: int,
+    draft_token: int | mx.array,
 ) -> mx.array:
     """Compute min(1, p_target(draft_token) / q_draft(draft_token))."""
     p_target = _token_probability(target_probabilities, draft_token)
@@ -269,7 +272,7 @@ def mlx_generate_mtp(
     assert decision.mtp_depth is not None and decision.mtp_depth >= 1
 
     mtp_stack = build_mimo_mtp_stack(decision.sidecar, base_model=model)
-    mtp_depth = min(decision.mtp_depth, 1)  # Cap at 1 for MiMo
+    mtp_depth: int = min(decision.mtp_depth, 1)  # Cap at 1 for MiMo
 
     all_prompt_tokens = encode_prompt(tokenizer, prompt)
     target_cache = make_kv_cache(model=model)
@@ -303,9 +306,9 @@ def mlx_generate_mtp(
     top_p = task.top_p if task.top_p is not None else 1.0
     min_p = task.min_p if task.min_p is not None else 0.05
     top_k = task.top_k if task.top_k is not None else 0
-    sampler = make_sampler(temp=temperature, top_p=top_p, min_p=min_p, top_k=top_k)
+    sampler: Callable[[mx.array], mx.array] = make_sampler(temp=temperature, top_p=top_p, min_p=min_p, top_k=top_k)
 
-    logits_processors = make_logits_processors(
+    logits_processors: list[Callable[[mx.array, mx.array], mx.array]] = make_logits_processors(
         repetition_penalty=task.repetition_penalty,
         repetition_context_size=task.repetition_context_size,
     )
@@ -361,10 +364,10 @@ def mlx_generate_mtp(
             primary_token = pending_primary
             pending_primary = None
         else:
-            processed_logits = current_logits  # pyright: ignore[reportUnknownVariableType]
-            for processor in logits_processors:
+            processed_logits = current_logits
+            for processor in logits_processors:  # pyright: ignore[reportUnknownVariableType]
                 history_tokens = mx.array(list(all_prompt_tokens) + _encode_text(accumulated_text, tokenizer))
-                processed_logits = processor(history_tokens, processed_logits)
+                processed_logits = processor(history_tokens, processed_logits)  # pyright: ignore[reportUnknownVariableType]
             primary_token = int(sampler(processed_logits).item())
 
         text = _decode_tokens([primary_token], tokenizer)
@@ -409,6 +412,7 @@ def mlx_generate_mtp(
         # --- DRAFT_PROPOSE ---
         mtp_cache = mtp_stack.make_cache()
         draft_token: int | None = None
+        draft_token_array: mx.array | None = None
 
         draft_logits_for_acceptance: mx.array | None = None
         draft_section_start = time.perf_counter()
@@ -433,12 +437,19 @@ def mlx_generate_mtp(
                 draft_tokens, raw_draft_logits = mtp_stack.propose(
                     previous_hidden_state=current_hidden,
                     latest_token_ids=primary_batch,
-                    max_draft_tokens=mtp_depth,
+                    max_draft_tokens=mtp_depth,  # pyright: ignore[reportUnknownArgumentType]
                     sampler=draft_sampler,
                     cache=mtp_cache,
                 )
-                mx.eval(draft_tokens)
-                draft_token = int(draft_tokens[0, 0].item())
+                # Keep the draft token lazy: it feeds the verify batch as an
+                # array, so the draft and verify graphs evaluate together in
+                # the single per-iteration mx.eval. Only the (uncommon)
+                # logits-processor path needs the token id on the CPU early,
+                # because processor history must include the draft text.
+                draft_token_array = draft_tokens[:, :1]
+                if logits_processors:
+                    mx.eval(draft_tokens)
+                draft_token = int(draft_tokens[0, 0].item()) if logits_processors else None
                 draft_logits_for_acceptance = (
                     processed_draft_logits[0]
                     if processed_draft_logits
@@ -446,10 +457,10 @@ def mlx_generate_mtp(
                 )
             except Exception as exc:
                 logger.warning("MTP draft proposal failed, AR fallback: {}", exc)
-                draft_token = None
+                draft_token_array = None
         timing_accumulators["draft_seconds"] += time.perf_counter() - draft_section_start
 
-        if draft_token is None or draft_logits_for_acceptance is None:
+        if draft_token_array is None or draft_logits_for_acceptance is None:
             # AR fallback: forward primary through target model
             fallback_count += 1
             primary_batch = _token_batch(primary_token)
@@ -468,7 +479,9 @@ def mlx_generate_mtp(
         # back out of the cache. This is what makes speculation pay: 1 + accept
         # tokens per target forward instead of one forward per token.
         verify_build_start = time.perf_counter()
-        verify_batch = mx.array([[primary_token, draft_token]], dtype=mx.int32)
+        verify_batch = mx.concatenate(
+            [_token_batch(primary_token), draft_token_array.astype(mx.int32)], axis=1
+        )
         verify_hidden, verify_logits = _forward_hidden_and_logits(
             model, verify_batch, target_cache
         )
@@ -480,10 +493,9 @@ def mlx_generate_mtp(
             processed_target_logits_for_draft = processor(draft_history, processed_target_logits_for_draft)
 
         # --- COMPUTE_ACCEPTANCE (p/q speculative sampling) ---
-        # Both branch outcomes (bonus token on accept, residual correction on
-        # reject) are built lazily and materialized in a single mx.eval so the
-        # whole iteration costs one draft sync + one verify sync.
-        draft_text = _decode_tokens([draft_token], tokenizer)
+        # The draft, verify, and both branch outcomes (bonus token on accept,
+        # residual correction on reject) form one lazy graph materialized by a
+        # single mx.eval — one GPU sync per iteration.
         target_probabilities = _sampling_probabilities(
             processed_target_logits_for_draft,
             temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
@@ -495,15 +507,20 @@ def mlx_generate_mtp(
         acceptance_probability = _acceptance_probability_from_probabilities(
             target_probabilities=target_probabilities,
             draft_probabilities=draft_probabilities,
-            draft_token=draft_token,
+            draft_token=draft_token if draft_token is not None else draft_token_array,
         )
         acceptance_draw = mx.random.uniform(shape=())
 
         processed_bonus: mx.array = bonus_logits
         for processor in logits_processors:
+            # draft_token is materialized on this path (see DRAFT_PROPOSE)
+            assert draft_token is not None
             bonus_history = mx.array(
                 list(all_prompt_tokens)
-                + _encode_text(accumulated_text + draft_text, tokenizer)
+                + _encode_text(
+                    accumulated_text + _decode_tokens([draft_token], tokenizer),
+                    tokenizer,
+                )
             )
             processed_bonus = processor(bonus_history, processed_bonus)
         bonus_token_array = sampler(processed_bonus)
@@ -516,6 +533,7 @@ def mlx_generate_mtp(
         verify_eval_start = time.perf_counter()
         timing_accumulators["verify_build_seconds"] += verify_eval_start - verify_build_start
         mx.eval(
+            draft_token_array,
             acceptance_probability,
             acceptance_draw,
             bonus_token_array,
@@ -524,6 +542,9 @@ def mlx_generate_mtp(
             processed_target_logits_for_draft,
         )
         timing_accumulators["verify_eval_seconds"] += time.perf_counter() - verify_eval_start
+        if draft_token is None:
+            draft_token = int(draft_token_array[0, 0].item())
+        draft_text = _decode_tokens([draft_token], tokenizer)
         accepted = float(acceptance_draw.item()) <= float(acceptance_probability.item())
 
         if accepted:
