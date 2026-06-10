@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, TypeAlias, cast
@@ -393,9 +394,14 @@ class MimoMtpLayer(nn.Module):
     ) -> mx.array:
         hidden_norm = self.hnorm(previous_hidden_state)
         embedding_norm = self.enorm(token_embedding)
-        hidden_state = self.eh_proj(
-            mx.concatenate([hidden_norm, embedding_norm], axis=-1)
-        )
+        # No official MiMo-V2.5 MTP reference exists for the eh_proj input
+        # order; default matches MTPLX/vLLM MiMo-7B ([hidden, embed]). The env
+        # toggle enables the live A/B (DeepSeek-V3 proper uses [embed, hidden]).
+        if os.environ.get("EXO_MIMO_MTP_CONCAT_ORDER", "") == "embed_first":
+            eh_proj_input = mx.concatenate([embedding_norm, hidden_norm], axis=-1)
+        else:
+            eh_proj_input = mx.concatenate([hidden_norm, embedding_norm], axis=-1)
+        hidden_state = self.eh_proj(eh_proj_input)
         hidden_state = hidden_state + self.self_attn(
             self.input_layernorm(hidden_state), cache=cache
         )
