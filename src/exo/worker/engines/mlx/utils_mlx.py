@@ -1,9 +1,9 @@
 import importlib
 import json
 import os
-import socket
 import re
 import resource
+import socket
 import subprocess
 import sys
 import tempfile
