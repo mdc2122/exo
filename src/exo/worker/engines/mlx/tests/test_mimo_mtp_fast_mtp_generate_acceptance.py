@@ -8,10 +8,49 @@ import mlx.core as mx
 import pytest
 
 from exo.worker.engines.mlx.mimo_mtp_fast.mtp_generate import (
- _sample_residual_correction_token_lazy,  # pyright: ignore[reportPrivateUsage]
- _sampling_probabilities,  # pyright: ignore[reportPrivateUsage]
- _speculative_acceptance_probability,  # pyright: ignore[reportPrivateUsage]
+    _acceptance_probability_from_probabilities,  # pyright: ignore[reportPrivateUsage]
+    _residual_correction_from_probabilities,  # pyright: ignore[reportPrivateUsage]
+    _sampling_probabilities,  # pyright: ignore[reportPrivateUsage]
 )
+
+
+def _acceptance_probability_from_logits(
+    *,
+    target_logits: mx.array,
+    draft_logits: mx.array,
+    draft_token: int,
+    temperature: float,
+    top_p: float,
+    min_p: float,
+    top_k: int,
+) -> mx.array:
+    return _acceptance_probability_from_probabilities(
+        target_probabilities=_sampling_probabilities(
+            target_logits, temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k
+        ),
+        draft_probabilities=_sampling_probabilities(
+            draft_logits, temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k
+        ),
+        draft_token=draft_token,
+    )
+
+def _residual_from_logits(
+    *,
+    target_logits: mx.array,
+    draft_logits: mx.array,
+    temperature: float,
+    top_p: float,
+    min_p: float,
+    top_k: int,
+) -> mx.array:
+    return _residual_correction_from_probabilities(
+        target_probabilities=_sampling_probabilities(
+            target_logits, temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k
+        ),
+        draft_probabilities=_sampling_probabilities(
+            draft_logits, temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k
+        ),
+    )
 
 
 def _sample_token(
@@ -24,7 +63,7 @@ def _sample_token(
     top_k: int,
 ) -> int:
     return int(
-        _sample_residual_correction_token_lazy(
+        _residual_from_logits(
             target_logits=target_logits,
             draft_logits=draft_logits,
             temperature=temperature,
@@ -58,7 +97,7 @@ def test_speculative_acceptance_probability_uses_min_one_target_over_draft() -> 
  target_logits = mx.array([[0.0, 2.0]], dtype=mx.float32)
  draft_logits = mx.array([[2.0, 0.0]], dtype=mx.float32)
 
- probability = _speculative_acceptance_probability(
+ probability = _acceptance_probability_from_logits(
   target_logits=target_logits,
   draft_logits=draft_logits,
   draft_token=1,
@@ -72,7 +111,7 @@ def test_speculative_acceptance_probability_reduces_when_draft_overestimates_tok
  target_logits = mx.array([[2.0, 0.0]], dtype=mx.float32)
  draft_logits = mx.array([[0.0, 2.0]], dtype=mx.float32)
 
- probability = _speculative_acceptance_probability(
+ probability = _acceptance_probability_from_logits(
   target_logits=target_logits,
   draft_logits=draft_logits,
   draft_token=1,
@@ -108,7 +147,7 @@ def test_acceptance_probability_is_exactly_one_when_target_exceeds_draft() -> No
  draft_logits = mx.array([[2.0, 0.0, 0.5]], dtype=mx.float32)
 
  # Token 2: target probability > draft probability.
- probability = _speculative_acceptance_probability(
+ probability = _acceptance_probability_from_logits(
   target_logits=target_logits,
   draft_logits=draft_logits,
   draft_token=2,
@@ -134,7 +173,7 @@ def test_acceptance_probability_equals_p_over_q_when_target_below_draft() -> Non
  p_target = float(target_probs[0, 3].item())
  q_draft = float(draft_probs[0, 3].item())
 
- probability = _speculative_acceptance_probability(
+ probability = _acceptance_probability_from_logits(
   target_logits=target_logits,
   draft_logits=draft_logits,
   draft_token=3,
@@ -216,7 +255,7 @@ def test_determinism_with_fixed_seed() -> None:
 
  results: list[float] = []
  for _ in range(10):
-  probability = _speculative_acceptance_probability(
+  probability = _acceptance_probability_from_logits(
    target_logits=target_logits,
    draft_logits=draft_logits,
    draft_token=1,

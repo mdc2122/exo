@@ -100,6 +100,17 @@ def _sampling_probabilities(
     top_k: int,
 ) -> mx.array:
     """Return the normalized sampling distribution for logits."""
+    if temperature == 0.0:
+        # Greedy distribution is a one-hot at the argmax. Top-p/min-p/top-k
+        # filters can never remove the argmax token, so skip them — they cost
+        # full-vocabulary sorts on the hot path.
+        greedy_token = mx.argmax(logits, axis=-1, keepdims=True)
+        return mx.where(
+            mx.arange(logits.shape[-1])[None, :] == greedy_token,
+            mx.ones_like(logits),
+            mx.zeros_like(logits),
+        )
+
     logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
     if top_p > 0.0 and top_p < 1.0:
         logprobs = cast(mx.array, _apply_top_p(logprobs, top_p))
@@ -107,14 +118,6 @@ def _sampling_probabilities(
         logprobs = cast(mx.array, _apply_min_p(logprobs, min_p))
     if top_k > 0:
         logprobs = cast(mx.array, _apply_top_k(logprobs, top_k))
-
-    if temperature == 0.0:
-        greedy_token = mx.argmax(logprobs, axis=-1, keepdims=True)
-        return mx.where(
-            mx.arange(logprobs.shape[-1])[None, :] == greedy_token,
-            mx.ones_like(logprobs),
-            mx.zeros_like(logprobs),
-        )
     return mx.softmax(logprobs / temperature, axis=-1)
 
 
@@ -123,64 +126,28 @@ def _token_probability(probabilities: mx.array, token_id: int) -> mx.array:
     return mx.take_along_axis(probabilities, token_index, axis=-1)[0, 0]
 
 
-def _speculative_acceptance_probability(
+def _acceptance_probability_from_probabilities(
     *,
-    target_logits: mx.array,
-    draft_logits: mx.array,
+    target_probabilities: mx.array,
+    draft_probabilities: mx.array,
     draft_token: int,
-    temperature: float,
-    top_p: float,
-    min_p: float,
-    top_k: int,
 ) -> mx.array:
     """Compute min(1, p_target(draft_token) / q_draft(draft_token))."""
-    target_probabilities = _sampling_probabilities(
-        target_logits,
-        temperature=temperature,
-        top_p=top_p,
-        min_p=min_p,
-        top_k=top_k,
-    )
-    draft_probabilities = _sampling_probabilities(
-        draft_logits,
-        temperature=temperature,
-        top_p=top_p,
-        min_p=min_p,
-        top_k=top_k,
-    )
     p_target = _token_probability(target_probabilities, draft_token)
     q_draft = _token_probability(draft_probabilities, draft_token)
     return mx.minimum(mx.array(1.0), p_target / mx.maximum(q_draft, mx.array(1e-20)))
 
 
-def _sample_residual_correction_token_lazy(
+def _residual_correction_from_probabilities(
     *,
-    target_logits: mx.array,
-    draft_logits: mx.array,
-    temperature: float,
-    top_p: float,
-    min_p: float,
-    top_k: int,
+    target_probabilities: mx.array,
+    draft_probabilities: mx.array,
 ) -> mx.array:
     """Sample from normalized positive residual max(p_target - q_draft, 0).
 
     Returns a lazy scalar token array so the caller can fold materialization
     into a single mx.eval alongside the acceptance test.
     """
-    target_probabilities = _sampling_probabilities(
-        target_logits,
-        temperature=temperature,
-        top_p=top_p,
-        min_p=min_p,
-        top_k=top_k,
-    )
-    draft_probabilities = _sampling_probabilities(
-        draft_logits,
-        temperature=temperature,
-        top_p=top_p,
-        min_p=min_p,
-        top_k=top_k,
-    )
     residual = mx.maximum(target_probabilities - draft_probabilities, mx.zeros_like(target_probabilities))
     residual_total = mx.sum(residual, axis=-1, keepdims=True)
     corrected_probabilities = mx.where(
@@ -230,6 +197,7 @@ def _build_stats(
     fallback_count: int,
     attempted_depth_counts: dict[str, int],
     accepted_depth_counts: dict[str, int],
+    timing_accumulators: dict[str, float] | None = None,
 ) -> GenerationStats:
     elapsed = time.perf_counter() - generation_start_time
     generation_tps = generated_tokens / elapsed if elapsed > 0 else 0.0
@@ -259,7 +227,10 @@ def _build_stats(
         accepted_depth_counts=accepted_depth_counts,
         acceptance_rate=acceptance_rate,
         fallback_count=fallback_count,
-        timing_breakdown_seconds={"generation": float(elapsed)},
+        timing_breakdown_seconds={
+            "generation": float(elapsed),
+            **(timing_accumulators or {}),
+        },
     )
 
 
@@ -364,8 +335,8 @@ def mlx_generate_mtp(
         model, last_prompt_tokens[None], target_cache
     )
     mx.eval(hidden_state, logits)
-    current_hidden = hidden_state[:, -1:, :]
-    current_logits = logits[:, -1, :]
+    current_hidden: mx.array = hidden_state[:, -1:, :]
+    current_logits: mx.array = logits[:, -1, :]
 
     # --- MTP DECODE LOOP ---
     generated_tokens = 0
@@ -377,6 +348,11 @@ def mlx_generate_mtp(
     accepted_drafts = 0
     rejected_drafts = 0
     fallback_count = 0
+    timing_accumulators: dict[str, float] = {
+        "draft_seconds": 0.0,
+        "verify_build_seconds": 0.0,
+        "verify_eval_seconds": 0.0,
+    }
     generation_start_time = time.perf_counter()
 
     while generated_tokens < max_tokens:
@@ -385,7 +361,7 @@ def mlx_generate_mtp(
             primary_token = pending_primary
             pending_primary = None
         else:
-            processed_logits = current_logits
+            processed_logits = current_logits  # pyright: ignore[reportUnknownVariableType]
             for processor in logits_processors:
                 history_tokens = mx.array(list(all_prompt_tokens) + _encode_text(accumulated_text, tokenizer))
                 processed_logits = processor(history_tokens, processed_logits)
@@ -419,6 +395,7 @@ def mlx_generate_mtp(
                 mtp_sidecar_status=decision.sidecar_status,
                 fallback_count=fallback_count,
                 attempted_depth_counts=attempted_depth_counts, accepted_depth_counts=accepted_depth_counts,
+                timing_accumulators=timing_accumulators,
             )
 
         if on_generation_token is not None:
@@ -434,6 +411,7 @@ def mlx_generate_mtp(
         draft_token: int | None = None
 
         draft_logits_for_acceptance: mx.array | None = None
+        draft_section_start = time.perf_counter()
         if mtp_depth >= 1 and can_batch_verify:
             try:
                 primary_batch = _token_batch(primary_token)
@@ -469,6 +447,7 @@ def mlx_generate_mtp(
             except Exception as exc:
                 logger.warning("MTP draft proposal failed, AR fallback: {}", exc)
                 draft_token = None
+        timing_accumulators["draft_seconds"] += time.perf_counter() - draft_section_start
 
         if draft_token is None or draft_logits_for_acceptance is None:
             # AR fallback: forward primary through target model
@@ -488,13 +467,14 @@ def mlx_generate_mtp(
         # bonus distribution on acceptance. On rejection the draft is trimmed
         # back out of the cache. This is what makes speculation pay: 1 + accept
         # tokens per target forward instead of one forward per token.
+        verify_build_start = time.perf_counter()
         verify_batch = mx.array([[primary_token, draft_token]], dtype=mx.int32)
         verify_hidden, verify_logits = _forward_hidden_and_logits(
             model, verify_batch, target_cache
         )
         target_logits_for_draft = verify_logits[:, 0, :]
         bonus_logits = verify_logits[:, 1, :]
-        processed_target_logits_for_draft = target_logits_for_draft
+        processed_target_logits_for_draft: mx.array = target_logits_for_draft
         for processor in logits_processors:
             draft_history = mx.array(list(all_prompt_tokens) + _encode_text(accumulated_text, tokenizer))
             processed_target_logits_for_draft = processor(draft_history, processed_target_logits_for_draft)
@@ -504,18 +484,22 @@ def mlx_generate_mtp(
         # reject) are built lazily and materialized in a single mx.eval so the
         # whole iteration costs one draft sync + one verify sync.
         draft_text = _decode_tokens([draft_token], tokenizer)
-        acceptance_probability = _speculative_acceptance_probability(
-            target_logits=processed_target_logits_for_draft,
-            draft_logits=draft_logits_for_acceptance,
+        target_probabilities = _sampling_probabilities(
+            processed_target_logits_for_draft,
+            temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
+        )
+        draft_probabilities = _sampling_probabilities(
+            draft_logits_for_acceptance,
+            temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
+        )
+        acceptance_probability = _acceptance_probability_from_probabilities(
+            target_probabilities=target_probabilities,
+            draft_probabilities=draft_probabilities,
             draft_token=draft_token,
-            temperature=temperature,
-            top_p=top_p,
-            min_p=min_p,
-            top_k=top_k,
         )
         acceptance_draw = mx.random.uniform(shape=())
 
-        processed_bonus = bonus_logits
+        processed_bonus: mx.array = bonus_logits
         for processor in logits_processors:
             bonus_history = mx.array(
                 list(all_prompt_tokens)
@@ -524,15 +508,13 @@ def mlx_generate_mtp(
             processed_bonus = processor(bonus_history, processed_bonus)
         bonus_token_array = sampler(processed_bonus)
 
-        correction_token_array = _sample_residual_correction_token_lazy(
-            target_logits=processed_target_logits_for_draft,
-            draft_logits=draft_logits_for_acceptance,
-            temperature=temperature,
-            top_p=top_p,
-            min_p=min_p,
-            top_k=top_k,
+        correction_token_array = _residual_correction_from_probabilities(
+            target_probabilities=target_probabilities,
+            draft_probabilities=draft_probabilities,
         )
 
+        verify_eval_start = time.perf_counter()
+        timing_accumulators["verify_build_seconds"] += verify_eval_start - verify_build_start
         mx.eval(
             acceptance_probability,
             acceptance_draw,
@@ -541,6 +523,7 @@ def mlx_generate_mtp(
             verify_hidden,
             processed_target_logits_for_draft,
         )
+        timing_accumulators["verify_eval_seconds"] += time.perf_counter() - verify_eval_start
         accepted = float(acceptance_draw.item()) <= float(acceptance_probability.item())
 
         if accepted:
@@ -573,6 +556,7 @@ def mlx_generate_mtp(
                     mtp_sidecar_status=decision.sidecar_status,
                     fallback_count=fallback_count,
                     attempted_depth_counts=attempted_depth_counts, accepted_depth_counts=accepted_depth_counts,
+                    timing_accumulators=timing_accumulators,
                 )
 
             if on_generation_token is not None:
