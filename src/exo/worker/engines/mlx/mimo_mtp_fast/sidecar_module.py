@@ -150,13 +150,54 @@ def _ceil_div(value: int, divisor: int) -> int:
 
 
 def _expanded_block_scales(weight: mx.array, weight_scale_inv: mx.array) -> mx.array:
-    row_blocks = _ceil_div(int(weight.shape[0]), _FP8_BLOCK_SIZE)
-    col_blocks = _ceil_div(int(weight.shape[1]), _FP8_BLOCK_SIZE)
-    scales = weight_scale_inv[:row_blocks, :col_blocks]
-    expanded = mx.repeat(
-        mx.repeat(scales, _FP8_BLOCK_SIZE, axis=0), _FP8_BLOCK_SIZE, axis=1
-    )
-    return expanded[: int(weight.shape[0]), : int(weight.shape[1])]
+    rows = int(weight.shape[0])
+    cols = int(weight.shape[1])
+    row_blocks = _ceil_div(rows, _FP8_BLOCK_SIZE)
+    col_blocks = _ceil_div(cols, _FP8_BLOCK_SIZE)
+    scale_rows = int(weight_scale_inv.shape[0])
+    if scale_rows > row_blocks:
+        # Per-row-group scale layout (MiMo fused qkv: one 128-block grid per
+        # KV-head group whose stride is not a multiple of 128). Top-aligned
+        # expansion mis-scales everything past the first group boundary.
+        group_count = next(
+            (
+                candidate
+                for candidate in range(2, scale_rows + 1)
+                if rows % candidate == 0
+                and candidate * _ceil_div(rows // candidate, _FP8_BLOCK_SIZE)
+                == scale_rows
+            ),
+            None,
+        )
+        if group_count is None:
+            raise ValueError(
+                "FP8 scale rows do not match a uniform or grouped 128-block "
+                f"layout: scales={tuple(weight_scale_inv.shape)} "
+                f"weight={tuple(weight.shape)}"
+            )
+        rows_per_group = rows // group_count
+        scale_rows_per_group = scale_rows // group_count
+        row_expanded = mx.concatenate(
+            [
+                mx.repeat(
+                    weight_scale_inv[
+                        group * scale_rows_per_group : (group + 1)
+                        * scale_rows_per_group,
+                        :col_blocks,
+                    ],
+                    _FP8_BLOCK_SIZE,
+                    axis=0,
+                )[:rows_per_group]
+                for group in range(group_count)
+            ],
+            axis=0,
+        )
+    else:
+        row_expanded = mx.repeat(
+            weight_scale_inv[:row_blocks, :col_blocks], _FP8_BLOCK_SIZE, axis=0
+        )[:rows]
+    expanded = mx.repeat(row_expanded, _FP8_BLOCK_SIZE, axis=1)
+    return expanded[:rows, :cols]
 
 
 def _dequantize_fp8_block_weight(

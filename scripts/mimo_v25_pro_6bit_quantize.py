@@ -493,9 +493,40 @@ def _broadcast_scale_inv(scale_inv: torch.Tensor, shape: Sequence[int]) -> torch
             f"required_scale_shape={(required_scale_rows, required_scale_cols)}"
         )
 
-    expanded = scale_inv.repeat_interleave(FP8_BLOCK_SIZE, dim=0).repeat_interleave(
-        FP8_BLOCK_SIZE, dim=1
-    )
+    if scale_rows > required_scale_rows:
+        # Scales laid out per row-group (e.g. the MiMo fused qkv: one scale
+        # grid per KV-head group, whose 3392-row stride is not a multiple of
+        # 128). A top-aligned uniform expansion mis-scales every row past the
+        # first group boundary, corrupting all K/V projections.
+        n_groups = next(
+            (
+                g
+                for g in range(2, scale_rows + 1)
+                if rows % g == 0
+                and g * _ceil_div(rows // g, FP8_BLOCK_SIZE) == scale_rows
+            ),
+            None,
+        )
+        if n_groups is None:
+            raise ValueError(
+                "FP8 scale_inv rows do not match a uniform or grouped "
+                f"128-block layout: scale_inv={tuple(scale_inv.shape)} "
+                f"target={tuple(shape)}"
+            )
+        rows_per_group = rows // n_groups
+        scale_rows_per_group = scale_rows // n_groups
+        expanded_rows = torch.cat(
+            [
+                scale_inv[
+                    g * scale_rows_per_group : (g + 1) * scale_rows_per_group
+                ].repeat_interleave(FP8_BLOCK_SIZE, dim=0)[:rows_per_group]
+                for g in range(n_groups)
+            ],
+            dim=0,
+        )
+    else:
+        expanded_rows = scale_inv.repeat_interleave(FP8_BLOCK_SIZE, dim=0)[:rows]
+    expanded = expanded_rows.repeat_interleave(FP8_BLOCK_SIZE, dim=1)
     return expanded[:rows, :cols]
 
 

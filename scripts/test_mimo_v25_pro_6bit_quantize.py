@@ -119,7 +119,10 @@ def test_tensor_plan_skips_unpaired_fp8_weight() -> None:
     assert "no same-shard" in entry["reason"]
 
 
-def test_broadcast_scale_inv_crops_extra_fp8_block_rows_for_mtp_qkv() -> None:
+def test_broadcast_scale_inv_uses_grouped_layout_for_mtp_qkv() -> None:
+    # MiMo fused qkv: 8 KV-head groups x 3392 rows; ceil(3392/128)=27 scale
+    # rows per group -> 216 total. Expansion must restart the 128-row grid at
+    # every group boundary instead of running one top-aligned grid.
     scale_inv = torch.arange(216 * 48, dtype=torch.float32).reshape(216, 48)
 
     broadcast = quantize._broadcast_scale_inv(scale_inv, (27136, 6144))
@@ -128,7 +131,12 @@ def test_broadcast_scale_inv_crops_extra_fp8_block_rows_for_mtp_qkv() -> None:
     assert broadcast[0, 0] == scale_inv[0, 0]
     assert broadcast[127, 127] == scale_inv[0, 0]
     assert broadcast[128, 0] == scale_inv[1, 0]
-    assert broadcast[27135, 6143] == scale_inv[211, 47]
+    # Last row of group 0 uses group 0's final scale row (block 26).
+    assert broadcast[3391, 0] == scale_inv[26, 0]
+    # First row of group 1 restarts on group 1's first scale row.
+    assert broadcast[3392, 0] == scale_inv[27, 0]
+    # Final row overall maps to the last group's final scale row.
+    assert broadcast[27135, 6143] == scale_inv[215, 47]
 
 
 def test_broadcast_scale_inv_preserves_normal_divisible_fp8_blocks() -> None:
