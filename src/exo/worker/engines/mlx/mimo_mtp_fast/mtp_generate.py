@@ -21,6 +21,7 @@ from collections.abc import Callable, Generator
 from typing import cast
 
 import mlx.core as mx
+from mlx_lm.models.cache import KVCache, RotatingKVCache
 from mlx_lm.sample_utils import (
     apply_min_p as _apply_min_p,  # pyright: ignore[reportUnknownVariableType]
 )
@@ -302,10 +303,24 @@ def mlx_generate_mtp(
     all_prompt_tokens = encode_prompt(tokenizer, prompt)
     target_cache = make_kv_cache(model=model)
 
+    # MiMo's sliding-window layers get RotatingKVCache from make_cache. The
+    # window is enforced by the attention mask (create_attention_mask receives
+    # window_size explicitly, and emits a windowed array mask even for N=1);
+    # the ring buffer only bounds memory. Substituting a plain KVCache keeps
+    # attention bit-identical while making every entry single-token trimmable,
+    # which the batched verify's rejection rewind requires. RotatingKVCache
+    # cannot rewind: a 2-token update takes the concat path and a subsequent
+    # trim corrupts _temporal_order's ring bookkeeping. Memory cost is the
+    # full-length K/V for window layers — negligible at MTP context lengths.
+    target_cache = [
+        KVCache() if isinstance(entry, RotatingKVCache) else entry
+        for entry in target_cache
+    ]
+
     # Batched verify commits [primary, draft] in one target forward and rewinds
     # the cache by one token on rejection. Rewind via trim is only sound for
-    # pure KV caches; SSM/rotating layers cannot trim a single token, so fall
-    # back to autoregressive decoding (drafting disabled) for such models.
+    # plain KV caches; SSM layers cannot trim a single token, so fall back to
+    # autoregressive decoding (drafting disabled) for such models.
     can_batch_verify = not has_non_kv_caches(target_cache)
     if not can_batch_verify:
         logger.warning(
