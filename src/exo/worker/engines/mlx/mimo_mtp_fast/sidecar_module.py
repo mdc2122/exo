@@ -3,11 +3,17 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol, TypeAlias, cast
+from typing import Protocol, cast
 
 import mlx.core as mx
 import mlx.nn as nn
 
+from exo.worker.engines.mlx.mimo_mtp_fast.draft_model import (
+    DraftLayerConfig,
+)
+from exo.worker.engines.mlx.mimo_mtp_fast.draft_model import (
+    Sampler as Sampler,  # re-export; canonical home is draft_model.py
+)
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_loader import (
     MimoMtpLayerTensors,
     MimoMtpSidecarTensors,
@@ -61,9 +67,6 @@ class _BaseModel(Protocol):
 
 class _LinearLike(Protocol):
     def __call__(self, x: mx.array) -> mx.array: ...
-
-
-Sampler: TypeAlias = Callable[[mx.array], mx.array | int]
 
 
 @dataclass
@@ -458,6 +461,10 @@ class MimoMtpStack(nn.Module):
         self.embed_tokens = embed_tokens
         self.lm_head = lm_head
 
+    @property
+    def num_draft_layers(self) -> int:
+        return len(self.layers)
+
     def make_cache(self, *, window_size: int | None = None) -> MimoMtpCache:
         return MimoMtpCache(num_layers=len(self.layers), window_size=window_size)
 
@@ -528,9 +535,9 @@ def build_mimo_mtp_stack(
     base_model: object,
 ) -> MimoMtpStack:
     typed_base_model = cast(_BaseModel, base_model)
-    args = typed_base_model.args
+    config = mimo_draft_layer_config(typed_base_model.args)
     layers = tuple(
-        _build_layer(layer_tensors=layer_tensors, args=args)
+        _build_layer(layer_tensors=layer_tensors, config=config)
         for layer_tensors in sidecar.layers
     )
     return MimoMtpStack(
@@ -540,35 +547,50 @@ def build_mimo_mtp_stack(
     )
 
 
+def mimo_draft_layer_config(args: _LayerArgs) -> DraftLayerConfig:
+    """Derive MiMo V2.5 Pro's draft-layer geometry from the base model args.
+
+    MTP layers carry attention_sink_bias, an SWA-only feature in this
+    checkpoint (add_full_attention_sink_bias=False), so they use the
+    sliding-window rope base. Invisible at depth 1 (fresh length-1 cache
+    makes rope cancel) but wrong for any positional use at depth > 1.
+    """
+    return DraftLayerConfig(
+        hidden_size=int(args.hidden_size),
+        num_attention_heads=int(args.num_attention_heads),
+        num_key_value_heads=int(args.num_key_value_heads),
+        head_dim=int(args.head_dim),
+        value_head_dim=int(args.v_head_dim),
+        layernorm_epsilon=float(args.layernorm_epsilon),
+        rope_theta=float(args.swa_rope_theta),
+        partial_rotary_factor=float(args.partial_rotary_factor),
+    )
+
+
 def _build_layer(
-    *, layer_tensors: MimoMtpLayerTensors, args: _LayerArgs
+    *, layer_tensors: MimoMtpLayerTensors, config: DraftLayerConfig
 ) -> MimoMtpLayer:
-    hidden_size = int(args.hidden_size)
+    hidden_size = config.hidden_size
     return MimoMtpLayer(
         hidden_size=hidden_size,
         hnorm=_make_rmsnorm(
             layer_tensors.get("hnorm.weight"),
             hidden_size,
-            float(args.layernorm_epsilon),
+            config.layernorm_epsilon,
         ),
         enorm=_make_rmsnorm(
             layer_tensors.get("enorm.weight"),
             hidden_size,
-            float(args.layernorm_epsilon),
+            config.layernorm_epsilon,
         ),
         eh_proj=_make_quantized_linear(layer_tensors, "eh_proj"),
         self_attn=MimoMtpAttention(
-            num_attention_heads=int(args.num_attention_heads),
-            num_key_value_heads=int(args.num_key_value_heads),
-            head_dim=int(args.head_dim),
-            value_head_dim=int(args.v_head_dim),
-            # MTP layers carry attention_sink_bias, an SWA-only feature in
-            # this checkpoint (add_full_attention_sink_bias=False), so they
-            # use the sliding-window rope base. Invisible at depth 1 (fresh
-            # length-1 cache makes rope cancel) but wrong for any positional
-            # use at depth > 1.
-            rope_theta=float(args.swa_rope_theta),
-            partial_rotary_factor=float(args.partial_rotary_factor),
+            num_attention_heads=config.num_attention_heads,
+            num_key_value_heads=config.num_key_value_heads,
+            head_dim=config.head_dim,
+            value_head_dim=config.value_head_dim,
+            rope_theta=config.rope_theta,
+            partial_rotary_factor=config.partial_rotary_factor,
             qkv_proj=_make_quantized_linear(layer_tensors, "self_attn.qkv_proj"),
             o_proj=_make_quantized_linear(layer_tensors, "self_attn.o_proj"),
             attention_sink_bias=layer_tensors.get("self_attn.attention_sink_bias"),
@@ -576,12 +598,12 @@ def _build_layer(
         input_layernorm=_make_rmsnorm(
             layer_tensors.get("input_layernorm.weight"),
             hidden_size,
-            float(args.layernorm_epsilon),
+            config.layernorm_epsilon,
         ),
         pre_mlp_layernorm=_make_rmsnorm(
             layer_tensors.get("pre_mlp_layernorm.weight"),
             hidden_size,
-            float(args.layernorm_epsilon),
+            config.layernorm_epsilon,
         ),
         mlp=MimoMtpMLP(
             gate_proj=_make_quantized_linear(layer_tensors, "mlp.gate_proj"),
@@ -591,7 +613,7 @@ def _build_layer(
         final_layernorm=_make_rmsnorm(
             layer_tensors.get("final_layernorm.weight"),
             hidden_size,
-            float(args.layernorm_epsilon),
+            config.layernorm_epsilon,
         ),
     )
 

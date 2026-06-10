@@ -63,6 +63,7 @@ from exo.worker.engines.mlx.generator.generate import (
     eos_ids_from_tokenizer,
     prefill,
 )
+from exo.worker.engines.mlx.mimo_mtp_fast.draft_model import DraftModel
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_module import (
     build_mimo_mtp_stack,
 )
@@ -276,8 +277,10 @@ def mlx_generate_mtp(
     assert decision.sidecar is not None
     assert decision.mtp_depth is not None and decision.mtp_depth >= 1
 
-    mtp_stack = build_mimo_mtp_stack(decision.sidecar, base_model=model)
-    mtp_depth: int = min(decision.mtp_depth, len(mtp_stack.layers))
+    # The decode loop below depends only on the DraftModel protocol; swapping
+    # in another model family means swapping this constructor call.
+    mtp_stack: DraftModel = build_mimo_mtp_stack(decision.sidecar, base_model=model)
+    mtp_depth: int = min(decision.mtp_depth, mtp_stack.num_draft_layers)
 
     all_prompt_tokens = encode_prompt(tokenizer, prompt)
     target_cache = make_kv_cache(model=model)
