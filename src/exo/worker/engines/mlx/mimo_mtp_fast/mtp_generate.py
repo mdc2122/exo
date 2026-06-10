@@ -399,14 +399,16 @@ def mlx_generate_mtp(
                 processed_logits = processor(history_tokens, processed_logits)
             primary_token = int(sampler(processed_logits).item())
 
-        text = _decode_tokens([primary_token], tokenizer)
+        # EOS tokens terminate the stream without surfacing their text —
+        # mlx_lm's stream_generate (the AR path) never detokenizes them.
+        is_eos = primary_token in eos_ids if eos_ids else False
+        text = "" if is_eos else _decode_tokens([primary_token], tokenizer)
         accumulated_text += text
         generated_tokens += 1
         _increment_count(attempted_depth_counts, 0)
         _increment_count(accepted_depth_counts, 0)
 
         # --- CHECK_BUDGET_OR_STOP ---
-        is_eos = primary_token in eos_ids if eos_ids else False
         is_stop = _check_stop_sequence(accumulated_text, stop_sequences)
         is_done = is_eos or is_stop or generated_tokens >= max_tokens
 
@@ -651,11 +653,11 @@ def mlx_generate_mtp(
         stopped_during_drafts = False
         for position in range(accepted_count):
             draft_token = int(draft_token_ids[position])
-            draft_text = _decode_tokens([draft_token], tokenizer)
+            is_draft_eos = draft_token in eos_ids if eos_ids else False
+            draft_text = "" if is_draft_eos else _decode_tokens([draft_token], tokenizer)
             accumulated_text += draft_text
             generated_tokens += 1
 
-            is_draft_eos = draft_token in eos_ids if eos_ids else False
             is_draft_stop = _check_stop_sequence(accumulated_text, stop_sequences)
             is_draft_done = is_draft_eos or is_draft_stop or generated_tokens >= max_tokens
 
