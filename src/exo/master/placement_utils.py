@@ -1,5 +1,6 @@
 import contextlib
 import ipaddress
+import os
 from collections.abc import Generator, Mapping
 
 from loguru import logger
@@ -457,13 +458,25 @@ def _find_ip_prioritised(
             "maybe_ethernet": 3,
             "thunderbolt": 4,
         }
+    # Escape hatch: on hosts where direct-interface TCP is blocked for runner
+    # processes (observed on macOS 26.5 — see mimo-mtp-deployment.md), the
+    # overlay is the only connectable ring path.
+    ring_prefers_overlay = bool(os.environ.get("EXO_RING_PREFER_OVERLAY"))
+
     def _ip_rank(ip: str) -> tuple[int, int, int, str]:
         is_tailscale = _is_tailscale_ip(ip)
         # Ring is the data plane: a Tailscale IP may be routed or even
         # DERP-relayed, so prefer direct interfaces there. The JACCL
         # coordinator socket is control-plane TCP where Tailscale-first is the
         # known-good behaviour.
-        overlay_rank = (1 if is_tailscale else 0) if ring else (0 if is_tailscale else 1)
+        if ring:
+            overlay_rank = (
+                (0 if is_tailscale else 1)
+                if ring_prefers_overlay
+                else (1 if is_tailscale else 0)
+            )
+        else:
+            overlay_rank = 0 if is_tailscale else 1
         # Within an interface class prefer routable addresses: IPv4 link-local
         # is interface-scoped and has proven flaky for runner sockets.
         link_local_rank = 0
