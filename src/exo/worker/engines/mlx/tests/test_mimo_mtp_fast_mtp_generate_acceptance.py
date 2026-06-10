@@ -8,10 +8,31 @@ import mlx.core as mx
 import pytest
 
 from exo.worker.engines.mlx.mimo_mtp_fast.mtp_generate import (
- _sample_residual_correction_token,  # pyright: ignore[reportPrivateUsage]
+ _sample_residual_correction_token_lazy,  # pyright: ignore[reportPrivateUsage]
  _sampling_probabilities,  # pyright: ignore[reportPrivateUsage]
  _speculative_acceptance_probability,  # pyright: ignore[reportPrivateUsage]
 )
+
+
+def _sample_token(
+    *,
+    target_logits: mx.array,
+    draft_logits: mx.array,
+    temperature: float,
+    top_p: float,
+    min_p: float,
+    top_k: int,
+) -> int:
+    return int(
+        _sample_residual_correction_token_lazy(
+            target_logits=target_logits,
+            draft_logits=draft_logits,
+            temperature=temperature,
+            top_p=top_p,
+            min_p=min_p,
+            top_k=top_k,
+        ).item()
+    )
 
 
 class _SamplingKwargs(TypedDict):
@@ -66,7 +87,7 @@ def test_residual_correction_samples_from_positive_target_minus_draft_mass() -> 
  target_logits = mx.array([[2.0, 0.0]], dtype=mx.float32)
  draft_logits = mx.array([[0.0, 2.0]], dtype=mx.float32)
 
- token = _sample_residual_correction_token(
+ token = _sample_token(
   target_logits=target_logits,
   draft_logits=draft_logits,
   **_DEFAULT_SAMPLING,
@@ -155,7 +176,7 @@ def test_residual_correction_fallback_when_p_equals_q_everywhere() -> None:
  # Identical logits → p == q for every token → positive residual is all zero.
  identical_logits = mx.array([[1.0, 2.0, 0.5]], dtype=mx.float32)
 
- token = _sample_residual_correction_token(
+ token = _sample_token(
   target_logits=identical_logits,
   draft_logits=identical_logits,
   **_DEFAULT_SAMPLING,
@@ -209,7 +230,7 @@ def test_determinism_with_fixed_seed() -> None:
  # Also test residual correction determinism under temperature=0.
  correction_tokens: list[int] = []
  for _ in range(10):
-  token = _sample_residual_correction_token(
+  token = _sample_token(
    target_logits=target_logits,
    draft_logits=draft_logits,
    **zero_sampling,

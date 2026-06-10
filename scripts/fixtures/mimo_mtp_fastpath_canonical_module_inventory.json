@@ -10,8 +10,8 @@
     },
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.mtp_generate",
-        "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/mtp_generate.py",
-        "blob_sha": "2c228dec5d5782e672f92616a8cd29047a7c6be8"
+      "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/mtp_generate.py",
+      "blob_sha": "5fe83c908995ebaa8f00d384bfcc225a5ad2960c"
     },
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.one_cycle",
@@ -25,18 +25,18 @@
     },
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.sidecar_contract",
-        "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/sidecar_contract.py",
-        "blob_sha": "872c70a51893f6c257355715d0401b51dce60835"
+      "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/sidecar_contract.py",
+      "blob_sha": "872c70a51893f6c257355715d0401b51dce60835"
     },
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.sidecar_loader",
-        "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/sidecar_loader.py",
-        "blob_sha": "5c02af554a4df8716b2be24367e3ec301228bb6f"
+      "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/sidecar_loader.py",
+      "blob_sha": "5c02af554a4df8716b2be24367e3ec301228bb6f"
     },
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.sidecar_module",
-        "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/sidecar_module.py",
-        "blob_sha": "63c7a2019751131265e91857fe31ce4e6000e46a"
+      "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/sidecar_module.py",
+      "blob_sha": "4b942ec9028d51e62bf9efcf157fa3cb1fad5a5a"
     },
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.speculative_loop",

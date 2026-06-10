@@ -47,7 +47,12 @@ from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
 from exo.shared.types.text_generation import TextGenerationTaskParams
 from exo.shared.types.worker.runner_response import GenerationResponse
-from exo.worker.engines.mlx.cache import encode_prompt, make_kv_cache
+from exo.worker.engines.mlx.cache import (
+    encode_prompt,
+    has_non_kv_caches,
+    make_kv_cache,
+    trim_cache,
+)
 from exo.worker.engines.mlx.generator.generate import (
     eos_ids_from_tokenizer,
     prefill,
@@ -147,7 +152,7 @@ def _speculative_acceptance_probability(
     return mx.minimum(mx.array(1.0), p_target / mx.maximum(q_draft, mx.array(1e-20)))
 
 
-def _sample_residual_correction_token(
+def _sample_residual_correction_token_lazy(
     *,
     target_logits: mx.array,
     draft_logits: mx.array,
@@ -155,8 +160,12 @@ def _sample_residual_correction_token(
     top_p: float,
     min_p: float,
     top_k: int,
-) -> int:
-    """Sample from normalized positive residual max(p_target - q_draft, 0)."""
+) -> mx.array:
+    """Sample from normalized positive residual max(p_target - q_draft, 0).
+
+    Returns a lazy scalar token array so the caller can fold materialization
+    into a single mx.eval alongside the acceptance test.
+    """
     target_probabilities = _sampling_probabilities(
         target_logits,
         temperature=temperature,
@@ -183,7 +192,7 @@ def _sample_residual_correction_token(
         mx.log(corrected_probabilities),
         mx.array(-float("inf"), dtype=corrected_probabilities.dtype),
     )
-    return int(mx.random.categorical(corrected_logits).item())
+    return mx.random.categorical(corrected_logits)
 
 
 def _check_stop_sequence(accumulated_text: str, stop_sequences: list[str]) -> bool:
@@ -215,11 +224,25 @@ def _build_stats(
     accepted_execution_path: str,
     mtp_enabled: bool,
     mtp_depth: int,
+    requested_mtp_depth: int | None,
+    mtp_sidecar_status: str | None,
+    fallback_count: int,
     attempted_depth_counts: dict[str, int],
     accepted_depth_counts: dict[str, int],
 ) -> GenerationStats:
     elapsed = time.perf_counter() - generation_start_time
     generation_tps = generated_tokens / elapsed if elapsed > 0 else 0.0
+    attempted_draft_tokens = sum(
+        count for depth, count in attempted_depth_counts.items() if depth != "0"
+    )
+    accepted_draft_tokens = sum(
+        count for depth, count in accepted_depth_counts.items() if depth != "0"
+    )
+    acceptance_rate = (
+        accepted_draft_tokens / attempted_draft_tokens
+        if attempted_draft_tokens > 0
+        else 0.0
+    )
     return GenerationStats(
         prompt_tps=float(prefill_tps),
         generation_tps=float(generation_tps),
@@ -228,9 +251,14 @@ def _build_stats(
         peak_memory_usage=Memory.from_gb(0.0),
         accepted_execution_path=accepted_execution_path,
         mtp_enabled=mtp_enabled,
+        requested_mtp_depth=requested_mtp_depth,
         mtp_depth=mtp_depth,
+        mtp_sidecar_status=mtp_sidecar_status,
         attempted_depth_counts=attempted_depth_counts,
         accepted_depth_counts=accepted_depth_counts,
+        acceptance_rate=acceptance_rate,
+        fallback_count=fallback_count,
+        timing_breakdown_seconds={"generation": float(elapsed)},
     )
 
 
@@ -274,6 +302,17 @@ def mlx_generate_mtp(
     all_prompt_tokens = encode_prompt(tokenizer, prompt)
     target_cache = make_kv_cache(model=model)
 
+    # Batched verify commits [primary, draft] in one target forward and rewinds
+    # the cache by one token on rejection. Rewind via trim is only sound for
+    # pure KV caches; SSM/rotating layers cannot trim a single token, so fall
+    # back to autoregressive decoding (drafting disabled) for such models.
+    can_batch_verify = not has_non_kv_caches(target_cache)
+    if not can_batch_verify:
+        logger.warning(
+            "mlx_generate_mtp: cache has non-KV layers; MTP drafting disabled, "
+            "running autoregressive fallback"
+        )
+
     temperature = task.temperature if task.temperature is not None else 0.7
     top_p = task.top_p if task.top_p is not None else 1.0
     min_p = task.min_p if task.min_p is not None else 0.05
@@ -315,13 +354,14 @@ def mlx_generate_mtp(
 
     # --- MTP DECODE LOOP ---
     generated_tokens = 0
-    accumulated_text = ""
+    accumulated_text: str = ""
     max_stop_len = max((len(s) for s in stop_sequences), default=0)
     pending_primary: int | None = None
     attempted_depth_counts: dict[str, int] = {}
     accepted_depth_counts: dict[str, int] = {}
     accepted_drafts = 0
     rejected_drafts = 0
+    fallback_count = 0
     generation_start_time = time.perf_counter()
 
     while generated_tokens < max_tokens:
@@ -360,6 +400,9 @@ def mlx_generate_mtp(
                 prefill_tps=prefill_tps, generation_start_time=generation_start_time,
                 generated_tokens=generated_tokens, accepted_execution_path="mimo_mtp_fastpath",
                 mtp_enabled=True, mtp_depth=mtp_depth,
+                requested_mtp_depth=decision.requested_depth,
+                mtp_sidecar_status=decision.sidecar_status,
+                fallback_count=fallback_count,
                 attempted_depth_counts=attempted_depth_counts, accepted_depth_counts=accepted_depth_counts,
             )
 
@@ -376,7 +419,7 @@ def mlx_generate_mtp(
         draft_token: int | None = None
 
         draft_logits_for_acceptance: mx.array | None = None
-        if mtp_depth >= 1:
+        if mtp_depth >= 1 and can_batch_verify:
             try:
                 primary_batch = _token_batch(primary_token)
                 processed_draft_logits: list[mx.array] = []
@@ -412,8 +455,9 @@ def mlx_generate_mtp(
                 logger.warning("MTP draft proposal failed, AR fallback: {}", exc)
                 draft_token = None
 
-        if draft_token is None:
+        if draft_token is None or draft_logits_for_acceptance is None:
             # AR fallback: forward primary through target model
+            fallback_count += 1
             primary_batch = _token_batch(primary_token)
             ar_hidden, ar_logits = _forward_hidden_and_logits(
                 model, primary_batch, target_cache
@@ -423,33 +467,66 @@ def mlx_generate_mtp(
             current_hidden = ar_hidden[:, -1:, :]
             continue
 
-        # --- VERIFY_FORWARD (sequential strategy) ---
-        primary_batch = _token_batch(primary_token)
+        # --- BATCHED VERIFY_FORWARD ---
+        # One target forward commits BOTH primary and draft to the KV cache.
+        # Position 0's logits verify the draft; position 1's logits supply the
+        # bonus distribution on acceptance. On rejection the draft is trimmed
+        # back out of the cache. This is what makes speculation pay: 1 + accept
+        # tokens per target forward instead of one forward per token.
+        verify_batch = mx.array([[primary_token, draft_token]], dtype=mx.int32)
         verify_hidden, verify_logits = _forward_hidden_and_logits(
-            model, primary_batch, target_cache
+            model, verify_batch, target_cache
         )
-        mx.eval(verify_logits, verify_hidden)
-        target_logits_for_draft = verify_logits[:, -1, :]
+        target_logits_for_draft = verify_logits[:, 0, :]
+        bonus_logits = verify_logits[:, 1, :]
         processed_target_logits_for_draft = target_logits_for_draft
         for processor in logits_processors:
             draft_history = mx.array(list(all_prompt_tokens) + _encode_text(accumulated_text, tokenizer))
             processed_target_logits_for_draft = processor(draft_history, processed_target_logits_for_draft)
 
         # --- COMPUTE_ACCEPTANCE (p/q speculative sampling) ---
-        if draft_logits_for_acceptance is None:
-            accepted = False
-        else:
-            acceptance_probability = _speculative_acceptance_probability(
-                target_logits=processed_target_logits_for_draft,
-                draft_logits=draft_logits_for_acceptance,
-                draft_token=draft_token,
-                temperature=temperature,
-                top_p=top_p,
-                min_p=min_p,
-                top_k=top_k,
+        # Both branch outcomes (bonus token on accept, residual correction on
+        # reject) are built lazily and materialized in a single mx.eval so the
+        # whole iteration costs one draft sync + one verify sync.
+        draft_text = _decode_tokens([draft_token], tokenizer)
+        acceptance_probability = _speculative_acceptance_probability(
+            target_logits=processed_target_logits_for_draft,
+            draft_logits=draft_logits_for_acceptance,
+            draft_token=draft_token,
+            temperature=temperature,
+            top_p=top_p,
+            min_p=min_p,
+            top_k=top_k,
+        )
+        acceptance_draw = mx.random.uniform(shape=())
+
+        processed_bonus = bonus_logits
+        for processor in logits_processors:
+            bonus_history = mx.array(
+                list(all_prompt_tokens)
+                + _encode_text(accumulated_text + draft_text, tokenizer)
             )
-            acceptance_draw = float(mx.random.uniform(shape=()).item())
-            accepted = acceptance_draw <= float(acceptance_probability.item())
+            processed_bonus = processor(bonus_history, processed_bonus)
+        bonus_token_array = sampler(processed_bonus)
+
+        correction_token_array = _sample_residual_correction_token_lazy(
+            target_logits=processed_target_logits_for_draft,
+            draft_logits=draft_logits_for_acceptance,
+            temperature=temperature,
+            top_p=top_p,
+            min_p=min_p,
+            top_k=top_k,
+        )
+
+        mx.eval(
+            acceptance_probability,
+            acceptance_draw,
+            bonus_token_array,
+            correction_token_array,
+            verify_hidden,
+            processed_target_logits_for_draft,
+        )
+        accepted = float(acceptance_draw.item()) <= float(acceptance_probability.item())
 
         if accepted:
             # --- ACCEPT_BRANCH ---
@@ -457,7 +534,6 @@ def mlx_generate_mtp(
             _increment_count(attempted_depth_counts, 1)
             _increment_count(accepted_depth_counts, 1)
 
-            draft_text = _decode_tokens([draft_token], tokenizer)
             accumulated_text += draft_text
             generated_tokens += 1
 
@@ -478,6 +554,9 @@ def mlx_generate_mtp(
                     prefill_tps=prefill_tps, generation_start_time=generation_start_time,
                     generated_tokens=generated_tokens, accepted_execution_path="mimo_mtp_fastpath",
                     mtp_enabled=True, mtp_depth=mtp_depth,
+                    requested_mtp_depth=decision.requested_depth,
+                    mtp_sidecar_status=decision.sidecar_status,
+                    fallback_count=fallback_count,
                     attempted_depth_counts=attempted_depth_counts, accepted_depth_counts=accepted_depth_counts,
                 )
 
@@ -489,38 +568,24 @@ def mlx_generate_mtp(
             if is_draft_done:
                 break
 
-            # Forward draft token through target to update KV cache
-            draft_batch = _token_batch(draft_token)
-            next_hidden, next_logits = _forward_hidden_and_logits(
-                model, draft_batch, target_cache
-            )
-            mx.eval(next_logits, next_hidden)
-            current_logits = next_logits[:, -1, :]
-            current_hidden = next_hidden[:, -1:, :]
+            # Draft is already committed to the target cache by the batched
+            # verify forward; its hidden state and the pre-sampled bonus token
+            # carry the loop forward with no extra target forward.
+            current_logits = bonus_logits
+            current_hidden = verify_hidden[:, 1:2, :]
 
-            # --- BONUS_SAMPLE ---
+            # --- BONUS (pre-sampled during the verify eval) ---
             if generated_tokens < max_tokens:
-                processed_bonus = current_logits
-                for processor in logits_processors:
-                    bonus_history = mx.array(list(all_prompt_tokens) + _encode_text(accumulated_text, tokenizer))
-                    processed_bonus = processor(bonus_history, processed_bonus)
-                bonus_token = int(sampler(processed_bonus).item())
-                pending_primary = bonus_token
+                pending_primary = int(bonus_token_array.item())
         else:
             # --- REJECT ---
             rejected_drafts += 1
             _increment_count(attempted_depth_counts, 1)
+            # Rewind the speculatively committed draft token out of the cache.
+            trim_cache(target_cache, 1)
             current_logits = processed_target_logits_for_draft
-            current_hidden = verify_hidden[:, -1:, :]
-            if draft_logits_for_acceptance is not None:
-                pending_primary = _sample_residual_correction_token(
-                    target_logits=processed_target_logits_for_draft,
-                    draft_logits=draft_logits_for_acceptance,
-                    temperature=temperature,
-                    top_p=top_p,
-                    min_p=min_p,
-                    top_k=top_k,
-                )
+            current_hidden = verify_hidden[:, 0:1, :]
+            pending_primary = int(correction_token_array.item())
 
         if max_stop_len > 0 and len(accumulated_text) > max_stop_len:
             accumulated_text = accumulated_text[-max_stop_len:]
