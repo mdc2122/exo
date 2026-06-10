@@ -16,6 +16,7 @@ from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_loader import (
 from exo.worker.engines.mlx.mimo_mtp_fast.sidecar_module import (
     Fp8BlockLinear,
     MimoMtpCache,
+    MimoMtpLayerCache,
     QuantizedAffineLinear,
     build_mimo_mtp_stack,
 )
@@ -249,3 +250,72 @@ def test_mimo_mtp_cache_reset_clears_layer_offsets() -> None:
     assert cache.layers[0].offset == 0
     assert cache.layers[0].keys is None
     assert cache.layers[0].values is None
+
+
+def test_propose_backfills_persistent_cache_with_multi_position_context() -> None:
+    """A multi-row hidden backfill warms the layer-0 cache with one entry per
+    position and drafts from the final position only."""
+    sidecar = MimoMtpSidecarTensors(
+        path=Path("model_mtp.safetensors"),
+        layers=(_tiny_layer(0), _tiny_layer(1), _tiny_layer(2)),
+    )
+    base_model = _TinyBaseModel()
+    stack = build_mimo_mtp_stack(sidecar, base_model)
+    cache = stack.make_cache(window_size=4)
+
+    tokens, logits = stack.propose(
+        previous_hidden_state=mx.ones((1, 3, 2), dtype=mx.float32),
+        latest_token_ids=mx.array([[7, 1, 2]], dtype=mx.int32),
+        max_draft_tokens=1,
+        sampler=lambda row: mx.argmax(row, axis=-1),
+        cache=cache,
+    )
+
+    assert tokens.shape == (1, 1)
+    assert len(logits) == 1
+    assert logits[0].shape[0] == 1
+    # All three (hidden, token) pairs entered the layer-0 cache.
+    assert cache.layers[0].offset == 3
+
+    # A follow-up single-position proposal appends to the same cache.
+    stack.propose(
+        previous_hidden_state=mx.ones((1, 1, 2), dtype=mx.float32),
+        latest_token_ids=mx.array([[3]], dtype=mx.int32),
+        max_draft_tokens=1,
+        sampler=lambda row: mx.argmax(row, axis=-1),
+        cache=cache,
+    )
+    assert cache.layers[0].offset == 4
+
+
+def test_layer_cache_window_cap_drops_oldest_entries() -> None:
+    cache = MimoMtpLayerCache(max_size=2)
+    def kv(value: float) -> mx.array:
+        return mx.full((1, 1, 1, 2), value, dtype=mx.float32)
+
+    cache.update_and_fetch(kv(1.0), kv(1.0))
+    cache.update_and_fetch(kv(2.0), kv(2.0))
+    keys, _values = cache.update_and_fetch(kv(3.0), kv(3.0))
+
+    assert cache.offset == 3
+    assert int(keys.shape[2]) == 2
+    assert float(keys[0, 0, 0, 0].item()) == 2.0
+    assert float(keys[0, 0, 1, 0].item()) == 3.0
+
+
+def test_propose_rejects_token_history_shorter_than_backfill() -> None:
+    sidecar = MimoMtpSidecarTensors(
+        path=Path("model_mtp.safetensors"),
+        layers=(_tiny_layer(0),),
+    )
+    base_model = _TinyBaseModel()
+    stack = build_mimo_mtp_stack(sidecar, base_model)
+
+    with pytest.raises(ValueError, match="token history shorter"):
+        stack.propose(
+            previous_hidden_state=mx.ones((1, 3, 2), dtype=mx.float32),
+            latest_token_ids=mx.array([[1, 2]], dtype=mx.int32),
+            max_draft_tokens=1,
+            sampler=lambda row: mx.argmax(row, axis=-1),
+            cache=stack.make_cache(),
+        )

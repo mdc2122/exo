@@ -20,6 +20,7 @@ Algorithm (depth=1, sequential verify strategy):
 # pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable, Generator
 from typing import cast
@@ -306,6 +307,28 @@ def mlx_generate_mtp(
             "running autoregressive fallback"
         )
 
+    # Draft context (experiment, default on at depth 1): the MTP layer is a
+    # sliding-window transformer layer trained with sequence context, but the
+    # per-iteration fresh cache made it draft from a single token. A
+    # persistent windowed cache, backfilled with hidden states the verify
+    # forward already produced, lets the draft layer attend over recent
+    # history. Depth 1 only: chained layers would accumulate non-contiguous
+    # entries. Kill switch: EXO_MIMO_MTP_DRAFT_CONTEXT=0.
+    draft_context_enabled = (
+        can_batch_verify
+        and mtp_depth == 1
+        and os.environ.get("EXO_MIMO_MTP_DRAFT_CONTEXT", "1").lower()
+        not in ("", "0", "false", "off", "no")
+    )
+    model_args = getattr(model, "args", None)
+    raw_window = cast("int | None", getattr(model_args, "sliding_window_size", None))
+    draft_window = int(raw_window) if raw_window else None
+    persistent_mtp_cache = (
+        mtp_stack.make_cache(window_size=draft_window)
+        if draft_context_enabled
+        else None
+    )
+
     temperature = task.temperature if task.temperature is not None else 0.7
     top_p = task.top_p if task.top_p is not None else 1.0
     min_p = task.min_p if task.min_p is not None else 0.05
@@ -344,6 +367,8 @@ def mlx_generate_mtp(
     mx.eval(hidden_state, logits)
     current_hidden: mx.array = hidden_state[:, -1:, :]
     current_logits: mx.array = logits[:, -1, :]
+    draft_context_hidden: mx.array = current_hidden
+    draft_context_token_ids: list[int] = []
 
     # --- MTP DECODE LOOP ---
     generated_tokens = 0
@@ -414,7 +439,11 @@ def mlx_generate_mtp(
             break
 
         # --- DRAFT_PROPOSE ---
-        mtp_cache = mtp_stack.make_cache()
+        mtp_cache = (
+            persistent_mtp_cache
+            if persistent_mtp_cache is not None
+            else mtp_stack.make_cache()
+        )
         draft_token_ids: list[int] | None = None
         draft_tokens_array: mx.array | None = None
         draft_logits_per_position: list[mx.array] | None = None
@@ -437,9 +466,17 @@ def mlx_generate_mtp(
                     processed_draft_logits_sink.append(processed_logits)
                     return sampler(processed_logits)
 
+                if persistent_mtp_cache is not None:
+                    propose_hidden = draft_context_hidden
+                    propose_token_ids = mx.array(
+                        [draft_context_token_ids + [primary_token]], dtype=mx.int32
+                    )
+                else:
+                    propose_hidden = current_hidden
+                    propose_token_ids = primary_batch
                 draft_tokens, raw_draft_logits = mtp_stack.propose(
-                    previous_hidden_state=current_hidden,
-                    latest_token_ids=primary_batch,
+                    previous_hidden_state=propose_hidden,
+                    latest_token_ids=propose_token_ids,
                     max_draft_tokens=mtp_depth,
                     sampler=draft_sampler,
                     cache=mtp_cache,
@@ -466,6 +503,12 @@ def mlx_generate_mtp(
             except Exception as exc:
                 logger.warning("MTP draft proposal failed, AR fallback: {}", exc)
                 draft_tokens_array = None
+                if persistent_mtp_cache is not None:
+                    # The failed proposal may have partially updated the
+                    # persistent cache; restart context cleanly.
+                    mtp_stack.reset_cache_on_fallback(persistent_mtp_cache)
+                    draft_context_hidden = current_hidden
+                    draft_context_token_ids = []
         timing_accumulators["draft_seconds"] += time.perf_counter() - draft_section_start
 
         if draft_tokens_array is None or draft_logits_per_position is None:
@@ -478,6 +521,10 @@ def mlx_generate_mtp(
             mx.eval(ar_hidden, ar_logits)
             current_logits = ar_logits[:, -1, :]
             current_hidden = ar_hidden[:, -1:, :]
+            if persistent_mtp_cache is not None:
+                mtp_stack.reset_cache_on_fallback(persistent_mtp_cache)
+                draft_context_hidden = current_hidden
+                draft_context_token_ids = []
             continue
 
         num_drafts = int(draft_tokens_array.shape[1])
@@ -656,6 +703,13 @@ def mlx_generate_mtp(
             # --- REJECT: residual correction at the first rejected position ---
             current_logits = processed_target_logits[accepted_count]
             pending_primary = int(correction_candidates[accepted_count].item())
+
+        if persistent_mtp_cache is not None:
+            # Committed rows [primary, accepted drafts] become the next
+            # proposal's backfill; their pair tokens are the accepted draft
+            # ids plus the next primary (appended at propose time).
+            draft_context_hidden = verify_hidden[:, : accepted_count + 1, :]
+            draft_context_token_ids = list(draft_token_ids[:accepted_count])
 
         if max_stop_len > 0 and len(accumulated_text) > max_stop_len:
             accumulated_text = accumulated_text[-max_stop_len:]

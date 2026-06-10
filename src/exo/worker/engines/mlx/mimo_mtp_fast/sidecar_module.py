@@ -71,6 +71,7 @@ class MimoMtpLayerCache:
     keys: mx.array | None = None
     values: mx.array | None = None
     offset: int = 0
+    max_size: int | None = None
 
     def update_and_fetch(
         self, keys: mx.array, values: mx.array
@@ -82,7 +83,14 @@ class MimoMtpLayerCache:
         else:
             self.keys = mx.concatenate([self.keys, keys], axis=2)
             self.values = mx.concatenate([self.values, values], axis=2)
-        return self.keys[..., : self.offset, :], self.values[..., : self.offset, :]
+        # Sliding-window layers were trained attending over at most max_size
+        # positions; drop entries beyond the window. Keys were rotated at
+        # their absolute offsets before caching, so RoPE relative geometry
+        # survives the slice.
+        if self.max_size is not None and int(self.keys.shape[2]) > self.max_size:
+            self.keys = self.keys[..., -self.max_size :, :]
+            self.values = self.values[..., -self.max_size :, :]
+        return self.keys, self.values
 
     def reset(self) -> None:
         self.keys = None
@@ -93,10 +101,14 @@ class MimoMtpLayerCache:
 @dataclass
 class MimoMtpCache:
     num_layers: int
+    window_size: int | None = None
     layers: list[MimoMtpLayerCache] = field(init=False)
 
     def __post_init__(self) -> None:
-        self.layers = [MimoMtpLayerCache() for _ in range(self.num_layers)]
+        self.layers = [
+            MimoMtpLayerCache(max_size=self.window_size)
+            for _ in range(self.num_layers)
+        ]
 
     def reset(self) -> None:
         for layer_cache in self.layers:
@@ -332,11 +344,28 @@ class MimoMtpAttention(nn.Module):
             keys = self.rope(keys, offset=cache.offset)
             full_keys, full_values = cache.update_and_fetch(keys, values)
 
+        attention_mask: mx.array | None = None
+        if sequence_length > 1:
+            # Multi-position update (context backfill): every query sees all
+            # older cached keys, and the new positions are causal among
+            # themselves. Single-token decode needs no mask.
+            total_keys = int(full_keys.shape[2])
+            prior_keys = total_keys - sequence_length
+            query_positions = mx.arange(sequence_length)[:, None]
+            key_positions = mx.arange(total_keys)[None, :] - prior_keys
+            allowed = key_positions <= query_positions
+            attention_mask = mx.where(
+                allowed,
+                mx.zeros((sequence_length, total_keys), dtype=queries.dtype),
+                mx.array(-float("inf"), dtype=queries.dtype),
+            )
+
         attention_output = MX_FAST_SCALED_DOT_PRODUCT_ATTENTION(
             queries,
             full_keys,
             full_values,
             scale=self.scale,
+            mask=attention_mask,
             sinks=self.attention_sink_bias,
         )
         attention_output = attention_output.transpose(0, 2, 1, 3).reshape(
@@ -429,8 +458,8 @@ class MimoMtpStack(nn.Module):
         self.embed_tokens = embed_tokens
         self.lm_head = lm_head
 
-    def make_cache(self) -> MimoMtpCache:
-        return MimoMtpCache(num_layers=len(self.layers))
+    def make_cache(self, *, window_size: int | None = None) -> MimoMtpCache:
+        return MimoMtpCache(num_layers=len(self.layers), window_size=window_size)
 
     def reset_cache_on_fallback(self, cache: object) -> None:
         if not isinstance(cache, MimoMtpCache):
@@ -456,7 +485,18 @@ class MimoMtpStack(nn.Module):
             raise TypeError(f"expected MimoMtpCache, got {type(cache).__name__}")
         mtp_cache = self.make_cache() if cache is None else cache
         token_history = _as_token_history(latest_token_ids)
-        current_token_ids = token_history[:, -1:]
+        backfill_length = int(previous_hidden_state.shape[1])
+        if int(token_history.shape[1]) < backfill_length:
+            raise ValueError(
+                "token history shorter than hidden-state backfill: "
+                f"{int(token_history.shape[1])} < {backfill_length}"
+            )
+        # Position i of the hidden backfill pairs with token i of the trailing
+        # token window: (hidden at t, embedding of token t+1) is the MTP input
+        # contract. The first layer consumes the whole window (warming a
+        # persistent cache with sequence context); chained layers draft from
+        # the final position only.
+        current_token_ids = token_history[:, -backfill_length:]
         current_hidden_state = previous_hidden_state
         sampled_tokens: list[mx.array] = []
         per_layer_logits: list[mx.array] = []
@@ -468,7 +508,8 @@ class MimoMtpStack(nn.Module):
                 token_embedding,
                 cache=mtp_cache.layers[layer_index],
             )
-            logits = self.lm_head(current_hidden_state)[:, -1, :]
+            logits = self.lm_head(current_hidden_state[:, -1:, :])[:, -1, :]
+            current_hidden_state = current_hidden_state[:, -1:, :]
             sampled_token = _as_token_column(sampler(logits))
             sampled_tokens.append(sampled_token)
             per_layer_logits.append(logits)
