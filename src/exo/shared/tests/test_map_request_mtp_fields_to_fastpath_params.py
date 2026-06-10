@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from exo.shared.types.text_generation import (
     MimoMtpFastpathParams,
     MimoMtpRequestFields,
+    default_mimo_mtp_fastpath_params,
     map_request_mtp_fields_to_fastpath_params,
 )
 
@@ -482,3 +483,19 @@ class TestPureFunctionBehavior:
         )
         assert map_request_mtp_fields_to_fastpath_params(fields) is None
         assert map_request_mtp_fields_to_fastpath_params(fields) is None
+
+
+class TestDefaultMimoMtpFastpathParams:
+    """default_mimo_mtp_fastpath_params supplies a fail-open deployment default."""
+
+    def test_none_when_no_default_sidecar_configured(self) -> None:
+        assert default_mimo_mtp_fastpath_params(None) is None
+        assert default_mimo_mtp_fastpath_params("") is None
+
+    def test_default_is_enabled_fail_open_with_worker_resolved_depth(self) -> None:
+        params = default_mimo_mtp_fastpath_params("/models/sidecar.safetensors")
+        assert params is not None
+        assert params.enabled is True
+        assert params.depth is None
+        assert params.sidecar_path == "/models/sidecar.safetensors"
+        assert params.fail_closed is False

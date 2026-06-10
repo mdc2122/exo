@@ -145,6 +145,31 @@ def map_request_mtp_fields_to_fastpath_params(
     )
 
 
+def default_mimo_mtp_fastpath_params(
+    default_sidecar_path: str | None,
+) -> MimoMtpFastpathParams | None:
+    """Server-side MTP default for requests that carry no MTP fields.
+
+    When the deployment sets a default sidecar path (the
+    EXO_MIMO_MTP_DEFAULT_SIDECAR_PATH environment variable, read at the
+    API layer), requests without explicit MTP intent default to the
+    fastpath at the worker-resolved depth (1). fail_closed is forced
+    False so the default can never break a request: an incompatible
+    model, missing sidecar, or any fastpath rejection silently falls
+    back to plain autoregressive generation. Explicit request fields
+    always win — this is only consulted when
+    map_request_mtp_fields_to_fastpath_params returned None.
+    """
+    if not default_sidecar_path:
+        return None
+    return MimoMtpFastpathParams(
+        enabled=True,
+        depth=None,
+        sidecar_path=default_sidecar_path,
+        fail_closed=False,
+    )
+
+
 def assign_mimo_mtp_fastpath_params(
     task_params: "TextGenerationTaskParams",
     mtp_params: MimoMtpFastpathParams | None,

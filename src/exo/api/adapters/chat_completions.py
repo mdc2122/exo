@@ -46,6 +46,7 @@ from exo.shared.types.text_generation import (
     MimoMtpRequestFields,
     TextGenerationTaskParams,
     VideoSource,
+    default_mimo_mtp_fastpath_params,
     map_request_mtp_fields_to_fastpath_params,
     resolve_reasoning_params,
 )
@@ -1173,6 +1174,10 @@ async def chat_request_to_text_generation(
             mimo_mtp_fail_closed=request.mimo_mtp_fail_closed,
         ),
     )
+    if mimo_mtp_fastpath_params is None:
+        mimo_mtp_fastpath_params = default_mimo_mtp_fastpath_params(
+            os.environ.get("EXO_MIMO_MTP_DEFAULT_SIDECAR_PATH")
+        )
 
     task_params = TextGenerationTaskParams(
         model=request.model,
