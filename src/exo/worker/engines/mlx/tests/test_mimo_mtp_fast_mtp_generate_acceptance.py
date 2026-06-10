@@ -346,8 +346,8 @@ def test_glm_hidden_tap_environment_parsing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv(GLM_MTP_HIDDEN_TAP_ENV, raising=False)
-    assert _glm_hidden_tap_from_environment() == "post_norm"
-    monkeypatch.setenv(GLM_MTP_HIDDEN_TAP_ENV, "pre_norm")
     assert _glm_hidden_tap_from_environment() == "pre_norm"
-    monkeypatch.setenv(GLM_MTP_HIDDEN_TAP_ENV, "sideways")
+    monkeypatch.setenv(GLM_MTP_HIDDEN_TAP_ENV, "post_norm")
     assert _glm_hidden_tap_from_environment() == "post_norm"
+    monkeypatch.setenv(GLM_MTP_HIDDEN_TAP_ENV, "sideways")
+    assert _glm_hidden_tap_from_environment() == "pre_norm"

@@ -100,13 +100,11 @@ def _forward_hidden_and_logits(
 
     hidden_tap selects which hidden state feeds the draft layer. mlx_lm inner
     models apply the final RMSNorm before returning, so "post_norm" is the
-    natural tap (and what MiMo shipped with). The DeepSeek-V3 MTP recipe is
-    ambiguous about whether its nextn layer saw pre- or post-norm hidden
-    states during training; "pre_norm" temporarily swaps the final norm for
-    an identity so the returned hidden skips it, while logits still see the
-    normed hidden. A/B these on a real prompt before trusting GLM acceptance
-    numbers — the wrong tap reads as catastrophically low acceptance, not an
-    error.
+    natural tap (and what MiMo ships with). "pre_norm" temporarily swaps the
+    final norm for an identity so the returned hidden skips it, while logits
+    still see the normed hidden. GLM 5.1's nextn layer wants pre_norm: live
+    two-node A/B 2026-06-10 measured 65.6% vs 56.4% acceptance on the same
+    prompt (and 79.8% on code), so pre_norm is the GLM default.
     """
     inner = model.model  # type: ignore[reportAttributeAccessIssue]
     lm_head = model.lm_head  # type: ignore[reportAttributeAccessIssue]
@@ -142,16 +140,17 @@ def _glm_draft_model_for(*, model: Model, sidecar_path: Path) -> DraftModel:
 
 
 def _glm_hidden_tap_from_environment() -> HiddenTap:
-    raw_value = os.environ.get(GLM_MTP_HIDDEN_TAP_ENV, "post_norm").strip().lower()
-    if raw_value == "pre_norm":
-        return "pre_norm"
-    if raw_value not in ("", "post_norm"):
+    # pre_norm default per the live A/B (see _forward_hidden_and_logits).
+    raw_value = os.environ.get(GLM_MTP_HIDDEN_TAP_ENV, "pre_norm").strip().lower()
+    if raw_value == "post_norm":
+        return "post_norm"
+    if raw_value not in ("", "pre_norm"):
         logger.warning(
-            "{}={} is not a recognised hidden tap; using post_norm",
+            "{}={} is not a recognised hidden tap; using pre_norm",
             GLM_MTP_HIDDEN_TAP_ENV,
             raw_value,
         )
-    return "post_norm"
+    return "pre_norm"
 
 
 def _token_batch(token_id: int) -> mx.array:

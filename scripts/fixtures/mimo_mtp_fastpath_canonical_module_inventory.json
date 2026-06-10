@@ -21,7 +21,7 @@
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.mtp_generate",
       "relative_path": "src/exo/worker/engines/mlx/mimo_mtp_fast/mtp_generate.py",
-      "blob_sha": "2a9c6a0f9bd01e5a9776e0944e2ebdbf899100d2"
+      "blob_sha": "9bbac4a427d240e7fdf3762e477bf25ccd67664a"
     },
     {
       "module_name": "exo.worker.engines.mlx.mimo_mtp_fast.one_cycle",
