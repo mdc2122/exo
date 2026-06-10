@@ -1,0 +1,67 @@
+{
+  "acceptance_result": {
+    "acceptance_rate": 0.6842105263157895,
+    "accepted_depth_counts": {
+      "0": 76,
+      "1": 52
+    },
+    "attempted_depth_counts": {
+      "0": 76,
+      "1": 76
+    },
+    "mtp_accepted_execution_path": "mimo_mtp_fastpath",
+    "mtp_execution_state": "successful_mtp",
+    "pass": true
+  },
+  "cluster_state": {
+    "api_base": "http://127.0.0.1:52415",
+    "checked_at_utc": "2026-06-10T18:22:47.125213+00:00",
+    "errors": [],
+    "last_seen_keys": [
+      "12D3KooWHWSVTpwkk2V6GqKHJLSEhDE2i4jCGLHQTAsZLoy1Y8o4",
+      "12D3KooWKq1QwCsWpWMR8yNtSgUyrXMwdrqvJ6hW5oFzyi7YpGrj"
+    ],
+    "node_count": 2,
+    "nodes": [
+      "12D3KooWHWSVTpwkk2V6GqKHJLSEhDE2i4jCGLHQTAsZLoy1Y8o4",
+      "12D3KooWKq1QwCsWpWMR8yNtSgUyrXMwdrqvJ6hW5oFzyi7YpGrj"
+    ],
+    "two_node_ready": true
+  },
+  "qa_verdict": {
+    "pass": true,
+    "telemetry_present": {
+      "acceptance_rate": true,
+      "accepted_depth_counts": true,
+      "accepted_execution_path": true,
+      "ar_generation_tps": true,
+      "attempted_depth_counts": true,
+      "mtp_execution_state": true,
+      "mtp_generation_tps": true,
+      "mtp_sidecar_status": true,
+      "timing_breakdown_seconds": true
+    }
+  },
+  "runner_result": {
+    "ar_http_status": 200,
+    "ar_row_status": "live",
+    "mtp_http_status": 200,
+    "mtp_row_status": "live",
+    "pass": true
+  },
+  "smoke_result": {
+    "acceptance_pass": true,
+    "pass": false,
+    "qa_pass": true,
+    "runner_pass": true,
+    "throughput_pass": false
+  },
+  "throughput_result": {
+    "ar_generation_tps": 22.6316576225335,
+    "mtp_generation_tps": 23.9163192280237,
+    "mtp_min_tok_s": 25.0,
+    "pass": false,
+    "preferred_40_tok_s_met": false,
+    "target_30_tok_s_met": false
+  }
+}
