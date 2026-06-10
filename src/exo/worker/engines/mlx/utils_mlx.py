@@ -396,13 +396,17 @@ def mlx_distributed_init(
                 for peer_index, peer in enumerate(hosts_for_node):
                     if peer.ip == "0.0.0.0" or peer.port == 0:
                         continue
+                    # Probe a benign port, NOT the ring port — connecting to the
+                    # ring listener consumes its accept slot and breaks the
+                    # handshake. ECONNREFUSED (61) still proves reachability.
                     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     probe.settimeout(3)
                     try:
-                        probe_error = probe.connect_ex((peer.ip, peer.port))
+                        probe_error = probe.connect_ex((peer.ip, 7))
                         logger.info(
                             f"ring peer probe rank={rank} -> index={peer_index} "
-                            f"{peer.ip}:{peer.port} connect_ex={probe_error}"
+                            f"{peer.ip}:7 connect_ex={probe_error} "
+                            "(61=reachable, 60/65=blocked)"
                         )
                     finally:
                         probe.close()
