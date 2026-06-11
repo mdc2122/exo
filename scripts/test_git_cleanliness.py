@@ -5,7 +5,11 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 import scripts.git_cleanliness as git_cleanliness
-from scripts.git_cleanliness import get_current_branch, get_worktree_status, validate_git_cleanliness
+from scripts.git_cleanliness import (
+    get_current_branch,
+    get_worktree_status,
+    validate_git_cleanliness,
+)
 
 
 def _git(repo_path: Path, args: Sequence[str]) -> None:

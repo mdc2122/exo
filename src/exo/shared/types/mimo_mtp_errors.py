@@ -521,7 +521,7 @@ def raise_mimo_mtp_fail_closed_error(
         )
 
     # Should be unreachable if the mapping is complete
-    raise MimoMtpFailClosedError(  # type: ignore[unreachable]
+    raise MimoMtpFailClosedError(
         message,
         model_id=model_id,
         requested_depth=requested_depth,

@@ -3,6 +3,10 @@ the serialization output dict/bytes contain zero MTP-specific keys
 (e.g., no 'mtp_tokens', 'mtp_probabilities', 'mtp_state' keys);
 verify exact key-set equality against a known AR-only baseline.
 """
+# JSON round-trip assertions are inherently Any-typed; fakes stand in for
+# strict request types. Suppressed file-wide per repo test convention.
+# pyright: reportAny=false, reportUnknownArgumentType=false, reportUnknownVariableType=false
+# pyright: reportUnknownMemberType=false, reportArgumentType=false
 
 import json
 from typing import Any, cast

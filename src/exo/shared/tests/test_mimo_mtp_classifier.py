@@ -449,7 +449,7 @@ class TestClassificationResultModel:
     def test_frozen_rejects_mutation(self) -> None:
         result = self._sample_classification()
         with pytest.raises(ValidationError):
-            result.label = "unsupported_model"  # type: ignore[misc]
+            result.label = "unsupported_model"
 
     def test_strict_rejects_coerced_types(self) -> None:
         with pytest.raises(ValidationError):

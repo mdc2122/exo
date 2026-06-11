@@ -1,3 +1,4 @@
+# pyright: reportUnknownLambdaType=false, reportUnknownArgumentType=false
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast

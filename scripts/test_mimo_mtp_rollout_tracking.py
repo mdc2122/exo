@@ -345,7 +345,7 @@ def test_evidence_index_contains_no_entries_absent_from_input_sources() -> None:
     # _verification_command_index_for_criterion iterates over.  The indexing
     # function only takes [0] from each category, so the full descriptor set
     # is guaranteed to be a superset of anything the index can produce.
-    _INDEXED_CATEGORIES: tuple[str, ...] = (
+    _INDEXED_CATEGORIES: tuple[str, ...] = (  # noqa: N806
         "api",
         "task_type",
         "worker",

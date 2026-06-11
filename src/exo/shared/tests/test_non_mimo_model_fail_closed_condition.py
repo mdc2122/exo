@@ -23,6 +23,10 @@ This is the **fail-closed** contract: non-MiMo models can never produce MTP,
 and the system must report a typed error, not silently fall through to AR
 while appearing to have accepted MTP.
 """
+# Test doubles intentionally substitute for runner-internal types and
+# reach into private seams. Suppressed file-wide per repo test convention.
+# pyright: reportArgumentType=false, reportPrivateUsage=false, reportAny=false
+# pyright: reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnknownMemberType=false
 
 from __future__ import annotations
 

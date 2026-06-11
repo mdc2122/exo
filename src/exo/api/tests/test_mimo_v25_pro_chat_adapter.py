@@ -1,3 +1,4 @@
+# pyright: reportUnknownLambdaType=false, reportUnknownArgumentType=false
 # pyright: reportAny=false
 
 import pytest

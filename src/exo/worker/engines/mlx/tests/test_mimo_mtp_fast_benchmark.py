@@ -146,9 +146,7 @@ def test_metric_row_records_accepted_execution_path_for_rollout_telemetry() -> N
     assert mtp_row["accepted_execution_path"] == "mimo_mtp_fastpath"
 
 
-def test_bottleneck_classifier_emits_acceptance_rate_low_when_below_threshold() -> (
-    None,
-):
+def test_bottleneck_classifier_emits_acceptance_rate_low_when_below_threshold() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -161,9 +159,7 @@ def test_bottleneck_classifier_emits_acceptance_rate_low_when_below_threshold() 
     assert "acceptance_rate_low" in classifications
 
 
-def test_bottleneck_classifier_suppresses_acceptance_rate_low_without_acceptance_telemetry() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_acceptance_rate_low_without_acceptance_telemetry() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -176,9 +172,7 @@ def test_bottleneck_classifier_suppresses_acceptance_rate_low_without_acceptance
     assert "acceptance_rate_low" not in classifications
 
 
-def test_bottleneck_classifier_suppresses_acceptance_rate_low_without_threshold() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_acceptance_rate_low_without_threshold() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -191,9 +185,7 @@ def test_bottleneck_classifier_suppresses_acceptance_rate_low_without_threshold(
     assert "acceptance_rate_low" not in classifications
 
 
-def test_bottleneck_classifier_suppresses_acceptance_rate_low_at_or_above_threshold() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_acceptance_rate_low_at_or_above_threshold() -> None:
     classifications_at = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -216,9 +208,7 @@ def test_bottleneck_classifier_suppresses_acceptance_rate_low_at_or_above_thresh
     assert "acceptance_rate_low" not in classifications_above
 
 
-def test_bottleneck_classifier_suppresses_acceptance_rate_low_for_ar_mode() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_acceptance_rate_low_for_ar_mode() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.AR,
         decode_tok_s=22.0,
@@ -231,9 +221,7 @@ def test_bottleneck_classifier_suppresses_acceptance_rate_low_for_ar_mode() -> (
     assert "acceptance_rate_low" not in classifications
 
 
-def test_bottleneck_classifier_emits_proposal_too_slow_when_dominant_phase() -> (
-    None,
-):
+def test_bottleneck_classifier_emits_proposal_too_slow_when_dominant_phase() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -245,9 +233,7 @@ def test_bottleneck_classifier_emits_proposal_too_slow_when_dominant_phase() -> 
     assert "proposal_too_slow" in classifications
 
 
-def test_bottleneck_classifier_suppresses_proposal_too_slow_without_proposal_telemetry() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_proposal_too_slow_without_proposal_telemetry() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -259,9 +245,7 @@ def test_bottleneck_classifier_suppresses_proposal_too_slow_without_proposal_tel
     assert "proposal_too_slow" not in classifications
 
 
-def test_bottleneck_classifier_suppresses_proposal_too_slow_without_total_cycle_telemetry() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_proposal_too_slow_without_total_cycle_telemetry() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -273,9 +257,7 @@ def test_bottleneck_classifier_suppresses_proposal_too_slow_without_total_cycle_
     assert "proposal_too_slow" not in classifications
 
 
-def test_bottleneck_classifier_suppresses_proposal_too_slow_below_threshold() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_proposal_too_slow_below_threshold() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -288,9 +270,7 @@ def test_bottleneck_classifier_suppresses_proposal_too_slow_below_threshold() ->
     assert "proposal_too_slow" not in classifications
 
 
-def test_bottleneck_classifier_suppresses_proposal_too_slow_with_zero_cycle_time() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_proposal_too_slow_with_zero_cycle_time() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -302,9 +282,7 @@ def test_bottleneck_classifier_suppresses_proposal_too_slow_with_zero_cycle_time
     assert "proposal_too_slow" not in classifications
 
 
-def test_bottleneck_classifier_suppresses_proposal_too_slow_for_ar_mode() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_proposal_too_slow_for_ar_mode() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.AR,
         decode_tok_s=22.0,
@@ -316,9 +294,7 @@ def test_bottleneck_classifier_suppresses_proposal_too_slow_for_ar_mode() -> (
     assert "proposal_too_slow" not in classifications
 
 
-def test_bottleneck_classifier_emits_verifier_too_slow_when_dominant_phase() -> (
-    None,
-):
+def test_bottleneck_classifier_emits_verifier_too_slow_when_dominant_phase() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -330,9 +306,7 @@ def test_bottleneck_classifier_emits_verifier_too_slow_when_dominant_phase() -> 
     assert "verifier_too_slow" in classifications
 
 
-def test_bottleneck_classifier_suppresses_verifier_too_slow_without_verification_telemetry() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_verifier_too_slow_without_verification_telemetry() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -344,9 +318,7 @@ def test_bottleneck_classifier_suppresses_verifier_too_slow_without_verification
     assert "verifier_too_slow" not in classifications
 
 
-def test_bottleneck_classifier_suppresses_verifier_too_slow_without_total_cycle_telemetry() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_verifier_too_slow_without_total_cycle_telemetry() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -358,9 +330,7 @@ def test_bottleneck_classifier_suppresses_verifier_too_slow_without_total_cycle_
     assert "verifier_too_slow" not in classifications
 
 
-def test_bottleneck_classifier_suppresses_verifier_too_slow_below_threshold() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_verifier_too_slow_below_threshold() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -373,9 +343,7 @@ def test_bottleneck_classifier_suppresses_verifier_too_slow_below_threshold() ->
     assert "verifier_too_slow" not in classifications
 
 
-def test_bottleneck_classifier_suppresses_verifier_too_slow_with_zero_cycle_time() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_verifier_too_slow_with_zero_cycle_time() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.D3,
         decode_tok_s=24.0,
@@ -387,9 +355,7 @@ def test_bottleneck_classifier_suppresses_verifier_too_slow_with_zero_cycle_time
     assert "verifier_too_slow" not in classifications
 
 
-def test_bottleneck_classifier_suppresses_verifier_too_slow_for_ar_mode() -> (
-    None,
-):
+def test_bottleneck_classifier_suppresses_verifier_too_slow_for_ar_mode() -> None:
     classifications = classify_bottlenecks(
         mode=MimoMtpBenchmarkMode.AR,
         decode_tok_s=22.0,

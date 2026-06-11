@@ -23,7 +23,7 @@ MIMO_MODEL_MARKERS: Final[tuple[str, ...]] = (
 DEFAULT_EXO_URL: Final[str] = "http://127.0.0.1:52415"
 DEFAULT_MIN_AVAILABLE_GIB: Final[int] = 200
 REQUIRED_MIMO_MTP_WORK_BRANCH: Final[str] = (
-    "feature/mimo-v25-pro-mtp-fastpath-single-stream-20260601"
+    "integration/mimo-mtp-direct-20260609T1500Z"
 )
 type JsonObject = Mapping[str, object]
 

@@ -39,7 +39,7 @@ FIXTURE_PATH = (
 
 
 def _load_fixture() -> _FixtureData:
-    raw: object = json.loads(FIXTURE_PATH.read_text())
+    raw = cast(object, json.loads(FIXTURE_PATH.read_text()))
     return cast(_FixtureData, raw)
 
 

@@ -593,9 +593,7 @@ def test_canonical_benchmark_row_contract_rejects_missing_required_field() -> No
     assert validation["invalid_fields"] == []
 
 
-def test_canonical_benchmark_row_contract_rejects_missing_each_required_field() -> (
-    None,
-):
+def test_canonical_benchmark_row_contract_rejects_missing_each_required_field() -> None:
     """Omitting any single required field must make validation fail and list that field as missing."""
     row = cluster_bench.build_cluster_metric_row(
         api_base="http://cluster.example",
@@ -634,9 +632,7 @@ def test_canonical_benchmark_row_contract_rejects_missing_each_required_field() 
         )
 
 
-def test_canonical_benchmark_row_contract_rejects_missing_each_required_one_of_group() -> (
-    None,
-):
+def test_canonical_benchmark_row_contract_rejects_missing_each_required_one_of_group() -> None:
     """Removing all fields in a required-one-of group must make validation fail."""
     row = cluster_bench.build_cluster_metric_row(
         api_base="http://cluster.example",
@@ -3798,9 +3794,7 @@ def test_fail_closed_harness_default_request_omits_mtp_fields(
     assert "mimo_mtp_fail_closed" not in payload
 
 
-def test_harness_live_ar_row_emitted_by_run_cluster_benchmark_passes_canonical_contract() -> (
-    None,
-):
+def test_harness_live_ar_row_emitted_by_run_cluster_benchmark_passes_canonical_contract() -> None:
     """End-to-end: run_cluster_benchmark with a fake available cluster produces a live AR
     metric row that passes validate_canonical_benchmark_row()."""
 
@@ -3859,9 +3853,7 @@ def test_harness_live_ar_row_emitted_by_run_cluster_benchmark_passes_canonical_c
     )
 
 
-def test_harness_live_successful_mtp_row_emitted_by_run_cluster_benchmark_passes_canonical_contract() -> (
-    None,
-):
+def test_harness_live_successful_mtp_row_emitted_by_run_cluster_benchmark_passes_canonical_contract() -> None:
     """End-to-end: run_cluster_benchmark with MTP response carrying successful_mtp
     fastpath telemetry produces a live metric row that passes the canonical contract."""
 
@@ -4044,9 +4036,7 @@ def test_harness_blocked_evidence_row_contains_all_canonical_required_fields() -
         )
 
 
-def test_harness_blocked_evidence_row_for_mtp_mode_contains_all_canonical_required_fields() -> (
-    None,
-):
+def test_harness_blocked_evidence_row_for_mtp_mode_contains_all_canonical_required_fields() -> None:
     """Blocked MTP evidence rows carry every required canonical benchmark row field."""
 
     row = cluster_bench._blocked_evidence_contract(
@@ -4083,9 +4073,7 @@ def test_harness_blocked_evidence_row_for_mtp_mode_contains_all_canonical_requir
         )
 
 
-def test_harness_matrix_command_rows_carry_canonical_mtp_execution_state_fields() -> (
-    None,
-):
+def test_harness_matrix_command_rows_carry_canonical_mtp_execution_state_fields() -> None:
     """Matrix command rows emit mode, mtp_enabled, mtp_depth, mtp_execution_state,
     mtp_disable_reason, and telemetry_completeness matching the canonical contract."""
 

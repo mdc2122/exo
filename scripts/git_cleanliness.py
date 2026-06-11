@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 EXPECTED_MIMO_MTP_WORK_BRANCH: Final[str] = (
-    "feature/mimo-v25-pro-mtp-fastpath-single-stream-20260601"
+    "integration/mimo-mtp-direct-20260609T1500Z"
 )
 
 
