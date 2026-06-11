@@ -44,7 +44,7 @@ from exo.shared.types.chunks import (
     TokenChunk,
     ToolCallChunk,
 )
-from exo.shared.types.common import CommandId
+from exo.shared.types.common import CommandId, ModelId
 from exo.shared.types.text_generation import (
     InputMessage,
     MimoMtpRequestFields,
@@ -767,6 +767,33 @@ def validate_kimi_video_feature_enabled(request: ChatCompletionRequest) -> None:
             "EXO_KIMI_VIDEO_ENABLED=1 only after local smoke checks pass."
         ),
     )
+
+
+# Model-id suffix aliases for thinking mode. Proxies that route by upstream
+# model name only (CLIProxyAPI payload rules match on name, never on alias)
+# use these to select a mode per route. The suffix wins over any
+# enable_thinking already present in the body — upstream injectors have been
+# observed forcing enable_thinking=true onto passthrough requests.
+_THINKING_MODEL_SUFFIXES: tuple[tuple[str, bool], ...] = (
+    (":nothink", False),
+    (":think", True),
+)
+
+
+def normalize_thinking_model_suffix(
+    request: ChatCompletionRequest,
+) -> ChatCompletionRequest:
+    """Resolve ``<model>:nothink`` / ``<model>:think`` request aliases."""
+    model_text = str(request.model)
+    for suffix, thinking_enabled in _THINKING_MODEL_SUFFIXES:
+        if model_text.endswith(suffix):
+            return request.model_copy(
+                update={
+                    "model": ModelId(model_text.removesuffix(suffix)),
+                    "enable_thinking": thinking_enabled,
+                }
+            )
+    return request
 
 
 def _is_mimo_v25_pro_request(request: ChatCompletionRequest) -> bool:

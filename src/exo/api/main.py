@@ -36,6 +36,7 @@ from exo.api.adapters.chat_completions import (
     fetch_image_url,
     generate_chat_stream,
     get_max_video_payload_bytes,
+    normalize_thinking_model_suffix,
 )
 from exo.api.adapters.claude import (
     claude_request_to_text_generation,
@@ -1268,6 +1269,7 @@ class API:
         self, payload: ChatCompletionRequest
     ) -> ChatCompletionResponse | JSONResponse | StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
+        payload = normalize_thinking_model_suffix(payload)
         task_params = await chat_request_to_text_generation(payload)
         resolved_model = await self._resolve_and_validate_text_model(
             ModelId(task_params.model)
