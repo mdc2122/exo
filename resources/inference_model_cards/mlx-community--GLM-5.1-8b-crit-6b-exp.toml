@@ -7,7 +7,7 @@ tasks = ["TextGeneration"]
 family = "glm"
 quantization = "mixed"
 base_model = "GLM-5.1"
-capabilities = ["text", "thinking"]
+capabilities = ["text", "thinking", "thinking_toggle"]
 context_length = 202752
 trust_remote_code = false
 
